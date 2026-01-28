@@ -29,12 +29,17 @@ function detectRageClicks(cotton: Cotton) {
       );
 
       if (allClose) {
-        cotton.track('rage_click', {
+        const rageClickEventDetails = {
           clickCount: clicks.length,
           x: first.x,
           y: first.y,
           element: (event.target as HTMLElement).tagName
-        });
+        };
+
+        // Log the rage click event details to console
+        console.log('[Cotton SDK] Rage click event details:', rageClickEventDetails);
+
+        cotton.track('rage_click', rageClickEventDetails);
         // Reset to avoid double counting
         clicks = [];
       }
@@ -56,9 +61,9 @@ function detectDeadClicks(cotton: Cotton) {
 
     // Dead clicks are interesting on things that *look* inactive or *should* be active but aren't.
     // Or things that are clicked but do nothing.
-    // Let's assume everything is potentially interactive. 
+    // Let's assume everything is potentially interactive.
     // If NO DOM mutation and NO URL change happens in 500ms, it's a "dead click" candidate?
-    // This might be too noisy. 
+    // This might be too noisy.
     // Better definition: User clicks, nothing happens.
 
     const urlBefore = window.location.href;
@@ -82,12 +87,17 @@ function detectDeadClicks(cotton: Cotton) {
         // If it's a "boring" click on empty body space, ignore
         if (target === document.body || target === document.documentElement) return;
 
-        cotton.track('dead_click', {
+        const deadClickEventDetails = {
           element: target.tagName,
           text: target.innerText?.substring(0, 20),
           x: event.clientX,
           y: event.clientY
-        });
+        };
+
+        // Log the dead click event details to console
+        console.log('[Cotton SDK] Dead click event details:', deadClickEventDetails);
+
+        cotton.track('dead_click', deadClickEventDetails);
       }
     }, 500);
 

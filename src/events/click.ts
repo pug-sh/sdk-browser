@@ -3,13 +3,17 @@ import Cotton from '../cotton';
 export function setupClickTracking(cotton: Cotton) {
   window.addEventListener('click', (event) => {
     const target = event.target as HTMLElement;
-    cotton.track('click', {
+    const clickEventDetails = {
       tag: target.tagName,
       id: target.id,
       className: target.className,
-      text: target.innerText?.substring(0, 50), // Truncate text
+      text: target.innerText?.substring(0, 50),
       x: event.clientX,
       y: event.clientY,
-    });
-  }, true); // Capture phase to catch all clicks
+    };
+
+    console.log('[Cotton SDK] Button click event details:', clickEventDetails);
+
+    cotton.track('click', clickEventDetails);
+  }, true);
 }

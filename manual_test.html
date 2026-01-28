@@ -23,12 +23,10 @@
     </form>
 
     <script type="module">
-        // usage example
-        // import { Cotton } from './dist/index.js';
-        // Cotton.init('my-project-id', { endpoint: 'http://localhost:9000' });
-        
-        console.log("To fully test this in browser, we'd need to bundle the CommonJS/TS output or use a module loader.");
-        console.log("Usage: Cotton.init('project_id')");
+        import { Cotton } from './dist/bundle.js';
+        Cotton.init('my-project-id', { endpoint: 'http://localhost:9000' });
+
+        console.log("Cotton SDK initialized!");
     </script>
 </body>
 </html>

@@ -3,7 +3,6 @@ import Cotton from '../cotton';
 export function setupFormTracking(cotton: Cotton) {
   const formsSeen = new WeakSet<HTMLFormElement>();
 
-  // Use capture phase to detect focus/input anywhere
   window.addEventListener('focus', (event) => {
     handleFormInteraction(event.target as HTMLElement, cotton, formsSeen);
   }, true);
@@ -15,24 +14,32 @@ export function setupFormTracking(cotton: Cotton) {
   window.addEventListener('submit', (event) => {
     const form = event.target as HTMLFormElement;
     if (form) {
-      cotton.track('form_submit', {
+      const formSubmitEventDetails = {
         formId: form.id,
         formName: form.name,
         action: form.action
-      });
+      };
+
+      console.log('[Cotton SDK] Form submit event details:', formSubmitEventDetails);
+
+      cotton.track('form_submit', formSubmitEventDetails);
     }
   }, true);
 }
 
 function handleFormInteraction(target: HTMLElement, cotton: Cotton, formsSeen: WeakSet<HTMLFormElement>) {
   if (!target) return;
-  const form = (target as any).form as HTMLFormElement; // Inputs usually have .form property
+  const form = (target as any).form as HTMLFormElement;
 
   if (form && !formsSeen.has(form)) {
     formsSeen.add(form);
-    cotton.track('form_start', {
+    const formStartEventDetails = {
       formId: form.id,
       formName: form.name
-    });
+    };
+
+    console.log('[Cotton SDK] Form start event details:', formStartEventDetails);
+
+    cotton.track('form_start', formStartEventDetails);
   }
 }
