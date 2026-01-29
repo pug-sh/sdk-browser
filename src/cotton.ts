@@ -63,16 +63,20 @@ export function track(eventName: CottonEventName, properties: Record<string, Jso
     return
   }
 
-  const event: EventData = {
-    eventName,
-    properties: {
-      ...properties,
-      projectId: config.projectId,
-      url: window.location.href,
-      referrer: document.referrer,
-      userAgent: navigator.userAgent,
-    },
-    timestamp: Date.now(),
+  try {
+    const event: EventData = {
+      eventName,
+      properties: {
+        ...properties,
+        projectId: config.projectId,
+        url: window.location.href,
+        referrer: document.referrer,
+        userAgent: navigator.userAgent,
+      },
+      timestamp: Date.now(),
+    }
+    transport.send(event).catch(err => console.error(`[Cotton SDK] Failed to send event "${eventName}":`, err))
+  } catch (err) {
+    console.error(`[Cotton SDK] Failed to track event "${eventName}":`, err)
   }
-  transport.send(event).catch(err => console.error(`[Cotton SDK] Failed to send event "${eventName}":`, err))
 }
