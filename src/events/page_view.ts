@@ -1,8 +1,8 @@
-import type { JsonValue } from '../transport.js'
+import type { TrackFn } from '../transport.js'
 
-type TrackFn = (eventName: string, properties?: Record<string, JsonValue>) => void
+export type PageViewEventName = 'page_view'
 
-export function setupPageViewTracking(track: TrackFn) {
+export function setupPageViewTracking(track: TrackFn<PageViewEventName>) {
   track('page_view')
 
   const originalPushState = history.pushState

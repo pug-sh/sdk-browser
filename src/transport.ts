@@ -1,5 +1,7 @@
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 
+export type TrackFn<T extends string = string> = (eventName: T, properties?: Record<string, JsonValue>) => void
+
 export interface EventData {
   eventName: string
   properties: Record<string, JsonValue>

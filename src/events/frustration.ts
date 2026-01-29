@@ -1,13 +1,13 @@
-import type { JsonValue } from '../transport.js'
+import type { TrackFn } from '../transport.js'
 
-type TrackFn = (eventName: string, properties?: Record<string, JsonValue>) => void
+export type FrustrationEventName = 'rage_click' | 'dead_click'
 
-export function setupFrustrationTracking(track: TrackFn) {
+export function setupFrustrationTracking(track: TrackFn<FrustrationEventName>) {
   detectRageClicks(track)
   detectDeadClicks(track)
 }
 
-function detectRageClicks(track: TrackFn) {
+function detectRageClicks(track: TrackFn<FrustrationEventName>) {
   const CLICKS_THRESHOLD = 3
   const TIME_WINDOW = 1000 // ms
   const DISTANCE_THRESHOLD = 40 // pixels
@@ -49,7 +49,7 @@ function detectRageClicks(track: TrackFn) {
   )
 }
 
-function detectDeadClicks(track: TrackFn) {
+function detectDeadClicks(track: TrackFn<FrustrationEventName>) {
   let mutationDetected = false
 
   const observer = new MutationObserver(() => {

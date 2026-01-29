@@ -1,8 +1,8 @@
-import type { JsonValue } from '../transport.js'
+import type { TrackFn } from '../transport.js'
 
-type TrackFn = (eventName: string, properties?: Record<string, JsonValue>) => void
+export type ClickEventName = 'click'
 
-export function setupClickTracking(track: TrackFn) {
+export function setupClickTracking(track: TrackFn<ClickEventName>) {
   window.addEventListener(
     'click',
     event => {

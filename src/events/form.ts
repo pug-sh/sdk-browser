@@ -1,8 +1,8 @@
-import type { JsonValue } from '../transport.js'
+import type { TrackFn } from '../transport.js'
 
-type TrackFn = (eventName: string, properties?: Record<string, JsonValue>) => void
+export type FormEventName = 'form_start' | 'form_submit'
 
-export function setupFormTracking(track: TrackFn) {
+export function setupFormTracking(track: TrackFn<FormEventName>) {
   const formsSeen = new WeakSet<HTMLFormElement>()
 
   window.addEventListener(
@@ -35,7 +35,7 @@ export function setupFormTracking(track: TrackFn) {
   )
 }
 
-function handleFormInteraction(target: HTMLElement, track: TrackFn, formsSeen: WeakSet<HTMLFormElement>) {
+function handleFormInteraction(target: HTMLElement, track: TrackFn<FormEventName>, formsSeen: WeakSet<HTMLFormElement>) {
   const form = (target as HTMLInputElement).form
 
   if (form && !formsSeen.has(form)) {

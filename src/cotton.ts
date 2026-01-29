@@ -1,10 +1,17 @@
-import { setupClickTracking } from './events/click.js'
-import { setupFormTracking } from './events/form.js'
-import { setupFrustrationTracking } from './events/frustration.js'
-import { setupPageViewTracking } from './events/page_view.js'
-import { setupScrollTracking } from './events/scroll.js'
-import type { EventData, JsonValue, Transport } from './transport.js'
-import { createTransport } from './transport.js'
+import { type ClickEventName, setupClickTracking } from './events/click.js'
+import { type FormEventName, setupFormTracking } from './events/form.js'
+import { type FrustrationEventName, setupFrustrationTracking } from './events/frustration.js'
+import { type PageViewEventName, setupPageViewTracking } from './events/page_view.js'
+import { type ScrollEventName, setupScrollTracking } from './events/scroll.js'
+import { type EventData, type JsonValue, type Transport, createTransport } from './transport.js'
+
+export type CottonEventName =
+  | ClickEventName
+  | FormEventName
+  | FrustrationEventName
+  | PageViewEventName
+  | ScrollEventName
+  | (string & {})
 
 export interface CottonConfig {
   readonly endpoint: string
@@ -46,7 +53,7 @@ export function init(projectId: string, options: { endpoint?: string } = {}) {
   }
 }
 
-export function track(eventName: string, properties: Record<string, JsonValue> = {}) {
+export function track(eventName: CottonEventName, properties: Record<string, JsonValue> = {}) {
   if (!initialized) {
     console.warn('Cotton SDK not initialized. Call init() first.')
     return

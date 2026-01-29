@@ -1,8 +1,8 @@
-import type { JsonValue } from '../transport.js'
+import type { TrackFn } from '../transport.js'
 
-type TrackFn = (eventName: string, properties?: Record<string, JsonValue>) => void
+export type ScrollEventName = 'scroll'
 
-export function setupScrollTracking(track: TrackFn) {
+export function setupScrollTracking(track: TrackFn<ScrollEventName>) {
   let timer: ReturnType<typeof setTimeout> | null = null
   // Throttle: captures scroll position at the end of the window, not at the trigger point
   const THROTTLE_MS = 2000
