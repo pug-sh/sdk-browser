@@ -29,11 +29,21 @@ export function init(projectId: string, options: { endpoint?: string } = {}) {
   transport = createTransport(config.endpoint)
   initialized = true
 
-  setupPageViewTracking(track)
-  setupClickTracking(track)
-  setupScrollTracking(track)
-  setupFormTracking(track)
-  setupFrustrationTracking(track)
+  const trackers = [
+    setupPageViewTracking,
+    setupClickTracking,
+    setupScrollTracking,
+    setupFormTracking,
+    setupFrustrationTracking,
+  ]
+
+  for (const setup of trackers) {
+    try {
+      setup(track)
+    } catch (err) {
+      console.error(`[Cotton SDK] Failed to initialize tracker "${setup.name}":`, err)
+    }
+  }
 }
 
 export function track(eventName: string, properties: Record<string, any> = {}) {
