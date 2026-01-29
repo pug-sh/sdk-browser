@@ -10,7 +10,10 @@ export function setupScrollTracking(cotton: Cotton) {
     timer = setTimeout(() => {
       const scrollEventDetails = {
         scrollY: window.scrollY,
-        percent: Math.round((window.scrollY / (document.body.scrollHeight - window.innerHeight)) * 100),
+        percent: (() => {
+          const scrollable = document.body.scrollHeight - window.innerHeight
+          return scrollable > 0 ? Math.round((window.scrollY / scrollable) * 100) : 0
+        })(),
       }
 
       // Log the scroll event details to console
