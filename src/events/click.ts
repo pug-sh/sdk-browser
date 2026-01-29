@@ -1,4 +1,4 @@
-import Cotton from '../cotton'
+import Cotton from '../cotton.js'
 
 export function setupClickTracking(cotton: Cotton) {
   window.addEventListener(

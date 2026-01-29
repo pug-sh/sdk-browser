@@ -1,9 +1,9 @@
-import { Transport, GrpcTransport, EventData } from './transport'
-import { setupPageViewTracking } from './events/page_view'
-import { setupClickTracking } from './events/click'
-import { setupScrollTracking } from './events/scroll'
-import { setupFormTracking } from './events/form'
-import { setupFrustrationTracking } from './events/frustration'
+import { Transport, GrpcTransport, EventData } from './transport.js'
+import { setupPageViewTracking } from './events/page_view.js'
+import { setupClickTracking } from './events/click.js'
+import { setupScrollTracking } from './events/scroll.js'
+import { setupFormTracking } from './events/form.js'
+import { setupFrustrationTracking } from './events/frustration.js'
 
 export interface CottonConfig {
   endpoint: string

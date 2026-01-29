@@ -1,4 +1,4 @@
-import Cotton from '../cotton'
+import Cotton from '../cotton.js'
 
 export function setupFormTracking(cotton: Cotton) {
   const formsSeen = new WeakSet<HTMLFormElement>()

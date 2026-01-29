@@ -1,4 +1,4 @@
-import Cotton from '../cotton'
+import Cotton from '../cotton.js'
 
 export function setupPageViewTracking(cotton: Cotton) {
   // Track initial page load
