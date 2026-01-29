@@ -1,6 +1,8 @@
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
+
 export interface EventData {
   eventName: string
-  properties: Record<string, any>
+  properties: Record<string, JsonValue>
   timestamp: number
 }
 

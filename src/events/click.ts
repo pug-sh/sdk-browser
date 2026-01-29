@@ -1,4 +1,6 @@
-type TrackFn = (eventName: string, properties?: Record<string, any>) => void
+import type { JsonValue } from '../transport.js'
+
+type TrackFn = (eventName: string, properties?: Record<string, JsonValue>) => void
 
 export function setupClickTracking(track: TrackFn) {
   window.addEventListener(
