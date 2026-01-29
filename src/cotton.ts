@@ -89,7 +89,10 @@ export function track(eventName: CottonEventName, properties: Record<string, Jso
       timestamp: Date.now(),
     }
     state.transport.send(event).catch(err => console.error(`[Cotton SDK] Failed to send event "${eventName}":`, err))
-  } catch {
-    // Intentionally empty — track() must never throw
+  } catch (err) {
+    // track() must never throw, but we defensively log the failure
+    if (typeof console !== 'undefined' && typeof console.error === 'function') {
+      console.error(`[Cotton SDK] Unexpected error in track("${eventName}"):`, err)
+    }
   }
 }
