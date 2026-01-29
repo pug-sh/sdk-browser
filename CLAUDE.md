@@ -31,13 +31,13 @@ npm run serve          # Serve static files on port 3000
 
 Each tracker module exports a `setup*Tracking(track: TrackFn<EventName>)` function and a corresponding event name union type. They are called during `init()`, each wrapped in try/catch to isolate failures:
 
-| Module           | Events                      | Notes                                                                                                                                                           |
-| ---------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `page_view.ts`   | `page_view`                 | Patches `history.pushState`/`replaceState`, listens to `popstate`                                                                                               |
-| `click.ts`       | `click`                     | Capture-phase listener; extracts tag, id, className, text, coordinates                                                                                          |
-| `scroll.ts`      | `scroll`                    | Throttled (2s); samples scroll depth at timer expiry                                                                                                            |
-| `form.ts`        | `form_start`, `form_submit` | Uses `WeakSet` to deduplicate; listens to input/submit                                                                                                          |
-| `frustration.ts` | `rage_click`, `dead_click`  | Rage: 3+ clicks in 1s within 40px, 1s cooldown after firing; Dead: no DOM mutation or URL change within 500ms (uses mutation counter for per-click isolation)   |
+| Module           | Events                      | Notes                                                                                                                                                         |
+| ---------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `page_view.ts`   | `page_view`                 | Patches `history.pushState`/`replaceState`, listens to `popstate`                                                                                             |
+| `click.ts`       | `click`                     | Capture-phase listener; extracts tag, id, className, text, coordinates                                                                                        |
+| `scroll.ts`      | `scroll`                    | Throttled (2s); samples scroll depth at timer expiry                                                                                                          |
+| `form.ts`        | `form_start`, `form_submit` | Uses `WeakSet` to deduplicate; listens to input/submit                                                                                                        |
+| `frustration.ts` | `rage_click`, `dead_click`  | Rage: 3+ clicks in 1s within 40px, 1s cooldown after firing; Dead: no DOM mutation or URL change within 500ms (uses mutation counter for per-click isolation) |
 
 ### Key Pattern
 
