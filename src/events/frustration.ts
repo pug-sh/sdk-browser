@@ -1,11 +1,11 @@
-import Cotton from '../cotton.js'
+type TrackFn = (eventName: string, properties?: Record<string, any>) => void
 
-export function setupFrustrationTracking(cotton: Cotton) {
-  detectRageClicks(cotton)
-  detectDeadClicks(cotton)
+export function setupFrustrationTracking(track: TrackFn) {
+  detectRageClicks(track)
+  detectDeadClicks(track)
 }
 
-function detectRageClicks(cotton: Cotton) {
+function detectRageClicks(track: TrackFn) {
   const CLICKS_THRESHOLD = 3
   const TIME_WINDOW = 1000 // ms
   const DISTANCE_THRESHOLD = 40 // pixels
@@ -25,7 +25,9 @@ function detectRageClicks(cotton: Cotton) {
       if (clicks.length >= CLICKS_THRESHOLD) {
         // Check if all clicks are close to each other
         const first = clicks[0]
-        const allClose = clicks.every(c => Math.abs(c.x - first.x) < DISTANCE_THRESHOLD && Math.abs(c.y - first.y) < DISTANCE_THRESHOLD)
+        const allClose = clicks.every(
+          c => Math.abs(c.x - first.x) < DISTANCE_THRESHOLD && Math.abs(c.y - first.y) < DISTANCE_THRESHOLD
+        )
 
         if (allClose) {
           const rageClickEventDetails = {
@@ -38,7 +40,7 @@ function detectRageClicks(cotton: Cotton) {
           // Log the rage click event details to console
           console.log('[Cotton SDK] Rage click event details:', rageClickEventDetails)
 
-          cotton.track('rage_click', rageClickEventDetails)
+          track('rage_click', rageClickEventDetails)
           // Reset to avoid double counting
           clicks = []
         }
@@ -48,7 +50,7 @@ function detectRageClicks(cotton: Cotton) {
   )
 }
 
-function detectDeadClicks(cotton: Cotton) {
+function detectDeadClicks(track: TrackFn) {
   // A dead click is a click that has no effect (no visual change, no navigation)
   // We'll use specific heuristics:
   // 1. Click on non-interactive element? (hard to detect universally without access to computed styles simply)
@@ -97,7 +99,7 @@ function detectDeadClicks(cotton: Cotton) {
           // Log the dead click event details to console
           console.log('[Cotton SDK] Dead click event details:', deadClickEventDetails)
 
-          cotton.track('dead_click', deadClickEventDetails)
+          track('dead_click', deadClickEventDetails)
         }
       }, 500)
     },

@@ -1,3 +1,4 @@
-export { default as Cotton } from './cotton.js'
-export { CottonConfig } from './cotton.js'
-export { Transport, EventData, GrpcTransport } from './transport.js'
+export { init, track } from './cotton.js'
+export type { CottonConfig } from './cotton.js'
+export type { Transport, EventData } from './transport.js'
+export { createTransport } from './transport.js'

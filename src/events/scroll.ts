@@ -1,6 +1,6 @@
-import Cotton from '../cotton.js'
+type TrackFn = (eventName: string, properties?: Record<string, any>) => void
 
-export function setupScrollTracking(cotton: Cotton) {
+export function setupScrollTracking(track: TrackFn) {
   let timer: any = null
   const THROTTLE_MS = 2000 // Track at most every 2 seconds
 
@@ -8,18 +8,16 @@ export function setupScrollTracking(cotton: Cotton) {
     if (timer) return
 
     timer = setTimeout(() => {
+      const scrollable = document.body.scrollHeight - window.innerHeight
       const scrollEventDetails = {
         scrollY: window.scrollY,
-        percent: (() => {
-          const scrollable = document.body.scrollHeight - window.innerHeight
-          return scrollable > 0 ? Math.round((window.scrollY / scrollable) * 100) : 0
-        })(),
+        percent: scrollable > 0 ? Math.round((window.scrollY / scrollable) * 100) : 0,
       }
 
       // Log the scroll event details to console
       console.log('[Cotton SDK] Scroll event details:', scrollEventDetails)
 
-      cotton.track('scroll', scrollEventDetails)
+      track('scroll', scrollEventDetails)
       timer = null
     }, THROTTLE_MS)
   })

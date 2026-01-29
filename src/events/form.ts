@@ -1,11 +1,11 @@
-import Cotton from '../cotton.js'
+type TrackFn = (eventName: string, properties?: Record<string, any>) => void
 
-export function setupFormTracking(cotton: Cotton) {
+export function setupFormTracking(track: TrackFn) {
   const formsSeen = new WeakSet<HTMLFormElement>()
 
-  window.addEventListener('focus', event => handleFormInteraction(event.target as HTMLElement, cotton, formsSeen), true)
+  window.addEventListener('focus', event => handleFormInteraction(event.target as HTMLElement, track, formsSeen), true)
 
-  window.addEventListener('input', event => handleFormInteraction(event.target as HTMLElement, cotton, formsSeen), true)
+  window.addEventListener('input', event => handleFormInteraction(event.target as HTMLElement, track, formsSeen), true)
 
   window.addEventListener(
     'submit',
@@ -20,14 +20,14 @@ export function setupFormTracking(cotton: Cotton) {
 
         console.log('[Cotton SDK] Form submit event details:', formSubmitEventDetails)
 
-        cotton.track('form_submit', formSubmitEventDetails)
+        track('form_submit', formSubmitEventDetails)
       }
     },
     true
   )
 }
 
-function handleFormInteraction(target: HTMLElement, cotton: Cotton, formsSeen: WeakSet<HTMLFormElement>) {
+function handleFormInteraction(target: HTMLElement, track: TrackFn, formsSeen: WeakSet<HTMLFormElement>) {
   if (!target) return
   const form = (target as any).form as HTMLFormElement
 
@@ -40,6 +40,6 @@ function handleFormInteraction(target: HTMLElement, cotton: Cotton, formsSeen: W
 
     console.log('[Cotton SDK] Form start event details:', formStartEventDetails)
 
-    cotton.track('form_start', formStartEventDetails)
+    track('form_start', formStartEventDetails)
   }
 }

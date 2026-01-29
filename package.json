@@ -7,7 +7,8 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
-    "serve": "serve . --open"
+    "dev": "tsc -w & serve . & sleep 1 && open http://localhost:3000 && wait",
+    "serve": "serve . & sleep 1 && open http://localhost:3000 && wait"
   },
   "keywords": [
     "analytics",

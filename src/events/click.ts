@@ -1,6 +1,6 @@
-import Cotton from '../cotton.js'
+type TrackFn = (eventName: string, properties?: Record<string, any>) => void
 
-export function setupClickTracking(cotton: Cotton) {
+export function setupClickTracking(track: TrackFn) {
   window.addEventListener(
     'click',
     event => {
@@ -16,7 +16,7 @@ export function setupClickTracking(cotton: Cotton) {
 
       console.log('[Cotton SDK] Button click event details:', clickEventDetails)
 
-      cotton.track('click', clickEventDetails)
+      track('click', clickEventDetails)
     },
     true
   )
