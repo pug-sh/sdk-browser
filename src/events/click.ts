@@ -2,7 +2,7 @@ import type { TrackFn } from '../transport.js'
 
 export type ClickEventName = 'click'
 
-export function setupClickTracking(track: TrackFn<ClickEventName>): () => void {
+export function setupClickTracking(track: TrackFn<ClickEventName>) {
   const onClick = (event: MouseEvent) => {
     if (!event.target) {
       return

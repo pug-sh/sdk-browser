@@ -14,7 +14,7 @@ export interface Transport {
 }
 
 // Mock transport for development - replace with ConnectRPC client
-export function createTransport(endpoint: string): Transport {
+export function createTransport(endpoint: string) {
   console.log(`Initialized mock transport to ${endpoint}`)
   return {
     async send(event: EventData) {

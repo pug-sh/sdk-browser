@@ -2,7 +2,7 @@ import type { TrackFn } from '../transport.js'
 
 export type FrustrationEventName = 'rage_click' | 'dead_click'
 
-export function setupFrustrationTracking(track: TrackFn<FrustrationEventName>): () => void {
+export function setupFrustrationTracking(track: TrackFn<FrustrationEventName>) {
   const cleanupRage = detectRageClicks(track)
   const cleanupDead = detectDeadClicks(track)
 

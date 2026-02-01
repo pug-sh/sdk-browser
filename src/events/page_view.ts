@@ -2,28 +2,33 @@ import type { TrackFn } from '../transport.js'
 
 export type PageViewEventName = 'page_view'
 
-export function setupPageViewTracking(track: TrackFn<PageViewEventName>): () => void {
+let patched = false
+
+export function setupPageViewTracking(track: TrackFn<PageViewEventName>) {
   track('page_view')
 
-  let active = true
+  if (!patched) {
+    patched = true
 
-  const originalPushState = history.pushState
-  history.pushState = function (...args) {
-    originalPushState.apply(this, args)
-    if (active) track('page_view')
+    const originalPushState = history.pushState
+    history.pushState = function (...args) {
+      originalPushState.apply(this, args)
+      window.dispatchEvent(new Event('cotton:navigation'))
+    }
+
+    const originalReplaceState = history.replaceState
+    history.replaceState = function (...args) {
+      originalReplaceState.apply(this, args)
+      window.dispatchEvent(new Event('cotton:navigation'))
+    }
   }
 
-  const originalReplaceState = history.replaceState
-  history.replaceState = function (...args) {
-    originalReplaceState.apply(this, args)
-    if (active) track('page_view')
-  }
-
-  const onPopState = () => track('page_view')
-  window.addEventListener('popstate', onPopState)
+  const onNav = () => track('page_view')
+  window.addEventListener('cotton:navigation', onNav)
+  window.addEventListener('popstate', onNav)
 
   return () => {
-    active = false
-    window.removeEventListener('popstate', onPopState)
+    window.removeEventListener('cotton:navigation', onNav)
+    window.removeEventListener('popstate', onNav)
   }
 }
