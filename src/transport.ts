@@ -10,6 +10,7 @@ export interface EventData {
 
 export interface Transport {
   send(event: EventData): Promise<void>
+  destroy?(): void
 }
 
 // Mock transport for development - replace with ConnectRPC client
