@@ -139,11 +139,15 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
     return inner
   }
 
+  const MAX_RETRIES = 5
+  const BASE_BACKOFF_MS = 1000
+
   const storage = config.storage ?? createDefaultQueueStorage(config.storageKey ?? '__cotton_queue__', config.maxQueueSize)
   let timer: ReturnType<typeof setTimeout> | null = null
   let flushing = false
   let flushPending = false
   let destroyed = false
+  let retryCount = 0
 
   function clearTimer(): void {
     if (timer !== null) {
@@ -180,9 +184,18 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
     flushing = true
 
     sendEvents(batch)
+      .then(() => {
+        retryCount = 0
+      })
       .catch((err) => {
         console.error('[Cotton SDK] Failed to send batch:', err)
         if (!destroyed) {
+          retryCount++
+          if (retryCount > MAX_RETRIES) {
+            console.warn('[Cotton SDK] Max retries reached, dropping batch')
+            retryCount = 0
+            return
+          }
           const newer = storage.drain()
           for (const event of batch) {
             storage.push(event)
@@ -195,7 +208,15 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
       .finally(() => {
         flushing = false
         if (destroyed) return
-        if (flushPending || storage.size >= config.maxSize) {
+        if (retryCount > 0 && storage.size > 0) {
+          // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+          const delay = BASE_BACKOFF_MS * Math.pow(2, retryCount - 1)
+          clearTimer()
+          timer = setTimeout(() => {
+            timer = null
+            flush()
+          }, delay)
+        } else if (flushPending || storage.size >= config.maxSize) {
           flushPending = false
           flush()
         } else if (storage.size > 0) {
