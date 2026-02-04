@@ -2,9 +2,7 @@ import type { EventData, Transport } from './transport.js'
 
 export interface QueueStorage {
   push(event: EventData): void
-  peek(): readonly EventData[]
   drain(): readonly EventData[]
-  shift(count: number): void
   readonly size: number
 }
 
@@ -21,24 +19,22 @@ function isLocalStorageAvailable(): boolean {
 
 export function createMemoryQueueStorage(maxQueueSize: number): QueueStorage {
   let buffer: EventData[] = []
+  let warnedQueueFull = false
   return {
     push(event: EventData) {
       if (buffer.length >= maxQueueSize) {
         buffer.shift()
-        console.warn('[Cotton SDK] Queue full, dropping oldest event')
+        if (!warnedQueueFull) {
+          console.warn('[Cotton SDK] Queue full, dropping oldest events')
+          warnedQueueFull = true
+        }
       }
       buffer.push(event)
-    },
-    peek(): readonly EventData[] {
-      return buffer.slice()
     },
     drain(): readonly EventData[] {
       const batch = buffer
       buffer = []
       return batch
-    },
-    shift(count: number): void {
-      buffer.splice(0, count)
     },
     get size(): number {
       return buffer.length
@@ -89,18 +85,20 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
     }
   }
 
+  let warnedQueueFull = false
+
   return {
     push(event: EventData) {
       if (buffer.length >= maxQueueSize) {
         buffer.shift()
-        console.warn('[Cotton SDK] Queue full, dropping oldest event')
+        if (!warnedQueueFull) {
+          console.warn('[Cotton SDK] Queue full, dropping oldest events')
+          warnedQueueFull = true
+        }
       }
       buffer.push(event)
       dirty = true
       schedulePersist()
-    },
-    peek(): readonly EventData[] {
-      return buffer.slice()
     },
     drain(): readonly EventData[] {
       clearSyncTimer()
@@ -109,11 +107,6 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
       dirty = true
       persist()
       return batch
-    },
-    shift(count: number): void {
-      buffer.splice(0, count)
-      dirty = true
-      persist()
     },
     get size(): number {
       return buffer.length
@@ -131,10 +124,11 @@ export interface BatchConfig {
   readonly maxSize: number
   readonly maxWaitMs: number
   readonly maxQueueSize: number
+  readonly storageKey?: string
   readonly storage?: QueueStorage
 }
 
-export const DEFAULT_BATCH_CONFIG: Omit<BatchConfig, 'storage'> = {
+export const DEFAULT_BATCH_CONFIG: Omit<BatchConfig, 'storage' | 'storageKey'> = {
   maxSize: 10,
   maxWaitMs: 5000,
   maxQueueSize: 1000,
@@ -145,7 +139,7 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
     return inner
   }
 
-  const storage = config.storage ?? createDefaultQueueStorage('__cotton_queue__', config.maxQueueSize)
+  const storage = config.storage ?? createDefaultQueueStorage(config.storageKey ?? '__cotton_queue__', config.maxQueueSize)
   let timer: ReturnType<typeof setTimeout> | null = null
   let flushing = false
   let flushPending = false
@@ -189,7 +183,11 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
       .catch((err) => {
         console.error('[Cotton SDK] Failed to send batch:', err)
         if (!destroyed) {
+          const newer = storage.drain()
           for (const event of batch) {
+            storage.push(event)
+          }
+          for (const event of newer) {
             storage.push(event)
           }
         }

@@ -55,6 +55,7 @@ export function init(projectId: string, options: { endpoint?: string; batch?: bo
     if (merged.maxQueueSize < 1) console.warn('[Cotton SDK] batch.maxQueueSize must be >= 1, using default.')
     const batchConfig: BatchConfig = {
       ...merged,
+      storageKey: `__cotton_queue_${projectId}__`,
       maxSize: merged.maxSize >= 1 ? merged.maxSize : DEFAULT_BATCH_CONFIG.maxSize,
       maxWaitMs: merged.maxWaitMs >= 0 ? merged.maxWaitMs : DEFAULT_BATCH_CONFIG.maxWaitMs,
       maxQueueSize: merged.maxQueueSize >= 1 ? merged.maxQueueSize : DEFAULT_BATCH_CONFIG.maxQueueSize,
