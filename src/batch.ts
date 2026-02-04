@@ -6,6 +6,17 @@ export interface QueueStorage {
   readonly size: number
 }
 
+function isLocalStorageAvailable(): boolean {
+  try {
+    const testKey = '__cotton_ls_test__'
+    localStorage.setItem(testKey, '1')
+    localStorage.removeItem(testKey)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function createMemoryQueueStorage(): QueueStorage {
   let buffer: EventData[] = []
   return {
@@ -23,6 +34,51 @@ export function createMemoryQueueStorage(): QueueStorage {
   }
 }
 
+export function createLocalStorageQueueStorage(key: string): QueueStorage {
+  function read(): EventData[] {
+    try {
+      const raw = localStorage.getItem(key)
+      return raw ? (JSON.parse(raw) as EventData[]) : []
+    } catch {
+      return []
+    }
+  }
+
+  function write(events: EventData[]): void {
+    try {
+      if (events.length === 0) {
+        localStorage.removeItem(key)
+      } else {
+        localStorage.setItem(key, JSON.stringify(events))
+      }
+    } catch {
+      // localStorage full or unavailable
+    }
+  }
+
+  return {
+    push(event: EventData) {
+      const events = read()
+      events.push(event)
+      write(events)
+    },
+    drain(): EventData[] {
+      const events = read()
+      write([])
+      return events
+    },
+    get size(): number {
+      return read().length
+    },
+  }
+}
+
+export function createDefaultQueueStorage(key: string): QueueStorage {
+  return isLocalStorageAvailable()
+    ? createLocalStorageQueueStorage(key)
+    : createMemoryQueueStorage()
+}
+
 export interface BatchConfig {
   readonly maxSize: number
   readonly maxWaitMs: number
@@ -35,7 +91,7 @@ export const DEFAULT_BATCH_CONFIG: Omit<BatchConfig, 'storage'> = {
 }
 
 export function createBatchedTransport(inner: Transport, config: BatchConfig): Transport {
-  const storage = config.storage ?? createMemoryQueueStorage()
+  const storage = config.storage ?? createDefaultQueueStorage('__cotton_queue__')
   let timer: ReturnType<typeof setTimeout> | null = null
 
   function clearTimer(): void {
