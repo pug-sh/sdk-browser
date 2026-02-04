@@ -1,3 +1,3 @@
 export { destroy, init, track, type CottonConfig, type CottonEventName } from './cotton.js'
 export { createTransport, type EventData, type JsonValue, type TrackFn, type Transport } from './transport.js'
-export { createBatchedTransport, createDefaultQueueStorage, createLocalStorageQueueStorage, createMemoryQueueStorage, DEFAULT_BATCH_CONFIG, type BatchConfig, type QueueStorage } from './batch.js'
+export { createBatchedTransport, type BatchConfig, type QueueStorage } from './batch.js'

@@ -1,9 +1,9 @@
+import { type BatchConfig, DEFAULT_BATCH_CONFIG, createBatchedTransport } from './batch.js'
 import { type ClickEventName, setupClickTracking } from './events/click.js'
 import { type FormEventName, setupFormTracking } from './events/form.js'
 import { type DeadClickEventName, type RageClickEventName, setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
 import { type PageViewEventName, setupPageViewTracking } from './events/page_view.js'
 import { type ScrollEventName, setupScrollTracking } from './events/scroll.js'
-import { type BatchConfig, DEFAULT_BATCH_CONFIG, createBatchedTransport } from './batch.js'
 import { type EventData, type JsonValue, type Transport, createTransport } from './transport.js'
 
 export type CottonEventName =
@@ -47,10 +47,22 @@ export function init(projectId: string, options: { endpoint?: string; batch?: bo
   cleanups = []
   let transport: Transport = createTransport(config.endpoint)
   if (options.batch) {
-    const batchConfig: BatchConfig =
+    let batchConfig: BatchConfig =
       typeof options.batch === 'object'
         ? { ...DEFAULT_BATCH_CONFIG, ...options.batch }
-        : { ...DEFAULT_BATCH_CONFIG }
+        : DEFAULT_BATCH_CONFIG
+    if (batchConfig.maxSize < 1) {
+      console.warn('[Cotton SDK] batch.maxSize must be >= 1, using default.')
+      batchConfig = { ...batchConfig, maxSize: DEFAULT_BATCH_CONFIG.maxSize }
+    }
+    if (batchConfig.maxWaitMs < 0) {
+      console.warn('[Cotton SDK] batch.maxWaitMs must be >= 0, using default.')
+      batchConfig = { ...batchConfig, maxWaitMs: DEFAULT_BATCH_CONFIG.maxWaitMs }
+    }
+    if (batchConfig.maxQueueSize < 1) {
+      console.warn('[Cotton SDK] batch.maxQueueSize must be >= 1, using default.')
+      batchConfig = { ...batchConfig, maxQueueSize: DEFAULT_BATCH_CONFIG.maxQueueSize }
+    }
     transport = createBatchedTransport(transport, batchConfig)
   }
   state = { config, transport }
