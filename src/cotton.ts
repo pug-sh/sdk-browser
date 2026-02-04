@@ -47,21 +47,17 @@ export function init(projectId: string, options: { endpoint?: string; batch?: bo
   cleanups = []
   let transport: Transport = createTransport(config.endpoint)
   if (options.batch) {
-    let batchConfig: BatchConfig =
-      typeof options.batch === 'object'
-        ? { ...DEFAULT_BATCH_CONFIG, ...options.batch }
-        : DEFAULT_BATCH_CONFIG
-    if (batchConfig.maxSize < 1) {
-      console.warn('[Cotton SDK] batch.maxSize must be >= 1, using default.')
-      batchConfig = { ...batchConfig, maxSize: DEFAULT_BATCH_CONFIG.maxSize }
-    }
-    if (batchConfig.maxWaitMs < 0) {
-      console.warn('[Cotton SDK] batch.maxWaitMs must be >= 0, using default.')
-      batchConfig = { ...batchConfig, maxWaitMs: DEFAULT_BATCH_CONFIG.maxWaitMs }
-    }
-    if (batchConfig.maxQueueSize < 1) {
-      console.warn('[Cotton SDK] batch.maxQueueSize must be >= 1, using default.')
-      batchConfig = { ...batchConfig, maxQueueSize: DEFAULT_BATCH_CONFIG.maxQueueSize }
+    const merged = typeof options.batch === 'object'
+      ? { ...DEFAULT_BATCH_CONFIG, ...options.batch }
+      : DEFAULT_BATCH_CONFIG
+    if (merged.maxSize < 1) console.warn('[Cotton SDK] batch.maxSize must be >= 1, using default.')
+    if (merged.maxWaitMs < 0) console.warn('[Cotton SDK] batch.maxWaitMs must be >= 0, using default.')
+    if (merged.maxQueueSize < 1) console.warn('[Cotton SDK] batch.maxQueueSize must be >= 1, using default.')
+    const batchConfig: BatchConfig = {
+      ...merged,
+      maxSize: merged.maxSize >= 1 ? merged.maxSize : DEFAULT_BATCH_CONFIG.maxSize,
+      maxWaitMs: merged.maxWaitMs >= 0 ? merged.maxWaitMs : DEFAULT_BATCH_CONFIG.maxWaitMs,
+      maxQueueSize: merged.maxQueueSize >= 1 ? merged.maxQueueSize : DEFAULT_BATCH_CONFIG.maxQueueSize,
     }
     transport = createBatchedTransport(transport, batchConfig)
   }

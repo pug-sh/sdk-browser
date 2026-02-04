@@ -47,52 +47,76 @@ export function createMemoryQueueStorage(maxQueueSize: number): QueueStorage {
 }
 
 export function createLocalStorageQueueStorage(key: string, maxQueueSize: number): QueueStorage {
-  function read(): EventData[] {
-    try {
-      const raw = localStorage.getItem(key)
-      return raw ? (JSON.parse(raw) as EventData[]) : []
-    } catch {
-      return []
-    }
-  }
+  const SYNC_INTERVAL = 2000
+  let syncTimer: ReturnType<typeof setTimeout> | null = null
 
-  function write(events: EventData[]): void {
+  // Hydrate from localStorage once; memory is the source of truth from here on
+  let buffer: EventData[]
+  try {
+    const raw = localStorage.getItem(key)
+    buffer = raw ? (JSON.parse(raw) as EventData[]) : []
+  } catch {
+    buffer = []
+  }
+  let dirty = false
+
+  function persist(): void {
+    if (!dirty) return
     try {
-      if (events.length === 0) {
+      if (buffer.length === 0) {
         localStorage.removeItem(key)
       } else {
-        localStorage.setItem(key, JSON.stringify(events))
+        localStorage.setItem(key, JSON.stringify(buffer))
       }
+      dirty = false
     } catch {
       console.warn('[Cotton SDK] localStorage write failed, events may be lost')
     }
   }
 
+  function schedulePersist(): void {
+    if (syncTimer !== null) return
+    syncTimer = setTimeout(() => {
+      syncTimer = null
+      persist()
+    }, SYNC_INTERVAL)
+  }
+
+  function clearSyncTimer(): void {
+    if (syncTimer !== null) {
+      clearTimeout(syncTimer)
+      syncTimer = null
+    }
+  }
+
   return {
     push(event: EventData) {
-      const events = read()
-      if (events.length >= maxQueueSize) {
-        events.shift()
+      if (buffer.length >= maxQueueSize) {
+        buffer.shift()
         console.warn('[Cotton SDK] Queue full, dropping oldest event')
       }
-      events.push(event)
-      write(events)
+      buffer.push(event)
+      dirty = true
+      schedulePersist()
     },
     peek(): readonly EventData[] {
-      return read()
+      return buffer.slice()
     },
     drain(): readonly EventData[] {
-      const events = read()
-      write([])
-      return events
+      clearSyncTimer()
+      const batch = buffer
+      buffer = []
+      dirty = true
+      persist()
+      return batch
     },
     shift(count: number): void {
-      const events = read()
-      events.splice(0, count)
-      write(events)
+      buffer.splice(0, count)
+      dirty = true
+      persist()
     },
     get size(): number {
-      return read().length
+      return buffer.length
     },
   }
 }
@@ -124,6 +148,8 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
   const storage = config.storage ?? createDefaultQueueStorage('__cotton_queue__', config.maxQueueSize)
   let timer: ReturnType<typeof setTimeout> | null = null
   let flushing = false
+  let flushPending = false
+  let destroyed = false
 
   function clearTimer(): void {
     if (timer !== null) {
@@ -140,30 +166,39 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
     }, config.maxWaitMs)
   }
 
+  function sendEvents(batch: readonly EventData[]): Promise<void | void[]> {
+    return inner.sendBatch
+      ? inner.sendBatch(batch)
+      : Promise.all(batch.map((event) => inner.send(event)))
+  }
+
   // TODO: Use navigator.sendBeacon once ConnectRPC transport is wired in
   function flush(): void {
-    if (flushing) return
+    if (destroyed) return
+    if (flushing) {
+      flushPending = true
+      return
+    }
     clearTimer()
-    const batch = storage.peek()
+    const batch = storage.drain()
     if (batch.length === 0) return
 
     flushing = true
-    const batchSize = batch.length
 
-    const sendPromise = inner.sendBatch
-      ? inner.sendBatch(batch)
-      : Promise.all(batch.map((event) => inner.send(event)))
-
-    sendPromise
-      .then(() => {
-        storage.shift(batchSize)
-      })
+    sendEvents(batch)
       .catch((err) => {
         console.error('[Cotton SDK] Failed to send batch:', err)
+        if (!destroyed) {
+          for (const event of batch) {
+            storage.push(event)
+          }
+        }
       })
       .finally(() => {
         flushing = false
-        if (storage.size >= config.maxSize) {
+        if (destroyed) return
+        if (flushPending || storage.size >= config.maxSize) {
+          flushPending = false
           flush()
         } else if (storage.size > 0) {
           scheduleFlush()
@@ -191,25 +226,17 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
     },
 
     destroy(): void {
+      destroyed = true
       clearTimer()
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('pagehide', flush)
-      flushing = false
 
       // TODO: Use navigator.sendBeacon once ConnectRPC transport is wired in
       const remaining = storage.drain()
       if (remaining.length > 0) {
-        if (inner.sendBatch) {
-          inner.sendBatch(remaining).catch((err) =>
-            console.error('[Cotton SDK] Failed to send remaining batch on destroy:', err),
-          )
-        } else {
-          for (const event of remaining) {
-            inner.send(event).catch((err) =>
-              console.error(`[Cotton SDK] Failed to send event "${event.eventName}" on destroy:`, err),
-            )
-          }
-        }
+        sendEvents(remaining).catch((err) =>
+          console.error('[Cotton SDK] Failed to send remaining batch on destroy:', err),
+        )
       }
 
       inner.destroy?.()
