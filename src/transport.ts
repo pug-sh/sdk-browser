@@ -10,6 +10,7 @@ export interface EventData {
 
 export interface Transport {
   send(event: EventData): Promise<void>
+  sendBatch?(events: readonly EventData[]): Promise<void>
   destroy?(): void
 }
 

@@ -3,6 +3,7 @@ import { type FormEventName, setupFormTracking } from './events/form.js'
 import { type DeadClickEventName, type RageClickEventName, setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
 import { type PageViewEventName, setupPageViewTracking } from './events/page_view.js'
 import { type ScrollEventName, setupScrollTracking } from './events/scroll.js'
+import { type BatchConfig, DEFAULT_BATCH_CONFIG, createBatchedTransport } from './batch.js'
 import { type EventData, type JsonValue, type Transport, createTransport } from './transport.js'
 
 export type CottonEventName =
@@ -27,7 +28,7 @@ interface CottonState {
 let state: CottonState | null = null
 let cleanups: { name: string; fn: () => void }[] = []
 
-export function init(projectId: string, options: { endpoint?: string } = {}) {
+export function init(projectId: string, options: { endpoint?: string; batch?: boolean | Partial<BatchConfig> } = {}) {
   if (typeof window === 'undefined') {
     console.warn('[Cotton SDK] init() called in a non-browser environment, skipping.')
     return
@@ -44,7 +45,15 @@ export function init(projectId: string, options: { endpoint?: string } = {}) {
   }
 
   cleanups = []
-  state = { config, transport: createTransport(config.endpoint) }
+  let transport: Transport = createTransport(config.endpoint)
+  if (options.batch) {
+    const batchConfig: BatchConfig =
+      typeof options.batch === 'object'
+        ? { ...DEFAULT_BATCH_CONFIG, ...options.batch }
+        : { ...DEFAULT_BATCH_CONFIG }
+    transport = createBatchedTransport(transport, batchConfig)
+  }
+  state = { config, transport }
 
   const trackers = [
     setupPageViewTracking,
