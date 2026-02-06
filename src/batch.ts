@@ -4,7 +4,7 @@ export interface QueueStorage {
   push(event: EventData): void
   lock(): readonly EventData[]
   unlock(): void
-  drop(count: number): void
+  dropLocked(): void
   drain(): readonly EventData[]
   readonly size: number
 }
@@ -28,6 +28,7 @@ export function createMemoryQueueStorage(maxQueueSize: number): QueueStorage {
     push(event: EventData) {
       if (buffer.length >= maxQueueSize) {
         buffer.shift()
+        if (locked > 0) locked--
         if (!warnedQueueFull) {
           console.warn('[Cotton SDK] Queue full, dropping oldest events')
           warnedQueueFull = true
@@ -43,9 +44,9 @@ export function createMemoryQueueStorage(maxQueueSize: number): QueueStorage {
     unlock(): void {
       locked = 0
     },
-    drop(count: number): void {
-      buffer.splice(0, count)
-      locked = Math.max(0, locked - count)
+    dropLocked(): void {
+      buffer.splice(0, locked)
+      locked = 0
     },
     drain(): readonly EventData[] {
       const unlocked = buffer.slice(locked)
@@ -80,6 +81,15 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
     }
   }
 
+  let persistTimer: ReturnType<typeof setTimeout> | null = null
+  function debouncedPersist(): void {
+    if (persistTimer !== null) return
+    persistTimer = setTimeout(() => {
+      persistTimer = null
+      persist()
+    }, 1000)
+  }
+
   let locked = 0
   let warnedQueueFull = false
 
@@ -87,13 +97,14 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
     push(event: EventData) {
       if (buffer.length >= maxQueueSize) {
         buffer.shift()
+        if (locked > 0) locked--
         if (!warnedQueueFull) {
           console.warn('[Cotton SDK] Queue full, dropping oldest events')
           warnedQueueFull = true
         }
       }
       buffer.push(event)
-      persist()
+      debouncedPersist()
     },
     lock(): readonly EventData[] {
       if (locked > 0) return []
@@ -103,9 +114,9 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
     unlock(): void {
       locked = 0
     },
-    drop(count: number): void {
-      buffer.splice(0, count)
-      locked = Math.max(0, locked - count)
+    dropLocked(): void {
+      buffer.splice(0, locked)
+      locked = 0
       persist()
     },
     drain(): readonly EventData[] {
@@ -184,11 +195,10 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
     if (batch.length === 0) return
 
     flushing = true
-    const batchSize = batch.length
 
     sendEvents(batch)
       .then(() => {
-        storage.drop(batchSize)
+        storage.dropLocked()
       })
       .catch((err) => {
         storage.unlock()

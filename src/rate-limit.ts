@@ -20,13 +20,6 @@ export function createRateLimitedTransport(inner: Transport, maxPerSecond: numbe
       if (!tryConsume()) return
       return inner.send(event, options)
     },
-    sendBatch: inner.sendBatch
-      ? (events: readonly EventData[]) => {
-          const allowed = events.filter(() => tryConsume())
-          if (allowed.length === 0) return Promise.resolve()
-          return inner.sendBatch!(allowed)
-        }
-      : undefined,
     destroy(): void {
       inner.destroy?.()
     },

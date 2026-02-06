@@ -1,6 +1,12 @@
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 
-export type TrackFn<T extends string = string> = (eventName: T, properties?: Record<string, JsonValue>) => void
+export interface TrackOptions {
+  readonly immediate?: boolean
+  /** Probability (0–1) that this event is sent. Defaults to 1 (always send). */
+  readonly sampleRate?: number
+}
+
+export type TrackFn<T extends string = string> = (eventName: T, properties?: Record<string, JsonValue>, options?: TrackOptions) => void
 
 export interface EventData {
   readonly eventName: string

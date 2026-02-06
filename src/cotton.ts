@@ -5,7 +5,7 @@ import { type FormEventName, setupFormTracking } from './events/form.js'
 import { type DeadClickEventName, type RageClickEventName, setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
 import { type PageViewEventName, setupPageViewTracking } from './events/page_view.js'
 import { type ScrollEventName, setupScrollTracking } from './events/scroll.js'
-import { type EventData, type JsonValue, type Transport, createTransport } from './transport.js'
+import { type EventData, type JsonValue, type TrackOptions, type Transport, createTransport } from './transport.js'
 
 export type CottonEventName =
   | ClickEventName
@@ -31,7 +31,6 @@ let state: CottonState | null = null
 let cleanups: { name: string; fn: () => void }[] = []
 
 export function init(projectId: string, options: { endpoint?: string; sampleRate?: number; rateLimit?: number; batch?: boolean | Partial<BatchConfig> } = {}) {
-
   if (typeof window === 'undefined') {
     console.warn('[Cotton SDK] init() called in a non-browser environment, skipping.')
     return
@@ -42,9 +41,10 @@ export function init(projectId: string, options: { endpoint?: string; sampleRate
     return
   }
 
-  const sampleRate = options.sampleRate ?? 1
+  let sampleRate = options.sampleRate ?? 1
   if (sampleRate < 0 || sampleRate > 1) {
-    throw new Error(`[Cotton SDK] sampleRate must be between 0 and 1, got ${sampleRate}`)
+    console.warn(`[Cotton SDK] sampleRate must be between 0 and 1, got ${sampleRate}. Clamping.`)
+    sampleRate = Math.max(0, Math.min(1, sampleRate))
   }
   const config: CottonConfig = {
     projectId,
@@ -54,11 +54,6 @@ export function init(projectId: string, options: { endpoint?: string; sampleRate
 
   cleanups = []
   let transport: Transport = createTransport(config.endpoint)
-
-  const rateLimit = options.rateLimit ?? 0
-  if (rateLimit > 0) {
-    transport = createRateLimitedTransport(transport, rateLimit)
-  }
 
   if (options.batch) {
     const merged = typeof options.batch === 'object'
@@ -76,6 +71,14 @@ export function init(projectId: string, options: { endpoint?: string; sampleRate
     }
     transport = createBatchedTransport(transport, batchConfig)
   }
+
+  const rateLimit = options.rateLimit ?? 0
+  if (rateLimit >= 1) {
+    transport = createRateLimitedTransport(transport, rateLimit)
+  } else if (rateLimit > 0) {
+    console.warn(`[Cotton SDK] rateLimit must be >= 1, got ${rateLimit}. Ignoring.`)
+  }
+
   state = { config, transport }
 
   const trackers = [
@@ -126,12 +129,6 @@ export function destroy() {
   state = null
 }
 
-export interface TrackOptions {
-  readonly immediate?: boolean
-  /** Probability (0–1) that this event is sent. Defaults to 1 (always send). */
-  readonly sampleRate?: number
-}
-
 /** This function must never throw. Callers (e.g. monkey-patched history.pushState) rely on it being safe. */
 export function track(eventName: CottonEventName, properties: Record<string, JsonValue> = {}, options?: TrackOptions) {
   try {
@@ -144,7 +141,7 @@ export function track(eventName: CottonEventName, properties: Record<string, Jso
       return
     }
 
-    const effectiveSampleRate = options?.sampleRate ?? state.config.sampleRate
+    const effectiveSampleRate = Math.max(0, Math.min(1, options?.sampleRate ?? state.config.sampleRate))
     if (effectiveSampleRate < 1 && Math.random() >= effectiveSampleRate) return
 
     const event: EventData = {
