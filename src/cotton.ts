@@ -1,4 +1,5 @@
 import { type BatchConfig, DEFAULT_BATCH_CONFIG, createBatchedTransport } from './batch.js'
+import { createRateLimitedTransport } from './rate-limit.js'
 import { type ClickEventName, setupClickTracking } from './events/click.js'
 import { type FormEventName, setupFormTracking } from './events/form.js'
 import { type DeadClickEventName, type RageClickEventName, setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
@@ -29,7 +30,8 @@ interface CottonState {
 let state: CottonState | null = null
 let cleanups: { name: string; fn: () => void }[] = []
 
-export function init(projectId: string, options: { endpoint?: string; sampleRate?: number; batch?: boolean | Partial<BatchConfig> } = {}) {
+export function init(projectId: string, options: { endpoint?: string; sampleRate?: number; rateLimit?: number; batch?: boolean | Partial<BatchConfig> } = {}) {
+
   if (typeof window === 'undefined') {
     console.warn('[Cotton SDK] init() called in a non-browser environment, skipping.')
     return
@@ -52,6 +54,12 @@ export function init(projectId: string, options: { endpoint?: string; sampleRate
 
   cleanups = []
   let transport: Transport = createTransport(config.endpoint)
+
+  const rateLimit = options.rateLimit ?? 0
+  if (rateLimit > 0) {
+    transport = createRateLimitedTransport(transport, rateLimit)
+  }
+
   if (options.batch) {
     const merged = typeof options.batch === 'object'
       ? { ...DEFAULT_BATCH_CONFIG, ...options.batch }
