@@ -1,6 +1,8 @@
 import type { EventData, SendOptions, Transport } from './transport.js'
 
 export function createRateLimitedTransport(inner: Transport, maxPerSecond: number): Transport {
+  if (typeof window === 'undefined') return inner
+
   let tokens = maxPerSecond
   let lastRefill = Date.now()
 

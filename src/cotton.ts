@@ -106,6 +106,8 @@ export function init(projectId: string, options: { endpoint?: string; sampleRate
 }
 
 export function destroy() {
+  if (typeof window === 'undefined') return
+
   if (!state) {
     console.warn('[Cotton SDK] destroy() called but SDK is not initialized.')
     return
