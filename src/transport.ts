@@ -1,4 +1,4 @@
-import { create } from '@bufbuild/protobuf'
+import { create, toBinary } from '@bufbuild/protobuf'
 import { timestampFromDate } from '@bufbuild/protobuf/wkt'
 import { BatchCreateRequestSchema, EventSchema } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb.js'
 import { createRpcClients } from './rpc.js'
@@ -28,6 +28,7 @@ export interface SendOptions {
 export interface Transport {
   send(event: EventData, options?: SendOptions): Promise<void>
   sendBatch?(events: readonly EventData[]): Promise<void>
+  beacon?(events: readonly EventData[]): boolean
   destroy?(): void
 }
 
@@ -77,6 +78,18 @@ export function createTransport(endpoint: string): Transport {
       await eventsService.batchCreate(
         create(BatchCreateRequestSchema, { events: events.map(toProtoEvent) })
       )
+    },
+
+    beacon(events: readonly EventData[]) {
+      if (typeof navigator === 'undefined' || !navigator.sendBeacon) return false
+      try {
+        const request = create(BatchCreateRequestSchema, { events: events.map(toProtoEvent) })
+        const bytes = toBinary(BatchCreateRequestSchema, request)
+        const blob = new Blob([bytes], { type: 'application/proto' })
+        return navigator.sendBeacon(`${endpoint.replace(/\/$/, '')}/events.v1.EventsService/BatchCreate`, blob)
+      } catch {
+        return false
+      }
     },
 
     destroy() {},

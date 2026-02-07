@@ -38,7 +38,7 @@ export function createRateLimitedTransport(inner: Transport, maxPerSecond: numbe
   }
 
   return {
-    async send(event: EventData, options?: SendOptions): Promise<void> {
+    async send(event: EventData, options?: SendOptions) {
       if (destroyed) return
       refill()
       if (tokens >= 1) {

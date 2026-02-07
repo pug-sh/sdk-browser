@@ -8,7 +8,7 @@ export interface QueueStorage {
   readonly size: number
 }
 
-function isLocalStorageAvailable(): boolean {
+function isLocalStorageAvailable() {
   try {
     const testKey = '__cotton_ls_test__'
     localStorage.setItem(testKey, '1')
@@ -24,7 +24,7 @@ export function createMemoryQueueStorage(maxQueueSize: number): QueueStorage {
   let locked = 0
 
   return {
-    push(event: EventData) {
+    push(event) {
       if (buffer.length >= maxQueueSize) {
         if (locked < buffer.length) {
           buffer.splice(locked, 1)
@@ -36,19 +36,19 @@ export function createMemoryQueueStorage(maxQueueSize: number): QueueStorage {
       }
       buffer.push(event)
     },
-    lock(limit: number): readonly EventData[] {
+    lock(limit) {
       if (locked > 0) return []
       locked = Math.min(limit, buffer.length)
       return buffer.slice(0, locked)
     },
-    commit(): void {
+    commit() {
       buffer.splice(0, locked)
       locked = 0
     },
-    rollback(): void {
+    rollback() {
       locked = 0
     },
-    get size(): number {
+    get size() {
       return buffer.length - locked
     },
   }
@@ -64,7 +64,7 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
     buffer = []
   }
 
-  function persist(): void {
+  function persist() {
     try {
       if (buffer.length === 0) {
         localStorage.removeItem(key)
@@ -77,7 +77,7 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
   }
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null
-  function debouncedPersist(): void {
+  function debouncedPersist() {
     if (persistTimer !== null) return
     persistTimer = setTimeout(() => {
       persistTimer = null
@@ -88,7 +88,7 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
   let locked = 0
 
   return {
-    push(event: EventData) {
+    push(event) {
       if (buffer.length >= maxQueueSize) {
         if (locked < buffer.length) {
           buffer.splice(locked, 1)
@@ -101,20 +101,20 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
       buffer.push(event)
       debouncedPersist()
     },
-    lock(limit: number): readonly EventData[] {
+    lock(limit) {
       if (locked > 0) return []
       locked = Math.min(limit, buffer.length)
       return buffer.slice(0, locked)
     },
-    commit(): void {
+    commit() {
       buffer.splice(0, locked)
       locked = 0
       persist()
     },
-    rollback(): void {
+    rollback() {
       locked = 0
     },
-    get size(): number {
+    get size() {
       return buffer.length - locked
     },
   }
@@ -144,7 +144,7 @@ export const DEFAULT_BATCH_CONFIG: Omit<BatchConfig, 'storage' | 'storageKey'> =
 
 const PERMANENT_GRPC_CODES = new Set([3, 5, 7, 16])
 
-function isPermanentError(err: unknown): boolean {
+function isPermanentError(err: unknown) {
   if (err == null || typeof err !== 'object') return false
   if ('code' in err && typeof (err as Record<string, unknown>).code === 'number') {
     return PERMANENT_GRPC_CODES.has((err as { code: number }).code)
@@ -156,6 +156,8 @@ function isPermanentError(err: unknown): boolean {
   return false
 }
 
+type TransportState = 'idle' | 'flushing' | 'destroyed'
+
 export function createBatchedTransport(inner: Transport, config: BatchConfig): Transport {
   if (typeof window === 'undefined' || typeof document === 'undefined') {
     return inner
@@ -163,38 +165,36 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
 
   const storage = config.storage ?? createDefaultQueueStorage(config.storageKey ?? '__cotton_queue__', config.maxQueueSize)
   let timer: ReturnType<typeof setTimeout> | null = null
-  let flushing = false
-  let destroyed = false
+  let state: TransportState = 'idle'
 
-  function clearTimer(): void {
+  function clearTimer() {
     if (timer !== null) {
       clearTimeout(timer)
       timer = null
     }
   }
 
-  function scheduleFlush(): void {
-    if (timer !== null || destroyed) return
+  function scheduleFlush() {
+    if (timer !== null || state === 'destroyed') return
     timer = setTimeout(() => {
       timer = null
       flush()
     }, config.maxWaitMs)
   }
 
-  function sendEvents(batch: readonly EventData[]): Promise<void | void[]> {
+  function sendEvents(batch: readonly EventData[]) {
     return inner.sendBatch
       ? inner.sendBatch(batch)
       : Promise.all(batch.map((event) => inner.send(event)))
   }
 
-  // TODO: Use navigator.sendBeacon once ConnectRPC transport is wired in
-  function flush(): void {
-    if (destroyed || flushing) return
+  function flush() {
+    if (state !== 'idle') return
     clearTimer()
     const batch = storage.lock(config.maxSize)
     if (batch.length === 0) return
 
-    flushing = true
+    state = 'flushing'
 
     sendEvents(batch)
       .then(() => {
@@ -209,25 +209,38 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
         console.error('[Cotton SDK] Failed to send batch:', err)
       })
       .finally(() => {
-        flushing = false
-        if (destroyed) return
+        if (state === 'destroyed') return
+        state = 'idle'
         if (storage.size > 0) {
           scheduleFlush()
         }
       })
   }
 
-  const onVisibilityChange = (): void => {
-    if (document.visibilityState === 'hidden') {
+  function beaconFlush() {
+    if (state !== 'idle') return
+    clearTimer()
+    const batch = storage.lock(storage.size)
+    if (batch.length === 0) return
+    if (inner.beacon?.(batch)) {
+      storage.commit()
+    } else {
+      storage.rollback()
       flush()
     }
   }
 
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') {
+      beaconFlush()
+    }
+  }
+
   document.addEventListener('visibilitychange', onVisibilityChange)
-  window.addEventListener('pagehide', flush)
+  window.addEventListener('pagehide', beaconFlush)
 
   return {
-    async send(event: EventData, options?: SendOptions): Promise<void> {
+    async send(event: EventData, options?: SendOptions) {
       if (options?.immediate) {
         try {
           await inner.send(event)
@@ -249,20 +262,21 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
       }
     },
 
-    // TODO: Use navigator.sendBeacon once ConnectRPC transport is wired in
-    destroy(): void {
-      destroyed = true
+    destroy() {
+      state = 'destroyed'
       clearTimer()
       document.removeEventListener('visibilitychange', onVisibilityChange)
-      window.removeEventListener('pagehide', flush)
+      window.removeEventListener('pagehide', beaconFlush)
 
       const remaining = storage.lock(storage.size)
       if (remaining.length > 0) {
         storage.commit()
-        sendEvents(remaining)
-          .catch((err) => console.error('[Cotton SDK] Failed to send remaining batch on destroy:', err))
-          .finally(() => { inner.destroy?.() })
-        return
+        if (!inner.beacon?.(remaining)) {
+          sendEvents(remaining)
+            .catch((err) => console.error('[Cotton SDK] Failed to send remaining batch on destroy:', err))
+            .finally(() => { inner.destroy?.() })
+          return
+        }
       }
       inner.destroy?.()
     },
