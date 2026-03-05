@@ -1,14 +1,11 @@
-import type { EventData, SendOptions, Transport } from './transport.js'
+import type { Event } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb'
+import { createTransport } from './transport.js'
 
-export interface QueueStorage {
-  push(event: EventData): void
-  lock(limit: number): readonly EventData[]
-  commit(): void
-  rollback(): void
-  readonly size: number
+interface SendOptions {
+  readonly immediate?: boolean
 }
 
-function isLocalStorageAvailable() {
+const isLocalStorageAvailable = () => {
   try {
     const testKey = '__cotton_ls_test__'
     localStorage.setItem(testKey, '1')
@@ -19,66 +16,73 @@ function isLocalStorageAvailable() {
   }
 }
 
-export function createMemoryQueueStorage(maxQueueSize: number): QueueStorage {
-  let buffer: EventData[] = []
+const createMemoryQueueStorage = () => {
+  let buffer: Event[] = []
   let locked = 0
 
   return {
-    push(event) {
-      if (buffer.length >= maxQueueSize) {
-        if (locked < buffer.length) {
-          buffer.splice(locked, 1)
-        } else {
-          buffer.shift()
-          locked--
-        }
-        console.warn('[Cotton SDK] Queue full, dropping oldest event')
+    push: (event: Event) => buffer.push(event),
+    lock: (limit: number) => {
+      if (locked > 0) {
+        return []
       }
-      buffer.push(event)
-    },
-    lock(limit) {
-      if (locked > 0) return []
       locked = Math.min(limit, buffer.length)
       return buffer.slice(0, locked)
     },
-    commit() {
+    commit: () => {
       buffer.splice(0, locked)
       locked = 0
     },
-    rollback() {
-      locked = 0
-    },
+    rollback: () => (locked = 0),
     get size() {
       return buffer.length - locked
     },
   }
 }
 
-export function createLocalStorageQueueStorage(key: string, maxQueueSize: number): QueueStorage {
-  let buffer: EventData[]
+const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
+  let buffer: Event[]
   try {
     const raw = localStorage.getItem(key)
-    buffer = raw ? (JSON.parse(raw) as EventData[]) : []
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) {
+        buffer = parsed as Event[]
+      } else {
+        console.warn('[Cotton SDK] Corrupt queue in localStorage (not an array), discarding.')
+        localStorage.removeItem(key)
+        buffer = []
+      }
+    } else {
+      buffer = []
+    }
   } catch (err) {
-    console.error('[Cotton SDK] Failed to hydrate queue from localStorage:', err)
+    console.error('[Cotton SDK] Failed to hydrate queue from localStorage, discarding:', err)
+    try {
+      localStorage.removeItem(key)
+    } catch {
+      /* best effort */
+    }
     buffer = []
   }
 
-  function persist() {
+  const persist = () => {
     try {
       if (buffer.length === 0) {
         localStorage.removeItem(key)
       } else {
         localStorage.setItem(key, JSON.stringify(buffer))
       }
-    } catch {
-      console.warn('[Cotton SDK] localStorage write failed, events may be lost')
+    } catch (err) {
+      console.warn('[Cotton SDK] localStorage write failed, events may be lost:', err)
     }
   }
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null
-  function debouncedPersist() {
-    if (persistTimer !== null) return
+  const debouncedPersist = () => {
+    if (persistTimer !== null) {
+      clearTimeout(persistTimer)
+    }
     persistTimer = setTimeout(() => {
       persistTimer = null
       persist()
@@ -88,64 +92,68 @@ export function createLocalStorageQueueStorage(key: string, maxQueueSize: number
   let locked = 0
 
   return {
-    push(event) {
+    push: (event: Event) => {
       if (buffer.length >= maxQueueSize) {
         if (locked < buffer.length) {
           buffer.splice(locked, 1)
         } else {
-          buffer.shift()
-          locked--
+          console.warn('[Cotton SDK] Queue full and flush in progress, dropping new event')
+          return
         }
         console.warn('[Cotton SDK] Queue full, dropping oldest event')
       }
       buffer.push(event)
       debouncedPersist()
     },
-    lock(limit) {
-      if (locked > 0) return []
+    lock: (limit: number) => {
+      if (locked > 0) {
+        return []
+      }
       locked = Math.min(limit, buffer.length)
       return buffer.slice(0, locked)
     },
-    commit() {
+    commit: () => {
       buffer.splice(0, locked)
       locked = 0
       persist()
     },
-    rollback() {
-      locked = 0
-    },
+    rollback: () => (locked = 0),
     get size() {
       return buffer.length - locked
     },
   }
 }
 
-export function createDefaultQueueStorage(key: string, maxQueueSize: number): QueueStorage {
+const createDefaultQueueStorage = (key: string, maxQueueSize: number) => {
   if (isLocalStorageAvailable()) {
     return createLocalStorageQueueStorage(key, maxQueueSize)
   }
-  console.warn('[Cotton SDK] localStorage not available, using in-memory queue (events will not persist across page loads)')
-  return createMemoryQueueStorage(maxQueueSize)
+  console.warn(
+    '[Cotton SDK] localStorage not available, using in-memory queue (events will not persist across page loads)'
+  )
+  return createMemoryQueueStorage()
 }
 
 export interface BatchConfig {
   readonly maxSize: number
   readonly maxWaitMs: number
   readonly maxQueueSize: number
-  readonly storageKey?: string
-  readonly storage?: QueueStorage
 }
 
-export const DEFAULT_BATCH_CONFIG: Omit<BatchConfig, 'storage' | 'storageKey'> = {
+export const DEFAULT_BATCH_CONFIG: BatchConfig = {
   maxSize: 10,
   maxWaitMs: 5000,
   maxQueueSize: 1000,
 }
 
-const PERMANENT_GRPC_CODES = new Set([3, 5, 7, 16])
+// InvalidArgument(3), NotFound(5), AlreadyExists(6), PermissionDenied(7),
+// FailedPrecondition(9), Unimplemented(12), Unauthenticated(16)
+const PERMANENT_GRPC_CODES = new Set([3, 5, 6, 7, 9, 12, 16])
 
-function isPermanentError(err: unknown) {
-  if (err == null || typeof err !== 'object') return false
+const isPermanentError = (err: unknown) => {
+  if (err == null || typeof err !== 'object') {
+    return false
+  }
   if ('code' in err && typeof (err as Record<string, unknown>).code === 'number') {
     return PERMANENT_GRPC_CODES.has((err as { code: number }).code)
   }
@@ -158,49 +166,67 @@ function isPermanentError(err: unknown) {
 
 type TransportState = 'idle' | 'flushing' | 'destroyed'
 
-export function createBatchedTransport(inner: Transport, config: BatchConfig): Transport {
-  if (typeof window === 'undefined' || typeof document === 'undefined') {
-    return inner
+export const createBatchedTransport = (
+  endpoint: string,
+  token: string,
+  projectId: string,
+  partialConfig?: Partial<BatchConfig>
+) => {
+  const merged = { ...DEFAULT_BATCH_CONFIG, ...partialConfig }
+  if (merged.maxSize < 1) {
+    console.warn('[Cotton SDK] batch.maxSize must be >= 1, using default.')
+  }
+  if (merged.maxWaitMs < 0) {
+    console.warn('[Cotton SDK] batch.maxWaitMs must be >= 0, using default.')
+  }
+  if (merged.maxQueueSize < 1) {
+    console.warn('[Cotton SDK] batch.maxQueueSize must be >= 1, using default.')
   }
 
-  const storage = config.storage ?? createDefaultQueueStorage(config.storageKey ?? '__cotton_queue__', config.maxQueueSize)
+  const maxSize = merged.maxSize >= 1 ? merged.maxSize : DEFAULT_BATCH_CONFIG.maxSize
+  const maxWaitMs = merged.maxWaitMs >= 0 ? merged.maxWaitMs : DEFAULT_BATCH_CONFIG.maxWaitMs
+  const maxQueueSize = merged.maxQueueSize >= 1 ? merged.maxQueueSize : DEFAULT_BATCH_CONFIG.maxQueueSize
+  const storageKey = `__cotton_queue_${projectId}__`
+
+  const inner = createTransport(endpoint, token)
+  const storage = createDefaultQueueStorage(storageKey, maxQueueSize)
   let timer: ReturnType<typeof setTimeout> | null = null
   let state: TransportState = 'idle'
 
-  function clearTimer() {
+  const clearTimer = () => {
     if (timer !== null) {
       clearTimeout(timer)
       timer = null
     }
   }
 
-  function scheduleFlush() {
-    if (timer !== null || state === 'destroyed') return
+  const scheduleFlush = () => {
+    if (timer !== null || state === 'destroyed') {
+      return
+    }
     timer = setTimeout(() => {
       timer = null
       flush()
-    }, config.maxWaitMs)
+    }, maxWaitMs)
   }
 
-  function sendEvents(batch: readonly EventData[]) {
-    return inner.sendBatch
-      ? inner.sendBatch(batch)
-      : Promise.all(batch.map((event) => inner.send(event)))
-  }
+  const sendEvents = (batch: readonly Event[]) => inner.sendBatch(batch as Event[])
 
-  function flush() {
-    if (state !== 'idle') return
+  const flush = () => {
+    if (state !== 'idle') {
+      return
+    }
     clearTimer()
-    const batch = storage.lock(config.maxSize)
-    if (batch.length === 0) return
+    const batch = storage.lock(maxSize)
+    if (batch.length === 0) {
+      return
+    }
 
     state = 'flushing'
 
     sendEvents(batch)
-      .then(() => {
-        storage.commit()
-      })
-      .catch((err) => {
+      .then(storage.commit)
+      .catch(err => {
         if (isPermanentError(err)) {
           storage.commit()
         } else {
@@ -209,7 +235,9 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
         console.error('[Cotton SDK] Failed to send batch:', err)
       })
       .finally(() => {
-        if (state === 'destroyed') return
+        if (state === 'destroyed') {
+          return
+        }
         state = 'idle'
         if (storage.size > 0) {
           scheduleFlush()
@@ -217,16 +245,20 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
       })
   }
 
-  function beaconFlush() {
-    if (state !== 'idle') return
+  const beaconFlush = () => {
+    if (state !== 'idle') {
+      return
+    }
     clearTimer()
     const batch = storage.lock(storage.size)
-    if (batch.length === 0) return
+    if (batch.length === 0) {
+      return
+    }
     if (inner.beacon?.(batch)) {
       storage.commit()
     } else {
       storage.rollback()
-      flush()
+      console.warn(`[Cotton SDK] sendBeacon failed for ${batch.length} events; they remain queued for next flush.`)
     }
   }
 
@@ -240,7 +272,10 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
   window.addEventListener('pagehide', beaconFlush)
 
   return {
-    async send(event: EventData, options?: SendOptions) {
+    send: async (event: Event, options?: SendOptions) => {
+      if (state === 'destroyed') {
+        return
+      }
       if (options?.immediate) {
         try {
           await inner.send(event)
@@ -255,30 +290,36 @@ export function createBatchedTransport(inner: Transport, config: BatchConfig): T
         return
       }
       storage.push(event)
-      if (storage.size >= config.maxSize) {
+      if (storage.size >= maxSize) {
         flush()
       } else {
         scheduleFlush()
       }
     },
 
-    destroy() {
+    destroy: () => {
       state = 'destroyed'
       clearTimer()
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('pagehide', beaconFlush)
 
+      // Release any in-flight flush lock so we can drain the full queue
+      storage.rollback()
       const remaining = storage.lock(storage.size)
       if (remaining.length > 0) {
-        storage.commit()
-        if (!inner.beacon?.(remaining)) {
-          sendEvents(remaining)
-            .catch((err) => console.error('[Cotton SDK] Failed to send remaining batch on destroy:', err))
-            .finally(() => { inner.destroy?.() })
+        if (inner.beacon?.(remaining)) {
+          storage.commit()
           return
         }
+        // Beacon failed — try async send, commit only on success
+        sendEvents(remaining)
+          .then(() => storage.commit())
+          .catch(err => {
+            storage.rollback()
+            console.error('[Cotton SDK] Failed to send remaining batch on destroy, events left in queue:', err)
+          })
+        return
       }
-      inner.destroy?.()
     },
   }
 }

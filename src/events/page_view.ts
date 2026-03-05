@@ -1,6 +1,6 @@
-import type { TrackFn } from '../transport.js'
+import type { TrackFn } from '../track.js'
 
-export type PageViewEventName = 'page_view'
+export const eventPageView = 'page_view'
 
 // store originals at module level for restoration
 let origPush: typeof history.pushState | null = null
@@ -12,8 +12,8 @@ let wrapReplace: typeof history.replaceState | null = null
 
 let orphaned = false
 
-export function setupPageViewTracking(track: TrackFn<PageViewEventName>): () => void {
-  track('page_view')
+export const setupPageViewTracking = (track: TrackFn<typeof eventPageView>) => {
+  track(eventPageView)
 
   // capture originals on first init
   if (origPush === null) {
@@ -30,7 +30,7 @@ export function setupPageViewTracking(track: TrackFn<PageViewEventName>): () => 
     wrapPush = function (this: History, ...args: Parameters<typeof history.pushState>) {
       truePush.apply(this, args)
       if (!orphaned) {
-        track('page_view')
+        track(eventPageView)
       }
     }
     history.pushState = wrapPush
@@ -41,13 +41,13 @@ export function setupPageViewTracking(track: TrackFn<PageViewEventName>): () => 
     wrapReplace = function (this: History, ...args: Parameters<typeof history.replaceState>) {
       trueReplace.apply(this, args)
       if (!orphaned) {
-        track('page_view')
+        track(eventPageView)
       }
     }
     history.replaceState = wrapReplace
   }
 
-  const onPopState = () => track('page_view')
+  const onPopState = () => track(eventPageView)
   window.addEventListener('popstate', onPopState)
 
   return () => {

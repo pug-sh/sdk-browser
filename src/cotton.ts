@@ -1,44 +1,42 @@
-import { type BatchConfig, DEFAULT_BATCH_CONFIG, createBatchedTransport } from './batch.js'
-import { type ClickEventName, setupClickTracking } from './events/click.js'
-import { type FormEventName, setupFormTracking } from './events/form.js'
-import { type DeadClickEventName, type RageClickEventName, setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
-import { type PageViewEventName, setupPageViewTracking } from './events/page_view.js'
-import { type ScrollEventName, setupScrollTracking } from './events/scroll.js'
-import { createRateLimitedTransport } from './rate-limit.js'
-import { type EventData, type JsonValue, type TrackOptions, type Transport, createTransport } from './transport.js'
+import { type BatchConfig, createBatchedTransport } from './batch.js'
+import { eventClick, setupClickTracking } from './events/click.js'
+import { eventFormStart, eventFormSubmit, setupFormTracking } from './events/form.js'
+import { eventDeadClick, eventRageClick, setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
+import { eventPageView, setupPageViewTracking } from './events/page_view.js'
+import { eventScroll, setupScrollTracking } from './events/scroll.js'
+import { toEvent, type TrackFn } from './track.js'
 
 export type CottonEventName =
-  | ClickEventName
-  | DeadClickEventName
-  | FormEventName
-  | PageViewEventName
-  | RageClickEventName
-  | ScrollEventName
+  | typeof eventClick
+  | typeof eventDeadClick
+  | typeof eventFormStart
+  | typeof eventFormSubmit
+  | typeof eventPageView
+  | typeof eventRageClick
+  | typeof eventScroll
   | (string & {})
 
 export interface CottonConfig {
   readonly endpoint: string
   readonly projectId: string
-  readonly sampleRate: number
 }
 
 export interface InitOptions {
   readonly endpoint?: string
   readonly token: string
-  readonly sampleRate?: number
-  readonly rateLimit?: number
-  readonly batch?: boolean | Partial<BatchConfig>
+  readonly samplingRate?: number
+  readonly batch?: Partial<BatchConfig>
 }
 
 interface CottonState {
   readonly config: CottonConfig
-  readonly transport: Transport
+  readonly transport: ReturnType<typeof createBatchedTransport>
 }
 
 let state: CottonState | null = null
 let cleanups: { name: string; fn: () => void }[] = []
 
-export function init(projectId: string, options: InitOptions) {
+export const init = (projectId: string, options: InitOptions) => {
   if (typeof window === 'undefined') {
     console.warn('[Cotton SDK] init() called in a non-browser environment, skipping.')
     return
@@ -48,48 +46,28 @@ export function init(projectId: string, options: InitOptions) {
     throw new Error('[Cotton SDK] projectId is required and must be a non-empty string')
   }
 
+  if (!options.token || typeof options.token !== 'string') {
+    throw new Error('[Cotton SDK] token is required and must be a non-empty string')
+  }
+
   if (state) {
     console.warn('Cotton SDK already initialized')
     return
   }
 
-  let sampleRate = options.sampleRate ?? 1
-  if (sampleRate < 0 || sampleRate > 1) {
-    console.warn(`[Cotton SDK] sampleRate must be between 0 and 1, got ${sampleRate}. Clamping.`)
-    sampleRate = Math.max(0, Math.min(1, sampleRate))
+  let samplingRate = options.samplingRate ?? 1
+  if (samplingRate < 0 || samplingRate > 1) {
+    console.warn(`[Cotton SDK] samplingRate must be between 0 and 1, got ${samplingRate}. Clamping.`)
+    samplingRate = Math.max(0, Math.min(1, samplingRate))
   }
-  const config: CottonConfig = {
-    projectId,
-    endpoint: options.endpoint || 'http://localhost:8080',
-    sampleRate,
-  }
+
+  // todo - hash distinctid and set sampledAway in the config or set random on/off per session
+
+  const config: CottonConfig = { endpoint: options.endpoint || 'http://localhost:8080', projectId }
 
   cleanups = []
-  let transport: Transport = createTransport(config.endpoint, options.token)
 
-  if (options.batch) {
-    const merged = typeof options.batch === 'object'
-      ? { ...DEFAULT_BATCH_CONFIG, ...options.batch }
-      : DEFAULT_BATCH_CONFIG
-    if (merged.maxSize < 1) console.warn('[Cotton SDK] batch.maxSize must be >= 1, using default.')
-    if (merged.maxWaitMs < 0) console.warn('[Cotton SDK] batch.maxWaitMs must be >= 0, using default.')
-    if (merged.maxQueueSize < 1) console.warn('[Cotton SDK] batch.maxQueueSize must be >= 1, using default.')
-    const batchConfig: BatchConfig = {
-      ...merged,
-      storageKey: `__cotton_queue_${projectId}__`,
-      maxSize: merged.maxSize >= 1 ? merged.maxSize : DEFAULT_BATCH_CONFIG.maxSize,
-      maxWaitMs: merged.maxWaitMs >= 0 ? merged.maxWaitMs : DEFAULT_BATCH_CONFIG.maxWaitMs,
-      maxQueueSize: merged.maxQueueSize >= 1 ? merged.maxQueueSize : DEFAULT_BATCH_CONFIG.maxQueueSize,
-    }
-    transport = createBatchedTransport(transport, batchConfig)
-  }
-
-  const rateLimit = options.rateLimit ?? 0
-  if (rateLimit >= 1) {
-    transport = createRateLimitedTransport(transport, rateLimit)
-  } else if (rateLimit > 0) {
-    console.warn(`[Cotton SDK] rateLimit must be >= 1, got ${rateLimit}. Ignoring.`)
-  }
+  const transport = createBatchedTransport(config.endpoint, options.token, projectId, options.batch)
 
   state = { config, transport }
 
@@ -117,8 +95,10 @@ export function init(projectId: string, options: InitOptions) {
   }
 }
 
-export function destroy() {
-  if (typeof window === 'undefined') return
+export const destroy = () => {
+  if (typeof window === 'undefined') {
+    return
+  }
 
   if (!state) {
     console.warn('[Cotton SDK] destroy() called but SDK is not initialized.')
@@ -144,7 +124,7 @@ export function destroy() {
 }
 
 /** This function must never throw. Callers (e.g. monkey-patched history.pushState) rely on it being safe. */
-export function track(eventName: CottonEventName, properties: Record<string, JsonValue> = {}, options?: TrackOptions) {
+export const track: TrackFn<CottonEventName> = (kind, props, opts) => {
   try {
     if (typeof window === 'undefined') {
       return
@@ -155,26 +135,16 @@ export function track(eventName: CottonEventName, properties: Record<string, Jso
       return
     }
 
-    const effectiveSampleRate = Math.max(0, Math.min(1, options?.sampleRate ?? state.config.sampleRate))
-    if (effectiveSampleRate < 1 && Math.random() >= effectiveSampleRate) return
+    const event = toEvent(state.config.projectId, kind, props, opts)
 
-    const event: EventData = {
-      eventName,
-      properties: {
-        ...properties,
-        projectId: state.config.projectId,
-        url: window.location.href,
-        referrer: document.referrer,
-        userAgent: navigator.userAgent,
-      },
-      timestamp: Date.now(),
-    }
-    const immediate = options?.immediate ?? false
-    state.transport.send(event, { immediate }).catch(err => console.error(`[Cotton SDK] Failed to send event "${eventName}":`, err))
+    const immediate = opts?.immediate ?? false
+    state.transport
+      .send(event, { immediate })
+      .catch((err: Error) => console.error(`[Cotton SDK] Failed to send event "${kind}":`, err))
   } catch (err) {
     // track() must never throw, but we defensively log the failure
     if (typeof console !== 'undefined' && typeof console.error === 'function') {
-      console.error(`[Cotton SDK] Unexpected error in track("${eventName}"):`, err)
+      console.error(`[Cotton SDK] Unexpected error in track("${kind}"):`, err)
     }
   }
 }

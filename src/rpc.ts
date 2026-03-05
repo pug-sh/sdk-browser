@@ -6,12 +6,12 @@ import { createConnectTransport } from '@connectrpc/connect-web'
 const defaultTimeoutMs = 5000
 
 export const createRpcClients = (endpoint: string, token: string) => {
-  const interceptors: Interceptor[] = []
-
-  interceptors.push(next => async req => {
-    req.header.set('Authorization', `Bearer ${token}`)
-    return next(req)
-  })
+  const interceptors: Interceptor[] = [
+    next => async req => {
+      req.header.set('Authorization', `Bearer ${token}`)
+      return next(req)
+    },
+  ]
 
   const transport = createConnectTransport({
     baseUrl: endpoint,
