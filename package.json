@@ -11,10 +11,10 @@
     "serve": "serve . & sleep 1 && open http://localhost:3000 && wait"
   },
   "dependencies": {
-    "@buf/fivebits_cotton.bufbuild_es": "2.11.0-20260206220402-dd14757f9b37.1",
-    "@bufbuild/protobuf": "^2.9.0",
-    "@connectrpc/connect": "^2.1.0",
-    "@connectrpc/connect-web": "^2.1.0"
+    "@buf/fivebits_cotton.bufbuild_es": "2.11.0-20260305141118-7432646b8975.1",
+    "@bufbuild/protobuf": "^2.11.0",
+    "@connectrpc/connect": "^2.1.1",
+    "@connectrpc/connect-web": "^2.1.1"
   },
   "keywords": [
     "analytics",
@@ -24,7 +24,7 @@
   "author": "Cotton",
   "license": "ISC",
   "devDependencies": {
-    "serve": "^14.2.5",
+    "serve": "^14.2.6",
     "typescript": "^5.9.3"
   },
   "prettier": {

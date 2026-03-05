@@ -35,8 +35,8 @@ export interface Transport {
 const SDK_PROPERTY_KEYS = ['projectId', 'url', 'referrer', 'userAgent'] as const
 
 function toProtoEvent(event: EventData) {
-  const sdkProperties: Record<string, string> = {}
-  const userProperties: Record<string, string> = {}
+  const autoProperties: Record<string, string> = {}
+  const customProperties: Record<string, string> = {}
 
   for (const [k, v] of Object.entries(event.properties)) {
     let value: string
@@ -46,17 +46,17 @@ function toProtoEvent(event: EventData) {
       value = String(v)
     }
     if ((SDK_PROPERTY_KEYS as readonly string[]).includes(k)) {
-      sdkProperties[k] = value
+      autoProperties[k] = value
     } else {
-      userProperties[k] = value
+      customProperties[k] = value
     }
   }
 
   return create(EventSchema, {
-    event: event.eventName,
-    sdkProperties,
-    userProperties,
-    eventTime: timestampFromDate(new Date(event.timestamp)),
+    kind: event.eventName,
+    autoProperties,
+    customProperties,
+    occurTime: timestampFromDate(new Date(event.timestamp)),
   })
 }
 
