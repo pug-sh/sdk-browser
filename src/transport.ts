@@ -8,6 +8,8 @@ export const createTransport = (endpoint: string, token: string) => {
   return {
     send: (event: Event) => eventsService.batchCreate(create(BatchCreateRequestSchema, { events: [event] })),
     sendBatch: (events: Event[]) => eventsService.batchCreate(create(BatchCreateRequestSchema, { events })),
+    // TODO: sendBeacon cannot set Authorization headers. The backend must authenticate
+    // beacon requests using the projectId in the event body (like Mixpanel/PostHog).
     beacon: (events: Event[]) => {
       if (typeof navigator === 'undefined' || !navigator.sendBeacon) {
         return false

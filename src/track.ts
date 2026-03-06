@@ -1,8 +1,8 @@
-import { EventSchema, type Event } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb'
+import { EventSchema, type Event } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb.js'
 import { create } from '@bufbuild/protobuf'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
 
-/** User-facing options passed to `track()`. Includes client-side sampling in addition to transport hints. */
+/** Options passed to `track()`. `immediate` bypasses batching for priority events; `timestamp` overrides the default current-time. */
 export interface TrackOptions {
   readonly immediate?: boolean
   readonly timestamp?: number

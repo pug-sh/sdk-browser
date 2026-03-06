@@ -2,11 +2,14 @@ import type { TrackFn } from '../track.js'
 
 export const eventPageView = 'page_view'
 
-// store originals at module level for restoration
+// Stored at module level so they survive across init/destroy cycles. This enables
+// restoring the original methods on destroy and reactivating orphaned wrappers on
+// re-init. Relies on `track` being a stable module-level function in cotton.ts.
 let origPush: typeof history.pushState | null = null
 let origReplace: typeof history.replaceState | null = null
 
-// store wrappers at module level for cleanup comparisons
+// Stored at module level so cleanup can detect if a third party wrapped on top
+// (i.e. history.pushState !== wrapPush means someone else patched after us).
 let wrapPush: typeof history.pushState | null = null
 let wrapReplace: typeof history.replaceState | null = null
 

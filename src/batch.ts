@@ -1,4 +1,6 @@
-import type { Event } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb'
+import { EventSchema, type Event } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb.js'
+import { fromJson, toJson } from '@bufbuild/protobuf'
+import { ConnectError } from '@connectrpc/connect'
 import { createTransport } from './transport.js'
 
 interface SendOptions {
@@ -33,6 +35,7 @@ const createMemoryQueueStorage = () => {
       buffer.splice(0, locked)
       locked = 0
     },
+    peekUnlocked: () => buffer.slice(locked),
     rollback: () => (locked = 0),
     get size() {
       return buffer.length - locked
@@ -47,7 +50,7 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
     if (raw) {
       const parsed = JSON.parse(raw)
       if (Array.isArray(parsed)) {
-        buffer = parsed as Event[]
+        buffer = parsed.map((item: unknown) => fromJson(EventSchema, item as any))
       } else {
         console.warn('[Cotton SDK] Corrupt queue in localStorage (not an array), discarding.')
         localStorage.removeItem(key)
@@ -71,7 +74,7 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
       if (buffer.length === 0) {
         localStorage.removeItem(key)
       } else {
-        localStorage.setItem(key, JSON.stringify(buffer))
+        localStorage.setItem(key, JSON.stringify(buffer.map(e => toJson(EventSchema, e))))
       }
     } catch (err) {
       console.warn('[Cotton SDK] localStorage write failed, events may be lost:', err)
@@ -117,6 +120,7 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
       locked = 0
       persist()
     },
+    peekUnlocked: () => buffer.slice(locked),
     rollback: () => (locked = 0),
     get size() {
       return buffer.length - locked
@@ -151,13 +155,10 @@ export const DEFAULT_BATCH_CONFIG: BatchConfig = {
 const PERMANENT_GRPC_CODES = new Set([3, 5, 6, 7, 9, 12, 16])
 
 const isPermanentError = (err: unknown) => {
-  if (err == null || typeof err !== 'object') {
-    return false
+  if (err instanceof ConnectError) {
+    return PERMANENT_GRPC_CODES.has(err.code)
   }
-  if ('code' in err && typeof (err as Record<string, unknown>).code === 'number') {
-    return PERMANENT_GRPC_CODES.has((err as { code: number }).code)
-  }
-  if ('status' in err && typeof (err as Record<string, unknown>).status === 'number') {
+  if (err != null && typeof err === 'object' && 'status' in err && typeof (err as Record<string, unknown>).status === 'number') {
     const status = (err as { status: number }).status
     return status >= 400 && status < 500
   }
@@ -229,10 +230,11 @@ export const createBatchedTransport = (
       .catch(err => {
         if (isPermanentError(err)) {
           storage.commit()
+          console.error(`[Cotton SDK] Permanent error, ${batch.length} events dropped (will NOT retry):`, err)
         } else {
           storage.rollback()
+          console.warn('[Cotton SDK] Transient error sending batch, will retry:', err)
         }
-        console.error('[Cotton SDK] Failed to send batch:', err)
       })
       .finally(() => {
         if (state === 'destroyed') {
@@ -246,10 +248,20 @@ export const createBatchedTransport = (
   }
 
   const beaconFlush = () => {
-    if (state !== 'idle') {
+    if (state === 'destroyed') {
       return
     }
     clearTimer()
+    if (state === 'flushing') {
+      // In-flight flush owns the locked events. Best-effort beacon the
+      // unlocked tail — they stay in the queue regardless, so duplicates
+      // are possible if the page survives but events aren't lost.
+      const unlocked = storage.peekUnlocked()
+      if (unlocked.length > 0) {
+        inner.beacon?.(unlocked)
+      }
+      return
+    }
     const batch = storage.lock(storage.size)
     if (batch.length === 0) {
       return
@@ -303,15 +315,16 @@ export const createBatchedTransport = (
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('pagehide', beaconFlush)
 
-      // Release any in-flight flush lock so we can drain the full queue
-      storage.rollback()
+      // Drain only unlocked events — if a flush is in-flight, its locked
+      // batch will complete normally via the existing promise chain.
       const remaining = storage.lock(storage.size)
       if (remaining.length > 0) {
         if (inner.beacon?.(remaining)) {
           storage.commit()
           return
         }
-        // Beacon failed — try async send, commit only on success
+        // Beacon failed — try async send as last resort. On failure, events
+        // remain in the queue (recoverable from localStorage on next init).
         sendEvents(remaining)
           .then(() => storage.commit())
           .catch(err => {
