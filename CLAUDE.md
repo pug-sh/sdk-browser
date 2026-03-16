@@ -23,7 +23,7 @@ npm run serve          # Serve static files on port 3000
 
 `cotton.ts` exports `init(projectId, options)`, `track(kind, props?, opts?)`, and `destroy()`. A single nullable module-scoped `state` object (`{ config, transport } | null`) enforces single initialization. `init()` creates the batched transport (which internally creates the RPC transport) and iterates over tracker setup functions, each wrapped in try/catch for isolation. Each tracker returns a cleanup function stored in a module-level `cleanups` array. `track()` uses `toEvent()` from `track.ts` to build a protobuf `Event` enriched with `projectId`, `url`, `referrer`, `userAgent`, and timestamp, then sends it through the transport with a centralized try/catch for error safety. `destroy()` invokes all cleanup functions (each wrapped in try/catch), calls `transport.destroy()`, and resets state to allow re-initialization.
 
-### Auto Properties (`src/auto_props.ts`)
+### Auto Properties (`src/parsers.ts`)
 
 Pure utility functions for enriching events with environment context — no browser API access, fully testable in isolation:
 
