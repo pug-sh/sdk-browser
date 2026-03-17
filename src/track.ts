@@ -2,6 +2,7 @@ import { EventSchema, type Event } from '@buf/fivebits_cotton.bufbuild_es/events
 import { create } from '@bufbuild/protobuf'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
 import { parseBrowser, parseOs, parseUtmParams } from './parsers.js'
+import { SDK_VERSION } from './version.js'
 
 /** Options passed to `track()`. `immediate` bypasses batching for priority events; `timestamp` overrides the default current-time. */
 export interface TrackOptions {
@@ -40,6 +41,7 @@ export const toEvent = (projectId: string, kind: string, props?: Record<string, 
       $screenWidth: String(window.screen.width),
       $screenHeight: String(window.screen.height),
       $pageTitle: document.title,
+      $sdkVersion: SDK_VERSION,
       ...utmProps,
     },
     customProperties: props ? flattenJSONValue(props) : {},
