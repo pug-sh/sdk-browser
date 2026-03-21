@@ -4,8 +4,8 @@ interface NavigatorUABrandVersion {
 }
 
 interface UADataValues {
-  readonly platformVersion: string
-  readonly model: string
+  readonly platformVersion?: string
+  readonly model?: string
 }
 
 interface NavigatorUAData {

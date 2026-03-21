@@ -10,6 +10,7 @@ interface UserAgentProps {
 let cachedHighEntropy: { osVersion?: string; device?: string } | null = null
 
 export const initUserAgentData = () => {
+  cachedHighEntropy = null
   const uad = navigator.userAgentData
   if (!uad?.getHighEntropyValues) {
     return
@@ -26,8 +27,8 @@ export const initUserAgentData = () => {
         cachedHighEntropy.device = values.model
       }
     })
-    .catch(() => {
-      // Best-effort — backend fills in from UA header
+    .catch((err: unknown) => {
+      console.warn('[Cotton SDK] High-entropy UA data unavailable:', err)
     })
 }
 

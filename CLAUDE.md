@@ -29,11 +29,13 @@ npm run format:check   # Check formatting without writing
 
 ### Parsers (`src/parsers.ts`)
 
-- `parseUtmParams(search)` — extracts UTM campaign params from a query string via `URLSearchParams`. Returns only UTM params that are present in the query string with non-empty values: `$utmSource`, `$utmMedium`, `$utmCampaign`, `$utmContent`, `$utmTerm`. UA parsing (browser, OS, device type) is handled by the backend.
+- `initUserAgentData()` — called during `init()` to asynchronously warm a high-entropy UA cache via `navigator.userAgentData.getHighEntropyValues()`. Returns void (not a Promise); early events may lack `$osVersion` and `$device` if the promise has not resolved yet. The backend supplements these using the raw UA header.
+- `parseUserAgentData()` — synchronously extracts UA Client Hints from `navigator.userAgentData`. Low-entropy props (`$browser`, `$browserVersion`, `$os`, `$mobile`) are read directly; high-entropy props (`$osVersion`, `$device`) come from the cache populated by `initUserAgentData()`. Returns `{}` on browsers without UA-CH support (Firefox, Safari).
+- `parseUtmParams(search)` — extracts UTM campaign params from a query string via `URLSearchParams`. Returns only UTM params that are present in the query string with non-empty values: `$utmSource`, `$utmMedium`, `$utmCampaign`, `$utmContent`, `$utmTerm`.
 
 ### Event Creation (`src/track.ts`)
 
-`toEvent(projectId, kind, props?, opts?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, and any present UTM params. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
+`toEvent(projectId, kind, props?, opts?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, UA Client Hints when available (`$browser`, `$browserVersion`, `$os`, `$osVersion`, `$device`, `$mobile`), and any present UTM params. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
 
 ### Transport Layer (`src/transport.ts`)
 
