@@ -25,7 +25,7 @@ npm run format:check   # Check formatting without writing
 
 ### Core (`src/cotton.ts`)
 
-`cotton.ts` exports `init(projectId, options)`, `track(kind, props?, opts?)`, and `destroy()`. A single nullable module-scoped `state` object (`{ config, transport } | null`) enforces single initialization. `init()` creates the batched transport (which internally creates the RPC transport) and iterates over tracker setup functions each wrapped in try/catch for isolation. Each tracker returns a cleanup function stored in a module-level `cleanups` array. `track()` uses `toEvent()` from `track.ts` to build a protobuf `Event` and sends it through the transport with a centralized try/catch for error safety. `destroy()` invokes all cleanup functions (each wrapped in try/catch), calls `transport.destroy()`, and resets state to allow re-initialization.
+`cotton.ts` exports `init(projectId, options)`, `track(kind, props?, opts?)`, and `destroy()`. A single nullable module-scoped `state` object (`{ config, transport } | null`) enforces single initialization. `init()` creates the batched transport (which internally creates the RPC transport) and iterates over tracker setup functions each wrapped in try/catch for isolation. Each tracker returns a cleanup function stored in a module-level `cleanups` array. `track()` calls `resolveSessionId()` from `session.ts` on every event, uses `toEvent()` from `track.ts` to build a protobuf `Event`, and sends it through the transport with a centralized try/catch for error safety. `destroy()` invokes all cleanup functions (each wrapped in try/catch), calls `transport.destroy()`, `destroySession()`, and resets state to allow re-initialization.
 
 ### Parsers (`src/parsers.ts`)
 
@@ -33,9 +33,22 @@ npm run format:check   # Check formatting without writing
 - `parseUserAgentData()` — synchronously extracts UA Client Hints from `navigator.userAgentData`. Low-entropy props (`$browser`, `$browserVersion`, `$os`, `$mobile`) are read directly; high-entropy props (`$osVersion`, `$device`) come from the cache populated by `initUserAgentData()`. Returns `{}` on browsers without UA-CH support (Firefox, Safari).
 - `parseUtmParams(search)` — extracts UTM campaign params from a query string via `URLSearchParams`. Returns only UTM params that are present in the query string with non-empty values: `$utmSource`, `$utmMedium`, `$utmCampaign`, `$utmContent`, `$utmTerm`.
 
+### Session Tracking (`src/session.ts`)
+
+Module-level state, no classes. Sessions are lazily initialized on the first `resolveSessionId()` call and persisted to `localStorage` under `cotton_session_state`. Expiry is evaluated lazily on each call — no timers. Cross-tab sync is handled by re-reading storage on every call; if another tab wrote a newer `lastActivityTime`, it is adopted automatically.
+
+- `resolveSessionId()` — `@internal`, called by `cotton.track()` on every event. Reads storage, rotates if expired, updates `lastActivityTime` in memory, debounces storage writes to every 5 s. Returns the current session ID.
+- `rotate()` — generates a new UUIDv4 session ID and writes it to storage immediately. Exported for users who need to force a new session (e.g. on logout).
+- `configureSession(config)` — `@internal`, called by `cotton.init()` when `options.session` is provided. Sets `idleTimeoutMinutes` (default 30) and `maxSessionSeconds` (default 86400).
+- `destroySession()` — removes the storage key, resets all module state and config to defaults. Called by `cotton.destroy()`.
+
+Storage availability is checked once lazily via `isStorageAvailable(localStorage)` from `utils.ts` and cached in `storageRef` (`undefined` = unchecked, `null` = unavailable, `Storage` = available). If unavailable, sessions continue in memory only.
+
+> **Note:** `$sessionId` is currently placed in `autoProperties` as a string. It should eventually become a dedicated top-level field on the protobuf `Event` schema (its own ClickHouse column). Once the proto is updated, the spread in `toEvent()` goes away and `sessionId` is set directly on the `Event` object.
+
 ### Event Creation (`src/track.ts`)
 
-`toEvent(projectId, kind, props?, opts?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, UA Client Hints when available (`$browser`, `$browserVersion`, `$os`, `$osVersion`, `$device`, `$mobile`), and any present UTM params. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
+`toEvent(projectId, kind, props?, opts?, sessionId?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, `$sessionId` (when present), UA Client Hints when available (`$browser`, `$browserVersion`, `$os`, `$osVersion`, `$device`, `$mobile`), and any present UTM params. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
 
 ### Transport Layer (`src/transport.ts`)
 
@@ -70,6 +83,10 @@ Each tracker module exports a `setup*Tracking(track: TrackFn<EventName>)` functi
 | `form.ts`        | `form_start`, `form_submit` | Uses `WeakSet` to deduplicate; listens to input/submit                                                                                                                                                                                                                                                       |
 | `frustration.ts` | `rage_click`, `dead_click`  | Split into `setupRageClickTracking` and `setupDeadClickTracking`. Rage: 3+ clicks in 1s within 40px, 1s cooldown after firing; Dead: no DOM mutation or URL change within 500ms, cleanup disconnects MutationObserver and clears pending timers                                                              |
 
+### Utilities (`src/utils.ts`)
+
+`isStorageAvailable(storage)` — probes a `Storage` instance (localStorage or sessionStorage) with a write/remove sentinel. Returns `true` if available, `false` if blocked (private mode, quota, security policy). Used by `session.ts` and `batch.ts`.
+
 ### Key Patterns
 
 - Trackers receive a `track` function and call it directly — they do not access the transport. All browser event listeners are attached globally (document/window level) during `init()` and removed during `destroy()`.
@@ -85,4 +102,4 @@ Each tracker module exports a `setup*Tracking(track: TrackFn<EventName>)` functi
 - Target/module: ES2020, strict mode, declarations emitted to `dist/`
 - Imports within `src/` use `.js` extensions (required for ES module resolution at runtime)
 - Module resolution: `bundler`
-- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`. Internal module functions and implementation details are not publicly exported.
+- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track`, `rotate` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`, `SessionConfig`. Internal functions (`resolveSessionId`, `configureSession`, `destroySession`) are not publicly exported.

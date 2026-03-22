@@ -1,6 +1,4 @@
-import { uuidv7 } from 'uuidv7'
-
-import { isStorageAvailable } from './utils.js'
+import { generateUUID, isStorageAvailable } from './utils.js'
 
 export interface SessionState {
   readonly sessionId: string
@@ -14,7 +12,7 @@ export interface SessionConfig {
 }
 
 const STORAGE_KEY = 'cotton_session_state'
-const WRITE_DEBOUNCE_MS = 5 * 1000
+const WRITE_DEBOUNCE_MS = 5000
 
 let idleTimeoutMs = 30 * 60 * 1000
 let maxSessionMs = 24 * 60 * 60 * 1000
@@ -67,7 +65,7 @@ const isExpired = (state: SessionState): boolean => {
 }
 
 export const rotate = (): void => {
-  const newState: SessionState = { sessionId: uuidv7(), startTime: Date.now(), lastActivityTime: Date.now() }
+  const newState: SessionState = { sessionId: generateUUID(), startTime: Date.now(), lastActivityTime: Date.now() }
   sessionState = newState
   writeStorage(newState)
 }

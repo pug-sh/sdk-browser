@@ -39,6 +39,7 @@ export const toEvent = (
       $sdkVersion: SDK_VERSION,
       ...parseUserAgentData(),
       ...parseUtmParams(window.location.search),
+      // TODO: move to a top-level field on the protobuf Event schema (dedicated ClickHouse column)
       ...(sessionId ? { $sessionId: sessionId } : {}),
     },
     customProperties: props ? flattenJSONValue(props) : {},
