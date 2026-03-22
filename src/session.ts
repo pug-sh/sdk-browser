@@ -1,4 +1,5 @@
-import { generateUUID, isStorageAvailable } from './utils.js'
+import { uuidv7 } from 'uuidv7'
+import { isStorageAvailable } from './utils.js'
 
 export interface SessionState {
   readonly sessionId: string
@@ -70,7 +71,7 @@ const isExpired = (state: SessionState): boolean => {
 }
 
 export const rotate = (): void => {
-  const newState: SessionState = { sessionId: generateUUID(), startTime: Date.now(), lastActivityTime: Date.now() }
+  const newState: SessionState = { sessionId: uuidv7(), startTime: Date.now(), lastActivityTime: Date.now() }
   sessionState = newState
   writeStorage(newState)
 }
