@@ -38,13 +38,15 @@ const getStorage = (): Storage | null => {
 const readStorage = (): SessionState | null => {
   const s = getStorage()
   if (!s) return null
+  const raw = s.getItem(STORAGE_KEY)
+  if (!raw) return null
   try {
-    const raw = s.getItem(STORAGE_KEY)
-    if (!raw) return null
     const parsed = JSON.parse(raw)
     if (parsed && typeof parsed.sessionId === 'string') return parsed as SessionState
+    console.warn('[Cotton SDK] Session storage data invalid, starting new session.')
     return null
-  } catch {
+  } catch (err) {
+    console.warn('[Cotton SDK] Session storage data corrupted, starting new session:', err)
     return null
   }
 }
@@ -54,8 +56,11 @@ const writeStorage = (state: SessionState): void => {
   if (!s) return
   try {
     s.setItem(STORAGE_KEY, JSON.stringify(state))
-  } catch {
-    // storage full or unavailable — session continues in memory
+  } catch (err) {
+    console.warn(
+      '[Cotton SDK] Failed to persist session to storage (quota exceeded?); session continues in memory only:',
+      err
+    )
   }
 }
 

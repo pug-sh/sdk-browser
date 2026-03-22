@@ -138,11 +138,7 @@ export const destroy = () => {
     log.error('Error during transport destroy:', err)
   }
 
-  try {
-    destroySession()
-  } catch (err) {
-    console.error('[Cotton SDK] Error during session destroy:', err)
-  }
+  destroySession()
 
   cleanups = []
   state = null

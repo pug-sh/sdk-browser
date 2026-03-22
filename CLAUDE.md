@@ -44,11 +44,9 @@ Module-level state, no classes. Sessions are lazily initialized on the first `re
 
 Storage availability is checked once lazily via `isStorageAvailable(localStorage)` from `utils.ts` and cached in `storageRef` (`undefined` = unchecked, `null` = unavailable, `Storage` = available). If unavailable, sessions continue in memory only.
 
-> **Note:** `$sessionId` is currently placed in `autoProperties` as a string. It should eventually become a dedicated top-level field on the protobuf `Event` schema (its own ClickHouse column). Once the proto is updated, the spread in `toEvent()` goes away and `sessionId` is set directly on the `Event` object.
-
 ### Event Creation (`src/track.ts`)
 
-`toEvent(projectId, kind, props?, opts?, sessionId?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, `$sessionId` (when present), UA Client Hints when available (`$browser`, `$browserVersion`, `$os`, `$osVersion`, `$device`, `$mobile`), and any present UTM params. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
+`toEvent(projectId, kind, props?, opts?, sessionId?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, UA Client Hints when available (`$browser`, `$browserVersion`, `$os`, `$osVersion`, `$device`, `$mobile`), and any present UTM params. `sessionId` is set as a top-level field on the `Event` proto (its own ClickHouse column), not a property. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
 
 ### Transport Layer (`src/transport.ts`)
 
