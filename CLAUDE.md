@@ -13,6 +13,10 @@ npm run build          # Compile TypeScript to dist/ (tsc)
 npm run watch          # Watch mode TypeScript compilation
 npm run dev            # Watch TypeScript + serve on port 3000
 npm run serve          # Serve static files on port 3000
+npm run lint           # Run ESLint on TypeScript files
+npm run lint:fix       # Run ESLint with auto-fix
+npm run format         # Format source files with Prettier
+npm run format:check   # Check formatting without writing
 ```
 
 **Manual testing:** After building, run `npm run serve` and open `http://localhost:3000`. No automated test framework is configured.
@@ -21,19 +25,25 @@ npm run serve          # Serve static files on port 3000
 
 ### Core (`src/cotton.ts`)
 
-`cotton.ts` exports `init(projectId, options)`, `track(kind, props?, opts?)`, and `destroy()`. A single nullable module-scoped `state` object (`{ config, transport } | null`) enforces single initialization. `init()` creates the batched transport (which internally creates the RPC transport) and iterates over tracker setup functions, each wrapped in try/catch for isolation. Each tracker returns a cleanup function stored in a module-level `cleanups` array. `track()` uses `toEvent()` from `track.ts` to build a protobuf `Event` enriched with `projectId`, `url`, `referrer`, `userAgent`, and timestamp, then sends it through the transport with a centralized try/catch for error safety. `destroy()` invokes all cleanup functions (each wrapped in try/catch), calls `transport.destroy()`, and resets state to allow re-initialization.
+`cotton.ts` exports `init(projectId, options)`, `track(kind, props?, opts?)`, and `destroy()`. A single nullable module-scoped `state` object (`{ config, transport } | null`) enforces single initialization. `init()` creates the batched transport (which internally creates the RPC transport) and iterates over tracker setup functions each wrapped in try/catch for isolation. Each tracker returns a cleanup function stored in a module-level `cleanups` array. `track()` uses `toEvent()` from `track.ts` to build a protobuf `Event` and sends it through the transport with a centralized try/catch for error safety. `destroy()` invokes all cleanup functions (each wrapped in try/catch), calls `transport.destroy()`, and resets state to allow re-initialization.
+
+### Parsers (`src/parsers.ts`)
+
+- `initUserAgentData()` — called during `init()` to asynchronously warm a high-entropy UA cache via `navigator.userAgentData.getHighEntropyValues()`. Returns void (not a Promise); early events may lack `$osVersion` and `$device` if the promise has not resolved yet. The backend supplements these using the raw UA header.
+- `parseUserAgentData()` — synchronously extracts UA Client Hints from `navigator.userAgentData`. Low-entropy props (`$browser`, `$browserVersion`, `$os`, `$mobile`) are read directly; high-entropy props (`$osVersion`, `$device`) come from the cache populated by `initUserAgentData()`. Returns `{}` on browsers without UA-CH support (Firefox, Safari).
+- `parseUtmParams(search)` — extracts UTM campaign params from a query string via `URLSearchParams`. Returns only UTM params that are present in the query string with non-empty values: `$utmSource`, `$utmMedium`, `$utmCampaign`, `$utmContent`, `$utmTerm`.
 
 ### Event Creation (`src/track.ts`)
 
-`toEvent(projectId, kind, props?, opts?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected: projectId, url, referrer, userAgent) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
+`toEvent(projectId, kind, props?, opts?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, UA Client Hints when available (`$browser`, `$browserVersion`, `$os`, `$osVersion`, `$device`, `$mobile`), and any present UTM params. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
 
 ### Transport Layer (`src/transport.ts`)
 
-`createTransport(endpoint, token)` returns an object with `send`, `sendBatch`, and `beacon` methods. It uses ConnectRPC with protobuf serialization via `@buf/fivebits_cotton.bufbuild_es`. The `beacon` method uses `navigator.sendBeacon` with binary protobuf for reliable delivery during page unload; since `sendBeacon` cannot carry request headers, the API key is appended as a `?x-api-key=` query parameter on the beacon URL.
+`createTransport(endpoint, token)` returns an object with `send`, `sendBatch`, and `beacon` methods. It uses ConnectRPC with protobuf serialization via `@buf/fivebits_cotton.bufbuild_es`. The `beacon` method uses `navigator.sendBeacon` with binary protobuf for reliable delivery during page unload; since `sendBeacon` cannot carry request headers, the API key is appended as a `?api_key=` query parameter on the beacon URL.
 
 ### RPC Client (`src/rpc.ts`)
 
-`createRpcClients(endpoint, token)` creates a ConnectRPC transport with an `x-api-key` header interceptor and returns `eventsService` and `profileService` clients. Uses binary format with a 5s default timeout.
+`createRpcClients(endpoint, token)` creates a ConnectRPC transport with an `x-api-key` header interceptor and returns an `eventsService` client. Uses binary format with a 5s default timeout.
 
 ### Batching Layer (`src/batch.ts`)
 

@@ -5,10 +5,15 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
+    "prebuild": "echo \"export const SDK_VERSION = '$(node -p \"require('./package.json').version\")'\" > src/version.ts",
     "build": "tsc",
     "watch": "tsc -w",
     "dev": "tsc -w & serve . & sleep 1 && open http://localhost:3000 && wait",
-    "serve": "serve . & sleep 1 && open http://localhost:3000 && wait"
+    "serve": "serve . & sleep 1 && open http://localhost:3000 && wait",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\""
   },
   "dependencies": {
     "@buf/fivebits_cotton.bufbuild_es": "2.11.0-20260305141118-7432646b8975.1",
@@ -24,8 +29,16 @@
   "author": "Cotton",
   "license": "ISC",
   "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "eslint": "^9.36.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-prettier": "^5.5.5",
+    "globals": "^16.4.0",
+    "prettier": "^3.5.0",
     "serve": "^14.2.6",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.45.0"
   },
   "prettier": {
     "arrowParens": "avoid",

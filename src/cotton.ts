@@ -4,6 +4,7 @@ import { eventFormStart, eventFormSubmit, setupFormTracking } from './events/for
 import { eventDeadClick, eventRageClick, setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
 import { eventPageView, setupPageViewTracking } from './events/page_view.js'
 import { eventScroll, setupScrollTracking } from './events/scroll.js'
+import { initUserAgentData } from './parsers.js'
 import { toEvent, type TrackFn } from './track.js'
 
 export type CottonEventName =
@@ -67,6 +68,12 @@ export const init = (projectId: string, options: InitOptions) => {
   const config: CottonConfig = { endpoint: options.endpoint || 'http://localhost:8080', projectId }
 
   cleanups = []
+
+  try {
+    initUserAgentData()
+  } catch (err) {
+    console.warn('[Cotton SDK] Failed to initialize user agent data:', err)
+  }
 
   const transport = createBatchedTransport(config.endpoint, options.token, projectId, options.batch)
 
@@ -136,9 +143,8 @@ export const track: TrackFn<CottonEventName> = (kind, props, opts) => {
       return
     }
 
-    const event = toEvent(state.config.projectId, kind, props, opts)
-
     const immediate = opts?.immediate ?? false
+    const event = toEvent(state.config.projectId, kind, props, opts)
     state.transport
       .send(event, { immediate })
       .catch((err: Error) => console.error(`[Cotton SDK] Failed to send event "${kind}":`, err))
