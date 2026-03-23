@@ -37,12 +37,12 @@ npm run format:check   # Check formatting without writing
 
 Module-level state, no classes. Sessions are lazily initialized on the first `resolveSessionId()` call and persisted to `localStorage` under `cotton_session_state`. Expiry is evaluated lazily on each call — no timers. Cross-tab sync is handled by re-reading storage on every call; if another tab wrote a newer `lastActivityTime`, it is adopted automatically.
 
-- `resolveSessionId()` — `@internal`, called by `cotton.track()` on every event. Reads storage, rotates if expired, updates `lastActivityTime` in memory, debounces storage writes to every 5 s. Returns the current session ID.
-- `rotate()` — generates a new UUIDv4 session ID and writes it to storage immediately. Exported for users who need to force a new session (e.g. on logout).
-- `configureSession(config)` — `@internal`, called by `cotton.init()` when `options.session` is provided. Sets `idleTimeoutMinutes` (default 30) and `maxSessionSeconds` (default 86400).
+- `resolveSessionId()` — called by `cotton.track()` on every event. Reads storage on every call (for cross-tab sync), rotates if expired, updates `lastActivityTime`, writes to storage immediately. Returns the current session ID.
+- `rotate()` — generates a new uuidv7 session ID and writes it to storage immediately. Exported for users who need to force a new session (e.g. on logout).
+- `configureSession(config)` — called by `cotton.init()` when `options.session` is provided. Sets `idleTimeoutMinutes` (default 30) and `maxSessionSeconds` (default 86400).
 - `destroySession()` — removes the storage key, resets all module state and config to defaults. Called by `cotton.destroy()`.
 
-Storage availability is checked once lazily via `isStorageAvailable(localStorage)` from `utils.ts` and cached in `storageRef` (`undefined` = unchecked, `null` = unavailable, `Storage` = available). If unavailable, sessions continue in memory only.
+Storage availability is checked once at module load via `isStorageAvailable(localStorage)` from `utils.ts` and stored in a module-level `storage` constant (`Storage | null`). If unavailable, sessions continue in memory only.
 
 ### Event Creation (`src/track.ts`)
 
@@ -100,4 +100,4 @@ Each tracker module exports a `setup*Tracking(track: TrackFn<EventName>)` functi
 - Target/module: ES2020, strict mode, declarations emitted to `dist/`
 - Imports within `src/` use `.js` extensions (required for ES module resolution at runtime)
 - Module resolution: `bundler`
-- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track`, `rotate` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`, `SessionConfig`. Internal functions (`resolveSessionId`, `configureSession`, `destroySession`) are not publicly exported.
+- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track`, `rotate` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`, `SessionConfig`. `resolveSessionId`, `configureSession`, and `destroySession` are not re-exported from the barrel.

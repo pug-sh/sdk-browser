@@ -1,7 +1,7 @@
 import { uuidv7 } from 'uuidv7'
 import { isStorageAvailable } from './utils.js'
 
-export interface SessionState {
+interface SessionState {
   readonly sessionId: string
   readonly startTime: number
   readonly lastActivityTime: number
@@ -13,55 +13,35 @@ export interface SessionConfig {
 }
 
 const STORAGE_KEY = 'cotton_session_state'
-const WRITE_DEBOUNCE_MS = 5000
-
 let idleTimeoutMs = 30 * 60 * 1000
 let maxSessionMs = 24 * 60 * 60 * 1000
 
-/** @internal Called by cotton's init(). */
 export const configureSession = (config: SessionConfig): void => {
   if (config.idleTimeoutMinutes) idleTimeoutMs = config.idleTimeoutMinutes * 60 * 1000
   if (config.maxSessionSeconds) maxSessionMs = config.maxSessionSeconds * 1000
 }
 
 let sessionState: SessionState | null = null
-// undefined = not yet checked; null = checked, unavailable; Storage = available
-let storageRef: Storage | null | undefined = undefined
-
-const getStorage = (): Storage | null => {
-  if (storageRef === undefined) {
-    storageRef = isStorageAvailable(localStorage) ? localStorage : null
-    if (!storageRef) console.warn('[SessionManager] Storage unavailable; session state will not persist.')
-  }
-  return storageRef
-}
+const storage: Storage | null = isStorageAvailable(localStorage) ? localStorage : null
+if (!storage) console.warn('[Cotton SDK] Storage unavailable; session state will not persist.')
 
 const readStorage = (): SessionState | null => {
-  const s = getStorage()
-  if (!s) return null
-  const raw = s.getItem(STORAGE_KEY)
-  if (!raw) return null
+  if (!storage) return null
   try {
-    const parsed = JSON.parse(raw)
+    const parsed = JSON.parse(storage.getItem(STORAGE_KEY) ?? 'null')
     if (parsed && typeof parsed.sessionId === 'string') return parsed as SessionState
-    console.warn('[Cotton SDK] Session storage data invalid, starting new session.')
-    return null
-  } catch (err) {
-    console.warn('[Cotton SDK] Session storage data corrupted, starting new session:', err)
-    return null
+  } catch {
+    // corrupted or missing — start fresh
   }
+  return null
 }
 
 const writeStorage = (state: SessionState): void => {
-  const s = getStorage()
-  if (!s) return
+  if (!storage) return
   try {
-    s.setItem(STORAGE_KEY, JSON.stringify(state))
+    storage.setItem(STORAGE_KEY, JSON.stringify(state))
   } catch (err) {
-    console.warn(
-      '[Cotton SDK] Failed to persist session to storage (quota exceeded?); session continues in memory only:',
-      err
-    )
+    console.warn('[Cotton SDK] Failed to persist session to storage:', err)
   }
 }
 
@@ -71,29 +51,25 @@ const isExpired = (state: SessionState): boolean => {
 }
 
 export const rotate = (): void => {
-  const newState: SessionState = { sessionId: uuidv7(), startTime: Date.now(), lastActivityTime: Date.now() }
+  const now = Date.now()
+  const newState: SessionState = { sessionId: uuidv7(), startTime: now, lastActivityTime: now }
   sessionState = newState
   writeStorage(newState)
 }
 
-/** @internal Called by cotton's track() on every event. */
 export const resolveSessionId = (): string => {
   sessionState = readStorage() ?? sessionState
   if (!sessionState || isExpired(sessionState)) rotate()
 
-  const now = Date.now()
-  const state = sessionState!
-  const next = { ...state, lastActivityTime: now }
+  const next = { ...(sessionState as SessionState), lastActivityTime: Date.now() }
   sessionState = next
-  if (now - state.lastActivityTime > WRITE_DEBOUNCE_MS) writeStorage(next)
+  writeStorage(next)
   return next.sessionId
 }
 
-/** Resets session state. Called automatically by cotton's destroy(). */
 export const destroySession = (): void => {
-  getStorage()?.removeItem(STORAGE_KEY)
+  storage?.removeItem(STORAGE_KEY)
   sessionState = null
-  storageRef = undefined
   idleTimeoutMs = 30 * 60 * 1000
   maxSessionMs = 24 * 60 * 60 * 1000
 }
