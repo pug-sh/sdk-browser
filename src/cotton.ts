@@ -6,7 +6,7 @@ import { eventPageView, setupPageViewTracking } from './events/page_view.js'
 import { eventScroll, setupScrollTracking } from './events/scroll.js'
 import { log } from './logger.js'
 import { initUserAgentData } from './parsers.js'
-import { configureSession, destroySession, resolveSessionId, type SessionConfig } from './session.js'
+import { configureSession, destroySession, resetIdentity, resolveSessionId, type SessionConfig } from './session.js'
 import { toEvent, type TrackFn } from './track.js'
 
 export type CottonEventName =
@@ -74,7 +74,7 @@ export const init = (projectId: string, options: InitOptions) => {
 
   cleanups = []
 
-  if (options.session) configureSession(options.session)
+  configureSession(projectId, options.session)
 
   try {
     initUserAgentData()
@@ -144,6 +144,11 @@ export const destroy = () => {
   state = null
 }
 
+export const reset = () => {
+  if (typeof window === 'undefined') return
+  resetIdentity()
+}
+
 /** This function must never throw. Callers (e.g. monkey-patched history.pushState) rely on it being safe. */
 export const track: TrackFn<CottonEventName> = (kind, props, opts) => {
   try {
@@ -158,8 +163,7 @@ export const track: TrackFn<CottonEventName> = (kind, props, opts) => {
 
     log.debug(`track("${kind}")`)
     const immediate = opts?.immediate ?? false
-    const sessionId = resolveSessionId()
-    const event = toEvent(state.config.projectId, kind, props, opts, sessionId)
+    const event = toEvent(state.config.projectId, kind, resolveSessionId(), props, opts)
     if (state.dryRun) {
       log.debug(`dryRun: would send "${kind}"`)
       return
