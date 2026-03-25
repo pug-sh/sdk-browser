@@ -19,11 +19,16 @@ const DEFAULT_CONFIG = {
   storageKey: '',
 }
 
+const HEARTBEAT_INTERVAL_MS = 10_000
+
 let config = { ...DEFAULT_CONFIG }
 
 let state: StoredState | null = null
 let storage: Storage | null = null
-let tabCounterKey = ''
+let tabsKey = ''
+let tabId = ''
+let lastHeartbeat = 0
+let fallbackSessionId = ''
 let onPageHide: (() => void) | null = null
 
 export const configureSession = (projectId: string, sessionConfig?: SessionConfig): void => {
@@ -31,33 +36,10 @@ export const configureSession = (projectId: string, sessionConfig?: SessionConfi
   if (!storage) {
     console.warn('[Cotton SDK] Storage unavailable; session state will not persist.')
   }
+  fallbackSessionId = uuidv7()
   config.storageKey = makeStorageKey(projectId, 'session')
-  tabCounterKey = makeStorageKey(projectId, 'tabs')
-
-  // Track open tab count to detect "all tabs closed then reopened".
-  // Increment on init, decrement on pagehide. If count was 0 when
-  // this tab opened and a previous session exists, rotate.
-  if (storage) {
-    const prevCount = parseInt(storage.getItem(tabCounterKey) ?? '0', 10) || 0
-    storage.setItem(tabCounterKey, String(prevCount + 1))
-
-    if (prevCount === 0) {
-      const existing = read()
-      if (existing) {
-        rotate()
-      }
-    }
-
-    onPageHide = () => {
-      try {
-        const count = parseInt(storage!.getItem(tabCounterKey) ?? '1', 10) || 1
-        storage!.setItem(tabCounterKey, String(Math.max(0, count - 1)))
-      } catch {
-        // storage may be unavailable during unload
-      }
-    }
-    window.addEventListener('pagehide', onPageHide)
-  }
+  tabsKey = makeStorageKey(projectId, 'tabs')
+  tabId = Math.random().toString(36).slice(2)
 
   if (sessionConfig?.idleTimeoutMinutes != null) {
     if (sessionConfig.idleTimeoutMinutes > 0) {
@@ -71,6 +53,57 @@ export const configureSession = (projectId: string, sessionConfig?: SessionConfi
       config.maxSessionMs = sessionConfig.maxSessionMinutes * 60 * 1000
     } else {
       console.warn('[Cotton SDK] session.maxSessionMinutes must be > 0, using default.')
+    }
+  }
+
+  // Track active tabs via per-tab timestamps in localStorage.
+  // On init, prune entries older than idleTimeoutMs. If none survive,
+  // all tabs were closed — rotate session. Self-heals from crashed
+  // tabs since stale entries are pruned automatically.
+  if (storage) {
+    try {
+      let tabs: Record<string, number> = {}
+      try {
+        tabs = JSON.parse(storage.getItem(tabsKey) ?? '{}')
+      } catch {
+        // corrupted — start fresh
+      }
+
+      const now = Date.now()
+      const alive: Record<string, number> = {}
+      for (const [id, ts] of Object.entries(tabs)) {
+        if (typeof ts === 'number' && now - ts < config.idleTimeoutMs) {
+          alive[id] = ts
+        }
+      }
+
+      const allTabsWereClosed = Object.keys(alive).length === 0
+      alive[tabId] = now
+      lastHeartbeat = now
+      storage.setItem(tabsKey, JSON.stringify(alive))
+
+      if (allTabsWereClosed) {
+        const existing = read()
+        if (existing) {
+          rotate()
+        }
+      }
+
+      onPageHide = () => {
+        try {
+          if (!storage) {
+            return
+          }
+          const current: Record<string, number> = JSON.parse(storage.getItem(tabsKey) ?? '{}')
+          delete current[tabId]
+          storage.setItem(tabsKey, JSON.stringify(current))
+        } catch {
+          // storage may be unavailable during unload
+        }
+      }
+      window.addEventListener('pagehide', onPageHide)
+    } catch (err) {
+      console.warn('[Cotton SDK] Tab tracking initialization failed:', err)
     }
   }
 }
@@ -102,6 +135,14 @@ const write = (s: StoredState): void => {
   }
   try {
     storage.setItem(config.storageKey, JSON.stringify(s))
+    // Debounced heartbeat — only update if enough time has passed.
+    const now = Date.now()
+    if (tabId && tabsKey && now - lastHeartbeat > HEARTBEAT_INTERVAL_MS) {
+      const tabs: Record<string, number> = JSON.parse(storage.getItem(tabsKey) ?? '{}')
+      tabs[tabId] = now
+      storage.setItem(tabsKey, JSON.stringify(tabs))
+      lastHeartbeat = now
+    }
   } catch (err) {
     console.warn('[Cotton SDK] Failed to persist state to storage:', err)
   }
@@ -132,13 +173,18 @@ export const resolveSessionId = (): string => {
       rotate()
     }
 
-    const next = { ...(state as StoredState), lastActivityTime: Date.now() }
+    if (!state) {
+      console.warn('[Cotton SDK] Session state unavailable after rotation attempt.')
+      return fallbackSessionId
+    }
+
+    const next = { ...state, lastActivityTime: Date.now() }
     state = next
     write(next)
     return next.sessionId
   } catch (err) {
     console.warn('[Cotton SDK] Failed to resolve session ID:', err)
-    return state?.sessionId ?? 'unknown'
+    return state?.sessionId ?? fallbackSessionId
   }
 }
 
@@ -157,12 +203,24 @@ export const destroySession = (): void => {
   }
   try {
     storage?.removeItem(config.storageKey)
-    storage?.removeItem(tabCounterKey)
+    // Only remove this tab's entry, not the entire tabs registry.
+    if (storage && tabsKey && tabId) {
+      const tabs: Record<string, number> = JSON.parse(storage.getItem(tabsKey) ?? '{}')
+      delete tabs[tabId]
+      if (Object.keys(tabs).length === 0) {
+        storage.removeItem(tabsKey)
+      } else {
+        storage.setItem(tabsKey, JSON.stringify(tabs))
+      }
+    }
   } catch (err) {
     console.warn('[Cotton SDK] Failed to remove session state from storage:', err)
   }
   state = null
   storage = null
-  tabCounterKey = ''
+  tabsKey = ''
+  tabId = ''
+  lastHeartbeat = 0
+  fallbackSessionId = ''
   config = { ...DEFAULT_CONFIG }
 }

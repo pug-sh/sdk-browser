@@ -74,7 +74,11 @@ export const init = (projectId: string, options: InitOptions) => {
 
   cleanups = []
 
-  configureSession(projectId, options.session)
+  try {
+    configureSession(projectId, options.session)
+  } catch (err) {
+    console.warn('[Cotton SDK] Failed to configure session tracking:', err)
+  }
 
   try {
     initUserAgentData()

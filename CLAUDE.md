@@ -39,7 +39,7 @@ Module-level state, no classes. Sessions are lazily initialized on the first `re
 
 - `resolveSessionId()` — called by `cotton.track()` on every event. Reads storage on every call (for cross-tab sync), rotates if expired, updates `lastActivityTime`, writes to storage immediately. Returns the current session ID.
 - `rotate()` — generates a new uuidv7 session ID and writes it to storage immediately. Exported for users who need to force a new session (e.g. on logout).
-- `configureSession(config)` — called by `cotton.init()` when `options.session` is provided. Sets `idleTimeoutMinutes` (default 30) and `maxSessionSeconds` (default 86400).
+- `configureSession(projectId, config?)` — called by `cotton.init()`. Sets `idleTimeoutMinutes` (default 30) and `maxSessionMinutes` (default 1440).
 - `destroySession()` — removes the storage key, resets all module state and config to defaults. Called by `cotton.destroy()`.
 
 Storage availability is checked once at module load via `isStorageAvailable(localStorage)` from `utils.ts` and stored in a module-level `storage` constant (`Storage | null`). If unavailable, sessions continue in memory only.
@@ -100,4 +100,4 @@ Each tracker module exports a `setup*Tracking(track: TrackFn<EventName>)` functi
 - Target/module: ES2020, strict mode, declarations emitted to `dist/`
 - Imports within `src/` use `.js` extensions (required for ES module resolution at runtime)
 - Module resolution: `bundler`
-- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track`, `reset`, `rotate` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`, `SessionConfig`. `resolveSessionId`, `configureSession`, and `destroySession` are not re-exported from the barrel.
+- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track`, `reset`, `rotate` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`, `SessionConfig`. `resolveSessionId`, `configureSession`, `destroySession`, and `resetIdentity` are not re-exported from the barrel.
