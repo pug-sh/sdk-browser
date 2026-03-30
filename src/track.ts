@@ -2,6 +2,7 @@ import { EventSchema } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_p
 import { create } from '@bufbuild/protobuf'
 import { createValidator } from '@bufbuild/protovalidate'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
+import { log } from './logger.js'
 import { parseUserAgentData, parseUtmParams } from './parsers.js'
 import { SDK_VERSION } from './version.js'
 
@@ -51,10 +52,7 @@ export const toEvent = (
 
   const result = validator.validate(EventSchema, event)
   if (result.kind === 'invalid') {
-    console.warn(
-      `[Cotton SDK] Event "${kind}" has validation issues:`,
-      result.violations.map(v => `${v.field}: ${v.message}`).join(', ')
-    )
+    log.warn(`Event "${kind}" has validation issues:`, result.violations.map(v => `${v.field}: ${v.message}`).join(', '))
   }
 
   return event

@@ -77,7 +77,7 @@ export const init = (projectId: string, options: InitOptions) => {
   try {
     configureSession(projectId, options.session)
   } catch (err) {
-    console.warn('[Cotton SDK] Failed to configure session tracking:', err)
+    log.warn('Failed to configure session tracking:', err)
   }
 
   try {

@@ -3,6 +3,7 @@ import { create } from '@bufbuild/protobuf'
 import { createValidator } from '@bufbuild/protovalidate'
 import { createClient } from '@connectrpc/connect'
 import { createConnectTransport } from '@connectrpc/connect-web'
+import { log } from './logger.js'
 import { isStorageAvailable, urlBase64ToUint8Array } from './utils.js'
 
 const validator = createValidator()
@@ -14,7 +15,7 @@ const generateDeviceId = (): string => {
   try {
     return crypto.randomUUID()
   } catch (err) {
-    console.warn('[Cotton SDK] crypto.randomUUID() unavailable, falling back to Math.random():', err)
+    log.warn('crypto.randomUUID() unavailable, falling back to Math.random():', err)
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
       const r = (Math.random() * 16) | 0
       return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
@@ -34,7 +35,7 @@ const getOrCreateDeviceId = (): string => {
       return id
     }
   } catch (err) {
-    console.warn('[Cotton SDK] localStorage access failed for device ID, using ephemeral ID:', err)
+    log.warn('localStorage access failed for device ID, using ephemeral ID:', err)
   }
   return generateDeviceId()
 }
@@ -160,7 +161,7 @@ export const setupNotificationClickTracking = (
           track('notification_click', data)
         }
       } catch (err) {
-        console.warn('[Cotton SDK] Malformed cotton_nc parameter:', err)
+        log.warn('Malformed cotton_nc parameter:', err)
       }
       url.searchParams.delete('cotton_nc')
       history.replaceState(null, '', url.toString())
@@ -186,20 +187,20 @@ export const setupNotificationClickTracking = (
 
 export const unsubscribePush = async (options?: { swPath?: string }): Promise<void> => {
   if (!('serviceWorker' in navigator)) {
-    console.warn('[Cotton SDK] Cannot unsubscribe: serviceWorker not available')
+    log.warn('Cannot unsubscribe: serviceWorker not available')
     return
   }
 
   const swPath = options?.swPath ?? DEFAULT_SW_PATH
   const reg = await navigator.serviceWorker.getRegistration(swPath)
   if (!reg) {
-    console.warn(`[Cotton SDK] No service worker registration found at "${swPath}"`)
+    log.warn(`No service worker registration found at "${swPath}"`)
     return
   }
 
   const subscription = await reg.pushManager.getSubscription()
   if (!subscription) {
-    console.warn('[Cotton SDK] No active push subscription found')
+    log.warn('No active push subscription found')
     return
   }
 
