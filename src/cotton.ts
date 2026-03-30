@@ -78,7 +78,7 @@ export const init = (projectId: string, options: InitOptions) => {
   try {
     configureSession(projectId, options.session)
   } catch (err) {
-    console.warn('[Cotton SDK] Failed to configure session tracking:', err)
+    log.warn('Failed to configure session tracking:', err)
   }
 
   try {
@@ -91,23 +91,28 @@ export const init = (projectId: string, options: InitOptions) => {
 
   state = { config, transport, dryRun: options.dryRun ?? false }
 
-  if (state.dryRun) log.warn('Dry run mode enabled — events will not be sent.')
-
-  const autoTrack = options.autoTrack ?? true
-  if (!autoTrack) {
-    log.debug('AutoTrack disabled — no trackers initialized.')
+  if (state.dryRun) {
+    log.warn('Dry run mode enabled — events will not be sent.')
   }
 
-  const trackers = autoTrack
-    ? [
-        setupPageViewTracking,
-        setupClickTracking,
-        setupScrollTracking,
-        setupFormTracking,
-        setupRageClickTracking,
-        setupDeadClickTracking,
-      ]
-    : []
+  const autoTrack = typeof options.autoTrack === 'boolean' ? options.autoTrack : true
+  if (options.autoTrack !== undefined && !autoTrack) {
+    log.warn(`autoTrack must be a boolean, got ${typeof options.autoTrack}. Defaulting to true.`)
+  }
+
+  if (!autoTrack) {
+    log.warn('Initialized (autoTrack disabled — no trackers).')
+    return
+  }
+
+  const trackers = [
+    setupPageViewTracking,
+    setupClickTracking,
+    setupScrollTracking,
+    setupFormTracking,
+    setupRageClickTracking,
+    setupDeadClickTracking,
+  ]
 
   let failedCount = 0
   for (const setup of trackers) {

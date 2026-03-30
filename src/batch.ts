@@ -199,7 +199,9 @@ export const createBatchedTransport = (
 ) => {
   const merged = { ...DEFAULT_BATCH_CONFIG, ...partialConfig }
   const validated = (name: string, value: number, min: number, fallback: number) => {
-    if (value >= min) return value
+    if (value >= min) {
+      return value
+    }
     log.warn(`batch.${name} must be >= ${min}, using default.`)
     return fallback
   }
