@@ -1,4 +1,5 @@
 import { uuidv7 } from 'uuidv7'
+import { log } from './logger.js'
 import { isStorageAvailable, makeStorageKey } from './utils.js'
 
 interface StoredState {
@@ -34,7 +35,7 @@ let onPageHide: (() => void) | null = null
 export const configureSession = (projectId: string, sessionConfig?: SessionConfig): void => {
   storage = isStorageAvailable() ? localStorage : null
   if (!storage) {
-    console.warn('[Cotton SDK] Storage unavailable; session state will not persist.')
+    log.warn('Storage unavailable; session state will not persist.')
   }
   fallbackSessionId = uuidv7()
   config.storageKey = makeStorageKey(projectId, 'session')
@@ -45,14 +46,14 @@ export const configureSession = (projectId: string, sessionConfig?: SessionConfi
     if (sessionConfig.idleTimeoutMinutes > 0) {
       config.idleTimeoutMs = sessionConfig.idleTimeoutMinutes * 60 * 1000
     } else {
-      console.warn('[Cotton SDK] session.idleTimeoutMinutes must be > 0, using default.')
+      log.warn('session.idleTimeoutMinutes must be > 0, using default.')
     }
   }
   if (sessionConfig?.maxSessionMinutes != null) {
     if (sessionConfig.maxSessionMinutes > 0) {
       config.maxSessionMs = sessionConfig.maxSessionMinutes * 60 * 1000
     } else {
-      console.warn('[Cotton SDK] session.maxSessionMinutes must be > 0, using default.')
+      log.warn('session.maxSessionMinutes must be > 0, using default.')
     }
   }
 
@@ -103,7 +104,7 @@ export const configureSession = (projectId: string, sessionConfig?: SessionConfi
       }
       window.addEventListener('pagehide', onPageHide)
     } catch (err) {
-      console.warn('[Cotton SDK] Tab tracking initialization failed:', err)
+      log.warn('Tab tracking initialization failed:', err)
     }
   }
 }
@@ -124,7 +125,7 @@ const read = (): StoredState | null => {
       return parsed as StoredState
     }
   } catch (err) {
-    console.warn('[Cotton SDK] Failed to read session state (starting fresh):', err)
+    log.warn('Failed to read session state (starting fresh):', err)
   }
   return null
 }
@@ -144,7 +145,7 @@ const write = (s: StoredState): void => {
       lastHeartbeat = now
     }
   } catch (err) {
-    console.warn('[Cotton SDK] Failed to persist state to storage:', err)
+    log.warn('Failed to persist state to storage:', err)
   }
 }
 
@@ -156,7 +157,7 @@ const isExpired = (s: StoredState): boolean => {
 // Rotates session only — preserves deviceId across sessions
 export const rotate = (): void => {
   if (!config.storageKey) {
-    console.warn('[Cotton SDK] rotate() called before init().')
+    log.warn('rotate() called before init().')
     return
   }
   const now = Date.now()
@@ -174,7 +175,7 @@ export const resolveSessionId = (): string => {
     }
 
     if (!state) {
-      console.warn('[Cotton SDK] Session state unavailable after rotation attempt.')
+      log.warn('Session state unavailable after rotation attempt.')
       return fallbackSessionId
     }
 
@@ -183,7 +184,7 @@ export const resolveSessionId = (): string => {
     write(next)
     return next.sessionId
   } catch (err) {
-    console.warn('[Cotton SDK] Failed to resolve session ID:', err)
+    log.warn('Failed to resolve session ID:', err)
     return state?.sessionId ?? fallbackSessionId
   }
 }
@@ -214,7 +215,7 @@ export const destroySession = (): void => {
       }
     }
   } catch (err) {
-    console.warn('[Cotton SDK] Failed to remove session state from storage:', err)
+    log.warn('Failed to remove session state from storage:', err)
   }
   state = null
   storage = null

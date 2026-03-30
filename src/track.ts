@@ -1,8 +1,12 @@
-import { EventSchema } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb.js'
+import { type Event, EventSchema } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb.js'
 import { create } from '@bufbuild/protobuf'
+import { createValidator } from '@bufbuild/protovalidate'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
+import { log } from './logger.js'
 import { parseUserAgentData, parseUtmParams } from './parsers.js'
 import { SDK_VERSION } from './version.js'
+
+const validator = createValidator()
 
 /** Options passed to `track()`. `immediate` bypasses batching for priority events; `timestamp` overrides the default current-time (epoch milliseconds, e.g. `Date.now()`). */
 export interface TrackOptions {
@@ -26,8 +30,8 @@ export const toEvent = (
   sessionId: string,
   props?: Record<string, JSONValue>,
   opts?: TrackOptions
-) => {
-  return create(EventSchema, {
+): Event | null => {
+  const event = create(EventSchema, {
     autoProperties: {
       $projectId: projectId,
       $url: window.location.href,
@@ -45,6 +49,14 @@ export const toEvent = (
     sessionId,
     occurTime: opts?.timestamp ? timestampFromMs(opts.timestamp) : timestampNow(),
   })
+
+  const result = validator.validate(EventSchema, event)
+  if (result.kind === 'invalid') {
+    log.error(`Event "${kind}" failed validation:`, result.violations.map(v => `${v.field}: ${v.message}`).join(', '))
+    return null
+  }
+
+  return event
 }
 
 export type TrackFn<T extends string> = (event: T, props?: Record<string, JSONValue>, options?: TrackOptions) => void

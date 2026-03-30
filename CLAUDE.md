@@ -35,18 +35,18 @@ npm run format:check   # Check formatting without writing
 
 ### Session Tracking (`src/session.ts`)
 
-Module-level state, no classes. Sessions are lazily initialized on the first `resolveSessionId()` call and persisted to `localStorage` under `cotton_session_state`. Expiry is evaluated lazily on each call — no timers. Cross-tab sync is handled by re-reading storage on every call; if another tab wrote a newer `lastActivityTime`, it is adopted automatically.
+Module-level state, no classes. Sessions are lazily initialized on the first `resolveSessionId()` call and persisted to `localStorage` under a project-namespaced key (`__cotton_<projectId>_session__` via `makeStorageKey`). Expiry is evaluated lazily on each call — no timers. Cross-tab sync is handled by re-reading storage on every call; if another tab wrote a newer `lastActivityTime`, it is adopted automatically.
 
 - `resolveSessionId()` — called by `cotton.track()` on every event. Reads storage on every call (for cross-tab sync), rotates if expired, updates `lastActivityTime`, writes to storage immediately. Returns the current session ID.
 - `rotate()` — generates a new uuidv7 session ID and writes it to storage immediately. Exported for users who need to force a new session (e.g. on logout).
 - `configureSession(projectId, config?)` — called by `cotton.init()`. Sets `idleTimeoutMinutes` (default 30) and `maxSessionMinutes` (default 1440).
 - `destroySession()` — removes the storage key, resets all module state and config to defaults. Called by `cotton.destroy()`.
 
-Storage availability is checked once at module load via `isStorageAvailable(localStorage)` from `utils.ts` and stored in a module-level `storage` constant (`Storage | null`). If unavailable, sessions continue in memory only.
+Storage availability is checked during `configureSession()` via `isStorageAvailable()` and stored in a module-level `storage` variable (`Storage | null`). If unavailable, sessions continue in memory only.
 
 ### Event Creation (`src/track.ts`)
 
-`toEvent(projectId, kind, props?, opts?, sessionId?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, UA Client Hints when available (`$browser`, `$browserVersion`, `$os`, `$osVersion`, `$device`, `$mobile`), and any present UTM params. `sessionId` is set as a top-level field on the `Event` proto (its own ClickHouse column), not a property. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
+`toEvent(projectId, kind, sessionId, props?, opts?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, UA Client Hints when available (`$browser`, `$browserVersion`, `$os`, `$osVersion`, `$device`, `$mobile`), and any present UTM params. `sessionId` is set as a top-level field on the `Event` proto (its own ClickHouse column), not a property. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
 
 ### Transport Layer (`src/transport.ts`)
 
@@ -81,9 +81,23 @@ Each tracker module exports a `setup*Tracking(track: TrackFn<EventName>)` functi
 | `form.ts`        | `form_start`, `form_submit` | Uses `WeakSet` to deduplicate; listens to input/submit                                                                                                                                                                                                                                                       |
 | `frustration.ts` | `rage_click`, `dead_click`  | Split into `setupRageClickTracking` and `setupDeadClickTracking`. Rage: 3+ clicks in 1s within 40px, 1s cooldown after firing; Dead: no DOM mutation or URL change within 500ms, cleanup disconnects MutationObserver and clears pending timers                                                              |
 
+### Push Notifications (`src/push.ts`, `cotton_sw.js`)
+
+Push is an optional, tree-shakeable module — `cotton.ts` never imports it, so non-push users pay zero bundle cost.
+
+**`src/push.ts`** exports three functions:
+
+- `subscribePush(vapidPublicKey, options)` — registers the service worker at `options.swPath` (default `/cotton_sw.js`), waits for it to become active, subscribes via VAPID, generates/retrieves a persistent `deviceId` from `localStorage` (`cotton_device_id`), and calls `DevicesService.Subscribe`. Requires `options.endpoint` and `options.token` (same values passed to `init()`). Does not read cotton's internal state.
+- `unsubscribePush(options?)` — unsubscribes the push subscription from `pushManager`.
+- `setupNotificationClickTracking(track)` — sets up `notification_click` tracking across two cases: (1) page already open: listens for a `cotton_notification_click` postMessage from the SW; (2) page opened by the click: reads `?cotton_nc=<JSON>` from the URL, calls `track`, strips the param with `history.replaceState`. Returns a cleanup function.
+
+**`cotton_sw.js`** (project root, copy to public dir) — drop-in service worker. Handles `install`/`activate`/`push`/`notificationclick`. On `notificationclick`: if a page is open, sends a postMessage to the first matched window (which is then focused); if no page is open, opens `targetUrl?cotton_nc=<data>` so `setupNotificationClickTracking` can read it on load.
+
 ### Utilities (`src/utils.ts`)
 
-`isStorageAvailable(storage)` — probes a `Storage` instance (localStorage or sessionStorage) with a write/remove sentinel. Returns `true` if available, `false` if blocked (private mode, quota, security policy). Used by `session.ts` and `batch.ts`.
+- `makeStorageKey(projectId, name)` — generates a namespaced localStorage key.
+- `urlBase64ToUint8Array(base64String)` — converts a VAPID public key from base64url to `Uint8Array<ArrayBuffer>` for `pushManager.subscribe()`.
+- `isStorageAvailable()` — probes localStorage with a write/remove sentinel. Returns `true` if available, `false` if blocked (private mode, quota, security policy). Used by `session.ts`, `batch.ts`, and `push.ts`.
 
 ### Key Patterns
 
@@ -93,11 +107,11 @@ Each tracker module exports a `setup*Tracking(track: TrackFn<EventName>)` functi
 
 ### Design Invariants
 
-- **`track()` must never throw.** It is wrapped in a centralized try/catch (with defensive `console.error` logging) and any transport errors are caught via `.catch()`. Because trackers call `track()` from places like monkey-patched `history.pushState`/`replaceState`, an exception would break the host application. Callers may rely on `track()` being safe to call without their own error handling.
+- **`track()` must never throw.** It is wrapped in a centralized try/catch (with defensive logging via the internal `log` module) and any transport errors are caught via `.catch()`. Because trackers call `track()` from places like monkey-patched `history.pushState`/`replaceState`, an exception would break the host application. Callers may rely on `track()` being safe to call without their own error handling.
 
 ## TypeScript & Module Setup
 
 - Target/module: ES2020, strict mode, declarations emitted to `dist/`
 - Imports within `src/` use `.js` extensions (required for ES module resolution at runtime)
 - Module resolution: `bundler`
-- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track`, `reset`, `rotate` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`, `SessionConfig`. `resolveSessionId`, `configureSession`, `destroySession`, and `resetIdentity` are not re-exported from the barrel.
+- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track`, `reset`, `rotate` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`, `SessionConfig`; and from `push.ts`: `subscribePush`, `unsubscribePush`, `setupNotificationClickTracking`, `PushOptions`. Internal module functions and implementation details are not publicly exported.

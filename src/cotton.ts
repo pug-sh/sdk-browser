@@ -77,7 +77,7 @@ export const init = (projectId: string, options: InitOptions) => {
   try {
     configureSession(projectId, options.session)
   } catch (err) {
-    console.warn('[Cotton SDK] Failed to configure session tracking:', err)
+    log.warn('Failed to configure session tracking:', err)
   }
 
   try {
@@ -178,6 +178,9 @@ export const track: TrackFn<CottonEventName> = (kind, props, opts) => {
     log.debug(`track("${kind}")`)
     const immediate = opts?.immediate ?? false
     const event = toEvent(state.config.projectId, kind, resolveSessionId(), props, opts)
+    if (!event) {
+      return
+    }
     if (state.dryRun) {
       log.debug(`dryRun: would send "${kind}"`)
       return
