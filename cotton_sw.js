@@ -1,3 +1,7 @@
+// Cotton Web SDK — drop-in push notification service worker.
+// Copy this file to your public directory and pass its path to subscribePush().
+// See README.md for details.
+
 self.addEventListener('install', () => self.skipWaiting())
 
 self.addEventListener('activate', event => event.waitUntil(clients.claim()))
@@ -50,6 +54,7 @@ self.addEventListener('notificationclick', event => {
       })
       .catch(err => {
         console.error('[Cotton SW] notificationclick handler failed:', err)
-      }),
+        return clients.openWindow('/')
+      })
   )
 })

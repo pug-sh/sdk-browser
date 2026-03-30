@@ -89,6 +89,8 @@ self.addEventListener('notificationclick', (event) => {
 })
 ```
 
+> **Note:** This simplified handler does not support `setupNotificationClickTracking`. For notification click tracking, use the full `cotton_sw.js` instead.
+
 Then pass your existing service worker path to `subscribePush`:
 
 ```ts
@@ -97,7 +99,7 @@ await subscribePush(VAPID_PUBLIC_KEY, { swPath: '/my-sw.js' })
 
 ### API
 
-#### `subscribePush(vapidPublicKey, options?)`
+#### `subscribePush(vapidPublicKey, options)`
 
 Registers the browser for push notifications and sends the subscription to Cotton's `DevicesService.Subscribe` RPC.
 

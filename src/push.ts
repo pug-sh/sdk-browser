@@ -2,8 +2,9 @@ import { DevicesService, SubscribeRequestSchema } from '@buf/fivebits_cotton.buf
 import { create } from '@bufbuild/protobuf'
 import { createValidator } from '@bufbuild/protovalidate'
 import { createClient } from '@connectrpc/connect'
-import { createConnectTransport } from '@connectrpc/connect-web'
+import { createApiTransport } from './api-transport.js'
 import { log } from './logger.js'
+import type { JSONValue, TrackFn } from './track.js'
 import { isStorageAvailable, urlBase64ToUint8Array } from './utils.js'
 
 const validator = createValidator()
@@ -12,15 +13,29 @@ const DEFAULT_SW_PATH = '/cotton_sw.js'
 const SW_ACTIVATE_TIMEOUT_MS = 10_000
 
 const generateDeviceId = (): string => {
-  try {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID()
-  } catch (err) {
-    log.warn('crypto.randomUUID() unavailable, falling back to Math.random():', err)
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-      const r = (Math.random() * 16) | 0
-      return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
-    })
   }
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    log.warn('crypto.randomUUID() unavailable, using crypto.getRandomValues()')
+    const bytes = new Uint8Array(16)
+    crypto.getRandomValues(bytes)
+    bytes[6] = (bytes[6] & 0x0f) | 0x40
+    bytes[8] = (bytes[8] & 0x3f) | 0x80
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0'))
+    return [
+      hex.slice(0, 4).join(''),
+      hex.slice(4, 6).join(''),
+      hex.slice(6, 8).join(''),
+      hex.slice(8, 10).join(''),
+      hex.slice(10, 16).join(''),
+    ].join('-')
+  }
+  log.warn('crypto API unavailable, falling back to Math.random()')
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
+  })
 }
 
 const getOrCreateDeviceId = (): string => {
@@ -86,7 +101,24 @@ export interface PushOptions {
   readonly profileExternalId?: string
 }
 
+/**
+ * Registers the browser for push notifications and subscribes the device with the backend.
+ *
+ * Requires `Notification.requestPermission()` to be granted before calling.
+ * Throws if Web Push is unsupported, inputs are invalid, or the backend call fails.
+ * Creates its own RPC transport (separate from the analytics transport created by `init()`).
+ * Persists a device ID to `localStorage` under `cotton_device_id`.
+ */
 export const subscribePush = async (vapidPublicKey: string, options: PushOptions): Promise<void> => {
+  if (!vapidPublicKey || typeof vapidPublicKey !== 'string') {
+    throw new Error('[Cotton SDK] vapidPublicKey is required and must be a non-empty string')
+  }
+  if (!options.endpoint || typeof options.endpoint !== 'string') {
+    throw new Error('[Cotton SDK] options.endpoint is required and must be a non-empty string')
+  }
+  if (!options.token || typeof options.token !== 'string') {
+    throw new Error('[Cotton SDK] options.token is required and must be a non-empty string')
+  }
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     throw new Error('[Cotton SDK] Web Push is not supported in this browser')
   }
@@ -96,23 +128,19 @@ export const subscribePush = async (vapidPublicKey: string, options: PushOptions
   const reg = await navigator.serviceWorker.register(swPath)
   await waitForServiceWorkerActive(reg)
 
-  const applicationServerKey = urlBase64ToUint8Array(vapidPublicKey)
+  let applicationServerKey: Uint8Array<ArrayBuffer>
+  try {
+    applicationServerKey = urlBase64ToUint8Array(vapidPublicKey)
+  } catch (err) {
+    throw new Error(`[Cotton SDK] Invalid VAPID public key (must be valid base64url): ${err}`)
+  }
+
   const subscription = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey })
 
   const deviceId = getOrCreateDeviceId()
   const pushToken = JSON.stringify(subscription.toJSON())
 
-  const transport = createConnectTransport({
-    baseUrl: options.endpoint,
-    useBinaryFormat: true,
-    interceptors: [
-      next => async req => {
-        req.header.set('x-api-key', options.token)
-        return next(req)
-      },
-    ],
-  })
-
+  const transport = createApiTransport(options.endpoint, options.token)
   const devicesClient = createClient(DevicesService, transport)
 
   const request = create(SubscribeRequestSchema, {
@@ -123,6 +151,8 @@ export const subscribePush = async (vapidPublicKey: string, options: PushOptions
     profileExternalId: options.profileExternalId ?? '',
   })
 
+  // subscribePush throws on validation failure (critical operation), unlike toEvent which
+  // drops invalid events with an error log (best-effort, respecting the "track() must never throw" invariant).
   const result = validator.validate(SubscribeRequestSchema, request)
   if (result.kind === 'invalid') {
     throw new Error(
@@ -133,43 +163,57 @@ export const subscribePush = async (vapidPublicKey: string, options: PushOptions
   await devicesClient.subscribe(request)
 }
 
+export const eventNotificationClick = 'notification_click' as const
+
+// Filters notification data to flat primitive values. Nested objects and arrays are
+// dropped to match the flat key-value structure expected by track()'s customProperties.
+const sanitizeNotificationData = (raw: unknown): Record<string, JSONValue> => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return {}
+  }
+  const data: Record<string, JSONValue> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      data[k] = v
+    }
+  }
+  return data
+}
+
 /**
  * Sets up notification click tracking. Call once after init().
  * Handles two cases:
- * - Page was already open: SW sends a postMessage, captured here.
  * - Page was opened by the click: SW encodes data in `?cotton_nc=`, read and stripped here.
+ * - Page was already open: SW sends a postMessage, captured here.
  *
- * Returns a cleanup function (pass to destroy() or call on SPA teardown).
+ * Returns a cleanup function. Call it before destroy() or on SPA teardown.
  */
 export const setupNotificationClickTracking = (
-  track: (kind: string, props?: Record<string, unknown>) => void
+  track: TrackFn<typeof eventNotificationClick>
 ): (() => void) => {
-  // Case 1: page was opened by the notification click — data is in the URL
+  // URL path: page was opened by the notification click — data is in the URL
   if (typeof window !== 'undefined' && typeof history !== 'undefined') {
     const url = new URL(location.href)
     const param = url.searchParams.get('cotton_nc')
     if (param) {
       try {
-        const raw = JSON.parse(param)
-        if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
-          const data: Record<string, unknown> = {}
-          for (const [k, v] of Object.entries(raw)) {
-            if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-              data[k] = v
-            }
-          }
-          track('notification_click', data)
-        }
+        const data = sanitizeNotificationData(JSON.parse(param))
+        track(eventNotificationClick, data)
       } catch (err) {
         log.warn('Malformed cotton_nc parameter:', err)
       }
-      url.searchParams.delete('cotton_nc')
-      history.replaceState(null, '', url.toString())
+      try {
+        url.searchParams.delete('cotton_nc')
+        history.replaceState(null, '', url.toString())
+      } catch (err) {
+        log.warn('Failed to strip cotton_nc parameter from URL:', err)
+      }
     }
   }
 
-  // Case 2: page was already open — SW sends a postMessage
+  // postMessage path: page was already open — SW sends a postMessage
   if (!('serviceWorker' in navigator)) {
+    log.warn('serviceWorker not available — notification click tracking via postMessage will not work')
     return () => {}
   }
 
@@ -178,14 +222,18 @@ export const setupNotificationClickTracking = (
       return
     }
     if (event.data?.type === 'cotton_notification_click') {
-      track('notification_click', (event.data.data as Record<string, unknown>) ?? {})
+      track(eventNotificationClick, sanitizeNotificationData(event.data.data))
     }
   }
   navigator.serviceWorker.addEventListener('message', handler)
   return () => navigator.serviceWorker.removeEventListener('message', handler)
 }
 
-export const unsubscribePush = async (options?: { swPath?: string }): Promise<void> => {
+/**
+ * Unsubscribes the browser's push subscription. No-ops with a warning if no
+ * registration or subscription exists. Does not remove the device from the backend.
+ */
+export const unsubscribePush = async (options?: Pick<PushOptions, 'swPath'>): Promise<void> => {
   if (!('serviceWorker' in navigator)) {
     log.warn('Cannot unsubscribe: serviceWorker not available')
     return
@@ -204,5 +252,8 @@ export const unsubscribePush = async (options?: { swPath?: string }): Promise<vo
     return
   }
 
-  await subscription.unsubscribe()
+  const success = await subscription.unsubscribe()
+  if (!success) {
+    throw new Error('[Cotton SDK] Browser reported push unsubscription failed')
+  }
 }

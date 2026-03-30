@@ -1,4 +1,4 @@
-import { EventSchema } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb.js'
+import { type Event, EventSchema } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb.js'
 import { create } from '@bufbuild/protobuf'
 import { createValidator } from '@bufbuild/protovalidate'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
@@ -30,7 +30,7 @@ export const toEvent = (
   sessionId: string,
   props?: Record<string, JSONValue>,
   opts?: TrackOptions
-) => {
+): Event | null => {
   const event = create(EventSchema, {
     autoProperties: {
       $projectId: projectId,
@@ -52,7 +52,8 @@ export const toEvent = (
 
   const result = validator.validate(EventSchema, event)
   if (result.kind === 'invalid') {
-    log.warn(`Event "${kind}" has validation issues:`, result.violations.map(v => `${v.field}: ${v.message}`).join(', '))
+    log.error(`Event "${kind}" failed validation:`, result.violations.map(v => `${v.field}: ${v.message}`).join(', '))
+    return null
   }
 
   return event
