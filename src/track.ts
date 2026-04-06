@@ -78,7 +78,11 @@ export type TrackProps<K extends string> = K extends WellKnownEventName
   : Record<string, JSONValue>
 
 export type TrackFn = {
-  <K extends WellKnownEventName>(event: K, props?: WellKnownEventPropsMap[K] & Record<string, JSONValue>, options?: TrackOptions): void
+  <K extends WellKnownEventName>(
+    event: K,
+    props?: WellKnownEventPropsMap[K] & Record<string, JSONValue>,
+    options?: TrackOptions
+  ): void
   (event: string, props?: Record<string, JSONValue>, options?: TrackOptions): void
 }
 
