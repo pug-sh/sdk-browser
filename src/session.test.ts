@@ -1,11 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  configureSession,
-  destroySession,
-  resetIdentity,
-  resolveSessionId,
-  rotate,
-} from './session.js'
+import { configureSession, destroySession, resetIdentity, resolveSessionId, rotate } from './session.js'
 import { makeStorageKey } from './utils.js'
 
 const PROJECT_ID = 'test-project'

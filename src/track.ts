@@ -1,7 +1,7 @@
 import { type Event, EventSchema } from '@buf/fivebits_cotton.bufbuild_es/events/v1/events_pb.js'
 import { create } from '@bufbuild/protobuf'
-import { createValidator } from '@bufbuild/protovalidate'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
+import { createValidator } from '@bufbuild/protovalidate'
 import { log } from './logger.js'
 import { parseUserAgentData, parseUtmParams } from './parsers.js'
 import { SDK_VERSION } from './version.js'
