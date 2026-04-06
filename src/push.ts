@@ -188,9 +188,7 @@ const sanitizeNotificationData = (raw: unknown): Record<string, JSONValue> => {
  *
  * Returns a cleanup function. Call it before destroy() or on SPA teardown.
  */
-export const setupNotificationClickTracking = (
-  track: TrackFn<typeof eventNotificationClick>
-): (() => void) => {
+export const setupNotificationClickTracking = (track: TrackFn<typeof eventNotificationClick>): (() => void) => {
   // URL path: page was opened by the notification click — data is in the URL
   if (typeof window !== 'undefined' && typeof history !== 'undefined') {
     const url = new URL(location.href)
