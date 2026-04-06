@@ -16,7 +16,7 @@ let wrapReplace: typeof history.replaceState | null = null
 
 let orphaned = false
 
-export const setupPageViewTracking = (track: TrackFn<typeof eventPageView>) => {
+export const setupPageViewTracking = (track: TrackFn) => {
   track(eventPageView)
 
   // capture originals on first init

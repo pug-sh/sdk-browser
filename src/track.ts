@@ -1,5 +1,31 @@
+import {
+  AddToCartPropertiesSchema,
+  AppClosePropertiesSchema,
+  AppOpenPropertiesSchema,
+  CheckoutCompletedPropertiesSchema,
+  CheckoutStartedPropertiesSchema,
+  ClickPropertiesSchema,
+  DeadClickPropertiesSchema,
+  ErrorOccurredPropertiesSchema,
+  FormStartPropertiesSchema,
+  FormSubmitPropertiesSchema,
+  LoginPropertiesSchema,
+  LogoutPropertiesSchema,
+  NotificationClickedPropertiesSchema,
+  NotificationDismissedPropertiesSchema,
+  NotificationReceivedPropertiesSchema,
+  PageViewPropertiesSchema,
+  PurchasePropertiesSchema,
+  RageClickPropertiesSchema,
+  ScrollPropertiesSchema,
+  SearchPropertiesSchema,
+  SharePropertiesSchema,
+  SignupPropertiesSchema,
+  VideoPausePropertiesSchema,
+  VideoPlayPropertiesSchema,
+} from '@buf/fivebits_cotton.bufbuild_es/common/v1/well_known_events_pb.js'
 import { type Event, EventSchema } from '@buf/fivebits_cotton.bufbuild_es/sdk/events/v1/events_pb.js'
-import { create, type JsonObject } from '@bufbuild/protobuf'
+import { create, toJson, type DescMessage, type MessageInitShape } from '@bufbuild/protobuf'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
 import { createValidator } from '@bufbuild/protovalidate'
 import { log } from './logger.js'
@@ -14,7 +40,65 @@ export interface TrackOptions {
   readonly timestamp?: number
 }
 
-const flattenJsonObject = (props: JsonObject) => {
+export type JSONValue = string | number | boolean | null | JSONValue[] | { [key: string]: JSONValue }
+
+const wellKnownSchemas = {
+  add_to_cart: AddToCartPropertiesSchema,
+  app_close: AppClosePropertiesSchema,
+  app_open: AppOpenPropertiesSchema,
+  checkout_completed: CheckoutCompletedPropertiesSchema,
+  checkout_started: CheckoutStartedPropertiesSchema,
+  click: ClickPropertiesSchema,
+  dead_click: DeadClickPropertiesSchema,
+  error_occurred: ErrorOccurredPropertiesSchema,
+  form_start: FormStartPropertiesSchema,
+  form_submit: FormSubmitPropertiesSchema,
+  login: LoginPropertiesSchema,
+  logout: LogoutPropertiesSchema,
+  notification_clicked: NotificationClickedPropertiesSchema,
+  notification_dismissed: NotificationDismissedPropertiesSchema,
+  notification_received: NotificationReceivedPropertiesSchema,
+  page_view: PageViewPropertiesSchema,
+  purchase: PurchasePropertiesSchema,
+  rage_click: RageClickPropertiesSchema,
+  scroll: ScrollPropertiesSchema,
+  search: SearchPropertiesSchema,
+  share: SharePropertiesSchema,
+  signup: SignupPropertiesSchema,
+  video_pause: VideoPausePropertiesSchema,
+  video_play: VideoPlayPropertiesSchema,
+} as const
+
+type WellKnownSchemas = typeof wellKnownSchemas
+export type WellKnownEventName = keyof WellKnownSchemas
+export type WellKnownEventPropsMap = { [K in WellKnownEventName]: MessageInitShape<WellKnownSchemas[K]> }
+
+export type TrackProps<K extends string> = K extends WellKnownEventName
+  ? WellKnownEventPropsMap[K]
+  : Record<string, JSONValue>
+
+export type TrackFn = {
+  <K extends WellKnownEventName>(event: K, props?: WellKnownEventPropsMap[K], options?: TrackOptions): void
+  (event: string, props?: Record<string, JSONValue>, options?: TrackOptions): void
+}
+
+const validateWellKnownProps = <Desc extends DescMessage>(
+  schema: Desc,
+  data: MessageInitShape<Desc>
+): Record<string, JSONValue> | null => {
+  const msg = create(schema, data)
+  const result = validator.validate(schema, msg)
+  if (result.kind === 'invalid') {
+    log.error(
+      `Properties validation failed for "${schema.typeName}":`,
+      result.violations.map(v => `${v.field}: ${v.message}`).join(', ')
+    )
+    return null
+  }
+  return toJson(schema, msg) as Record<string, JSONValue>
+}
+
+const flattenJSONValue = (props: Record<string, JSONValue>) => {
   const m: Record<string, string> = {}
   for (const k of Object.keys(props)) {
     m[k] = typeof props[k] === 'string' ? props[k] : JSON.stringify(props[k])
@@ -27,9 +111,19 @@ export const toEvent = (
   kind: string,
   sessionId: string,
   distinctId: string,
-  props?: JsonObject,
+  props?: Record<string, unknown>,
   opts?: TrackOptions
 ): Event | null => {
+  let resolvedProps: Record<string, JSONValue> | undefined
+
+  if (kind in wellKnownSchemas) {
+    const schema = wellKnownSchemas[kind as WellKnownEventName]
+    resolvedProps = validateWellKnownProps(schema, props as MessageInitShape<typeof schema>) ?? undefined
+    if (resolvedProps === undefined && props !== undefined) return null
+  } else {
+    resolvedProps = props as Record<string, JSONValue>
+  }
+
   const event = create(EventSchema, {
     autoProperties: {
       $projectId: projectId,
@@ -43,7 +137,7 @@ export const toEvent = (
       ...parseUserAgentData(),
       ...parseUtmParams(window.location.search),
     },
-    customProperties: props ? flattenJsonObject(props) : {},
+    customProperties: resolvedProps ? flattenJSONValue(resolvedProps) : {},
     kind,
     sessionId,
     distinctId,
@@ -58,5 +152,3 @@ export const toEvent = (
 
   return event
 }
-
-export type TrackFn<T extends string> = (event: T, props?: JsonObject, options?: TrackOptions) => void
