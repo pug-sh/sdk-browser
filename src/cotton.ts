@@ -230,6 +230,10 @@ export const identify = async (externalId: string, traits?: Record<string, JSONV
     log.warn('identify() requires a non-empty externalId string.')
     return
   }
+  if (state.dryRun) {
+    log.debug('dryRun: would identify')
+    return
+  }
 
   const client = getProfilesClient()
   if (!client) {

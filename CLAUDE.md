@@ -44,6 +44,18 @@ Module-level state, no classes. Sessions are lazily initialized on the first `re
 
 Storage availability is checked during `configureSession()` via `isStorageAvailable()` and stored in a module-level `storage` variable (`Storage | null`). If unavailable, sessions continue in memory only.
 
+### Profile Identity (`src/profile.ts`)
+
+Module-level state, no classes. Manages anonymous profile IDs persisted to `localStorage` under `__cotton_<projectId>_profile__`. Anonymous IDs are prefixed with `"anon-"` (required by the server for merge operations).
+
+- `configureProfile(projectId)` — called by `cotton.init()`. Sets up storage and storage key.
+- `getAnonymousId()` — returns or creates a persistent `"anon-<uuidv7>"` ID.
+- `isIdentified()` / `markIdentified()` — tracks whether `identify()` has been called this session. Controls whether `anonymousId` is sent on the next `identify()` RPC (first call triggers server-side merge of anonymous → identified profile).
+- `clearProfile()` — clears storage and resets identified state. Called by `cotton.reset()`.
+- `destroyProfile()` — clears profile and resets all module state. Called by `cotton.destroy()`.
+
+`identify(externalId, traits?)` in `cotton.ts` sends the `ProfilesSDKService.Identify` RPC. On the first call, it includes `anonymousId` so the server merges the anonymous profile into the identified one. Subsequent calls omit `anonymousId` (trait-only updates). The profiles RPC client is lazy-created on first `identify()` call. Respects `dryRun` mode.
+
 ### Event Creation (`src/track.ts`)
 
 `toEvent(projectId, kind, sessionId, props?, opts?)` builds a protobuf `Event` object from event kind, properties, and options. It splits properties into `autoProperties` (SDK-injected, all keys prefixed with `$`) and `customProperties` (user-provided), serializing non-string values via `JSON.stringify`. Auto properties include: `$projectId`, `$url`, `$referrer`, `$locale`, `$screenWidth`, `$screenHeight`, `$pageTitle`, `$sdkVersion`, UA Client Hints when available (`$browser`, `$browserVersion`, `$os`, `$osVersion`, `$device`, `$mobile`), and any present UTM params. `sessionId` is set as a top-level field on the `Event` proto (its own ClickHouse column), not a property. Also exports `TrackFn<T>` (generic callback type used by all trackers) and `TrackOptions` (supports `immediate` and `timestamp`).
@@ -114,4 +126,4 @@ Push is an optional, tree-shakeable module — `cotton.ts` never imports it, so 
 - Target/module: ES2020, strict mode, declarations emitted to `dist/`
 - Imports within `src/` use `.js` extensions (required for ES module resolution at runtime)
 - Module resolution: `bundler`
-- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track`, `reset`, `rotate` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`, `SessionConfig`; and from `push.ts`: `subscribePush`, `unsubscribePush`, `setupNotificationClickTracking`, `PushOptions`. Internal module functions and implementation details are not publicly exported.
+- Barrel export: `src/index.ts` re-exports `init`, `destroy`, `track`, `reset`, `identify`, `rotate` and types `CottonConfig`, `CottonEventName`, `InitOptions`, `BatchConfig`, `JSONValue`, `TrackOptions`, `SessionConfig`; and from `push.ts`: `subscribePush`, `unsubscribePush`, `setupNotificationClickTracking`, `PushOptions`. Internal module functions and implementation details are not publicly exported.
