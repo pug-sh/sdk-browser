@@ -1,4 +1,8 @@
+import { IdentifyRequestSchema, ProfilesSDKService } from '@buf/fivebits_cotton.bufbuild_es/sdk/profiles/v1/profiles_pb.js'
+import { create, type JsonObject } from '@bufbuild/protobuf'
+import { createClient } from '@connectrpc/connect'
 import { type BatchConfig, createBatchedTransport } from './batch.js'
+import { createApiTransport } from './api-transport.js'
 import { eventClick, setupClickTracking } from './events/click.js'
 import { eventFormStart, eventFormSubmit, setupFormTracking } from './events/form.js'
 import { eventDeadClick, eventRageClick, setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
@@ -6,9 +10,9 @@ import { eventPageView, setupPageViewTracking } from './events/page_view.js'
 import { eventScroll, setupScrollTracking } from './events/scroll.js'
 import { log } from './logger.js'
 import { initUserAgentData } from './parsers.js'
-import { clearProfile, configureProfile, destroyProfile } from './profile.js'
+import { clearProfile, configureProfile, destroyProfile, getAnonymousId, isIdentified, markIdentified } from './profile.js'
 import { configureSession, destroySession, resetIdentity, resolveSessionId, type SessionConfig } from './session.js'
-import { toEvent, type TrackFn } from './track.js'
+import { toEvent, type JSONValue, type TrackFn } from './track.js'
 
 export type CottonEventName =
   | typeof eventClick
@@ -38,11 +42,25 @@ export interface InitOptions {
 interface CottonState {
   readonly config: CottonConfig
   readonly transport: ReturnType<typeof createBatchedTransport>
+  readonly token: string
   readonly dryRun: boolean
 }
 
 let state: CottonState | null = null
 let cleanups: { name: string; fn: () => void }[] = []
+
+let profilesClient: ReturnType<typeof createClient<typeof ProfilesSDKService>> | null = null
+
+const getProfilesClient = (): ReturnType<typeof createClient<typeof ProfilesSDKService>> | null => {
+  if (profilesClient) {
+    return profilesClient
+  }
+  if (!state) {
+    return null
+  }
+  profilesClient = createClient(ProfilesSDKService, createApiTransport(state.config.endpoint, state.token))
+  return profilesClient
+}
 
 export const init = (projectId: string, options: InitOptions) => {
   if (typeof window === 'undefined') {
@@ -96,7 +114,7 @@ export const init = (projectId: string, options: InitOptions) => {
 
   const transport = createBatchedTransport(config.endpoint, options.token, projectId, options.batch)
 
-  state = { config, transport, dryRun: options.dryRun ?? false }
+  state = { config, transport, token: options.token, dryRun: options.dryRun ?? false }
 
   if (state.dryRun) {
     log.warn('Dry run mode enabled — events will not be sent.')
@@ -164,6 +182,7 @@ export const destroy = () => {
 
   destroySession()
   destroyProfile()
+  profilesClient = null
 
   cleanups = []
   state = null
@@ -186,6 +205,42 @@ export const reset = () => {
     clearProfile()
   } catch (err) {
     log.error('Failed to clear profile:', err)
+  }
+}
+
+export const identify = async (
+  externalId: string,
+  traits?: Record<string, JSONValue>
+): Promise<void> => {
+  if (typeof window === 'undefined') {
+    return
+  }
+  if (!state) {
+    log.warn('identify() called before init().')
+    return
+  }
+  if (!externalId || typeof externalId !== 'string') {
+    log.warn('identify() requires a non-empty externalId string.')
+    return
+  }
+
+  const client = getProfilesClient()
+  if (!client) {
+    log.error('Failed to create profiles client.')
+    return
+  }
+
+  const req = create(IdentifyRequestSchema, {
+    externalId,
+    traits: traits as JsonObject | undefined,
+    anonymousId: isIdentified() ? '' : getAnonymousId(),
+  })
+
+  try {
+    await client.identify(req)
+    markIdentified()
+  } catch (err) {
+    log.error('Failed to identify:', err)
   }
 }
 
