@@ -6,9 +6,6 @@ let storageKey = ''
 let externalIdKey = ''
 let anonymousId = ''
 let externalId = ''
-// Derived from persisted externalId on page load. When false, the next identify() sends
-// anonymousId for server-side merge. When true (externalId restored), merge is skipped.
-let identified = false
 let storage: Storage | null = null
 
 export const configureProfile = (projectId: string): void => {
@@ -25,7 +22,6 @@ export const configureProfile = (projectId: string): void => {
       const stored = storage.getItem(externalIdKey)
       if (stored) {
         externalId = stored
-        identified = true
       }
     } catch (err) {
       log.warn('Failed to read external ID from storage:', err)
@@ -64,10 +60,9 @@ export const getAnonymousId = (): string => {
   return anonymousId
 }
 
-export const isIdentified = (): boolean => identified
+export const isIdentified = (): boolean => externalId !== ''
 
 export const markIdentified = (id: string): void => {
-  identified = true
   externalId = id
   if (storage) {
     try {
@@ -97,7 +92,6 @@ export const clearProfile = (): void => {
   }
   anonymousId = ''
   externalId = ''
-  identified = false
 }
 
 export const destroyProfile = (): void => {
