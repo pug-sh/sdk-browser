@@ -7,8 +7,7 @@ import { parseUserAgentData, parseUtmParams } from './parsers.js'
 import { SDK_VERSION } from './version.js'
 import { type JSONValue, type TrackOptions, type WellKnownEventName, wellKnownSchemas } from './well-known-events.js'
 
-export type { JSONValue, TrackOptions } from './well-known-events.js'
-export type { TrackFn, TrackProps, WellKnownEventName, WellKnownEventPropsMap } from './well-known-events.js'
+export type { JSONValue, TrackFn, TrackOptions, TrackProps, WellKnownEventName, WellKnownEventPropsMap } from './well-known-events.js'
 
 const validator = createValidator()
 
@@ -23,7 +22,7 @@ const validateWellKnownProps = <Desc extends DescMessage>(
     if (knownNames.has(k)) {
       knownData[k] = v
     } else {
-      extraData[k] = v as JSONValue
+      extraData[k] = v as JSONValue // passthrough: extra props are not schema-validated
     }
   }
   const msg = create(schema, knownData as MessageInitShape<Desc>)
@@ -58,7 +57,7 @@ export const toEvent = (
 
   if (kind in wellKnownSchemas) {
     const schema = wellKnownSchemas[kind as WellKnownEventName]
-    resolvedProps = validateWellKnownProps(schema, props as MessageInitShape<typeof schema>) ?? undefined
+    resolvedProps = validateWellKnownProps(schema, props ?? {}) ?? undefined
     if (resolvedProps === undefined && props !== undefined) return null
   } else {
     resolvedProps = props as Record<string, JSONValue>
