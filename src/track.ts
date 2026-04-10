@@ -7,7 +7,14 @@ import { parseUserAgentData, parseUtmParams } from './parsers.js'
 import { SDK_VERSION } from './version.js'
 import { type JSONValue, type TrackOptions, type WellKnownEventName, wellKnownSchemas } from './well-known-events.js'
 
-export type { JSONValue, TrackFn, TrackOptions, TrackProps, WellKnownEventName, WellKnownEventPropsMap } from './well-known-events.js'
+export type {
+  JSONValue,
+  TrackFn,
+  TrackOptions,
+  TrackProps,
+  WellKnownEventName,
+  WellKnownEventPropsMap,
+} from './well-known-events.js'
 
 const validator = createValidator()
 
