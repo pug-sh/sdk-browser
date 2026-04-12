@@ -2,16 +2,16 @@ import {
   IdentifyRequestSchema,
   ProfilesSDKService,
 } from '@buf/fivebits_cotton.bufbuild_es/sdk/profiles/v1/profiles_pb.js'
-import { create, type JsonObject } from '@bufbuild/protobuf'
+import { create } from '@bufbuild/protobuf'
 import { createValidator } from '@bufbuild/protovalidate'
 import { createClient } from '@connectrpc/connect'
 import { createApiTransport } from './api-transport.js'
 import { type BatchConfig, createBatchedTransport } from './batch.js'
-import { eventClick, setupClickTracking } from './events/click.js'
-import { eventFormStart, eventFormSubmit, setupFormTracking } from './events/form.js'
-import { eventDeadClick, eventRageClick, setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
-import { eventPageView, setupPageViewTracking } from './events/page_view.js'
-import { eventScroll, setupScrollTracking } from './events/scroll.js'
+import { setupClickTracking } from './events/click.js'
+import { setupFormTracking } from './events/form.js'
+import { setupDeadClickTracking, setupRageClickTracking } from './events/frustration.js'
+import { setupPageViewTracking } from './events/page_view.js'
+import { setupScrollTracking } from './events/scroll.js'
 import { log } from './logger.js'
 import { initUserAgentData } from './parsers.js'
 import {
@@ -24,17 +24,7 @@ import {
   resolveDistinctId,
 } from './profile.js'
 import { configureSession, destroySession, resetIdentity, resolveSessionId, type SessionConfig } from './session.js'
-import { toEvent, type TrackFn } from './track.js'
-
-export type CottonEventName =
-  | typeof eventClick
-  | typeof eventDeadClick
-  | typeof eventFormStart
-  | typeof eventFormSubmit
-  | typeof eventPageView
-  | typeof eventRageClick
-  | typeof eventScroll
-  | (string & {})
+import { toEvent, type JSONValue, type TrackFn, type TrackOptions } from './track.js'
 
 export interface CottonConfig {
   readonly endpoint: string
@@ -227,7 +217,7 @@ export const reset = () => {
 }
 
 /** Throws on invalid input (sync) and on RPC failure (async). Callers must handle errors. */
-export const identify = async (externalId: string, traits?: JsonObject): Promise<void> => {
+export const identify = async (externalId: string, traits?: Record<string, JSONValue>): Promise<void> => {
   if (typeof window === 'undefined') {
     log.warn('identify() called in a non-browser environment, skipping.')
     return
@@ -253,10 +243,12 @@ export const identify = async (externalId: string, traits?: JsonObject): Promise
   })
 
   const validation = validator.validate(IdentifyRequestSchema, req)
-  if (validation.kind === 'invalid') {
-    throw new Error(
-      `[Cotton SDK] Invalid identify request: ${validation.violations.map(v => `${v.field}: ${v.message}`).join(', ')}`
-    )
+  if (validation.kind !== 'valid') {
+    const detail =
+      validation.kind === 'invalid'
+        ? validation.violations.map(v => `${v.field}: ${v.message}`).join(', ')
+        : String(validation.error)
+    throw new Error(`[Cotton SDK] Invalid identify request: ${detail}`)
   }
 
   try {
@@ -269,7 +261,7 @@ export const identify = async (externalId: string, traits?: JsonObject): Promise
 }
 
 /** This function must never throw. Callers (e.g. monkey-patched history.pushState) rely on it being safe. */
-export const track: TrackFn<CottonEventName> = (kind, props, opts) => {
+export const track: TrackFn = (kind: string, props?: Record<string, unknown>, opts?: TrackOptions) => {
   try {
     if (typeof window === 'undefined') {
       return
@@ -284,6 +276,7 @@ export const track: TrackFn<CottonEventName> = (kind, props, opts) => {
     const immediate = opts?.immediate ?? false
     const event = toEvent(state.config.projectId, kind, resolveSessionId(), resolveDistinctId(), props, opts)
     if (!event) {
+      // error already logged by toEvent
       return
     }
     if (state.dryRun) {
