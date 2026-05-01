@@ -4,8 +4,10 @@ import {
 } from '@buf/fivebits_cotton.bufbuild_es/common/v1/property_value_pb.js'
 import { type Event, EventSchema } from '@buf/fivebits_cotton.bufbuild_es/sdk/events/v1/events_pb.js'
 import { create, type DescMessage, type MessageInitShape, type MessageShape, ScalarType } from '@bufbuild/protobuf'
+import { reflect } from '@bufbuild/protobuf/reflect'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
 import { createValidator } from '@bufbuild/protovalidate'
+import { uuidv7 } from 'uuidv7'
 import { log } from './logger.js'
 import { parseUserAgentData, parseUtmParams } from './parsers.js'
 import { SDK_VERSION } from './version.js'
@@ -21,39 +23,35 @@ export type {
 
 const validator = createValidator()
 
-// Proto-enforced cap: PropertyValue.string_value has (buf.validate.field).string.max_len = 1024.
-// CEL's size(string) counts Unicode code points, so the validator does too. Strings longer
-// than this would fail Event-level validation and drop the entire event.
-const MAX_STRING_LEN = 1024
+// Proto: PropertyValue.string_value caps at 1024 bytes (the proto comment specifies bytes,
+// not codepoints; the server's validate interceptor rejects oversized strings with
+// CodeInvalidArgument and does not truncate). Truncate by UTF-8 byte length, respecting
+// multi-byte sequence boundaries, to match the server's check.
+const MAX_STRING_BYTES = 1024
 
-const codePointLength = (s: string): number => {
-  let n = 0
-  for (const _ of s) {
-    void _
-    n++
-  }
-  return n
-}
+const utf8ByteLength = (s: string): number => new TextEncoder().encode(s).byteLength
 
-const truncateToCodePoints = (s: string, max: number): string => {
-  let n = 0
-  let out = ''
-  for (const cp of s) {
-    if (n >= max) {
-      break
-    }
-    out += cp
-    n++
+const truncateToBytes = (s: string, max: number): string => {
+  const bytes = new TextEncoder().encode(s)
+  if (bytes.byteLength <= max) {
+    return s
   }
-  return out
+  // Step back from the cut to a UTF-8 leading byte (high two bits != 10).
+  let cut = max
+  while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) {
+    cut--
+  }
+  return new TextDecoder().decode(bytes.subarray(0, cut))
 }
 
 const makeStringValue = (raw: string): PropertyValue => {
   let value = raw
-  // UTF-16 length is an upper bound on code-point count, so use it as a cheap pre-check.
-  if (raw.length > MAX_STRING_LEN && codePointLength(raw) > MAX_STRING_LEN) {
-    log.warn(`Property string exceeds ${MAX_STRING_LEN} code points, truncating`)
-    value = truncateToCodePoints(raw, MAX_STRING_LEN)
+  // Each UTF-16 code unit is at most 3 UTF-8 bytes (BMP) or shares a 4-byte sequence
+  // with another unit (supplementary). length * 3 is therefore a strict upper bound,
+  // letting most strings skip the TextEncoder allocation.
+  if (raw.length * 3 > MAX_STRING_BYTES && utf8ByteLength(raw) > MAX_STRING_BYTES) {
+    log.warn(`Property string exceeds ${MAX_STRING_BYTES} bytes, truncating`)
+    value = truncateToBytes(raw, MAX_STRING_BYTES)
   }
   return create(PropertyValueSchema, { value: { case: 'stringValue', value } })
 }
@@ -63,8 +61,19 @@ const makeStringValue = (raw: string): PropertyValue => {
  *   - extras on a well-known event (keys not in the schema)
  *   - all properties on a custom (non-well-known) event
  *
- * Returns null when the value cannot be represented and the property should be
- * dropped (the event itself is still sent).
+ * Returns null when the value cannot be represented; the caller is responsible for
+ * omitting the property from the map.
+ *
+ * Mapping:
+ *   - string         → stringValue (truncated to 1024 UTF-8 bytes if needed)
+ *   - boolean        → boolValue
+ *   - number         → intValue when integer && safe, else doubleValue;
+ *                      NaN/±Infinity dropped (the validator rejects non-finite doubles)
+ *   - bigint         → intValue
+ *   - Date           → timestampValue (Date(NaN) dropped)
+ *   - object/array   → JSON.stringify → stringValue (subject to truncation);
+ *                      circular structures and toJSON returning undefined dropped
+ *   - null/undefined → dropped (no oneof case fits)
  */
 const jsValueToPropertyValue = (v: unknown): PropertyValue | null => {
   if (v === null || v === undefined) {
@@ -111,15 +120,17 @@ const jsValueToPropertyValue = (v: unknown): PropertyValue | null => {
 }
 
 /**
- * Builds a PropertyValue for a known scalar field on a well-known event,
- * picking the oneof case from the field's proto scalar type rather than from
- * the JS value. This preserves the schema's int-vs-double distinction even
- * when the user passes an integer-valued double field.
+ * Builds a PropertyValue for a known scalar field on a well-known event, picking the
+ * oneof case from the field's proto scalar type rather than from the JS value. This
+ * preserves the schema's int-vs-double distinction even when the user passes an
+ * integer-valued double field.
+ *
+ * Returns `null` for `BYTES` and any scalar type not enumerated here; callers must guard.
  */
 const scalarToPropertyValue = (v: unknown, scalar: ScalarType): PropertyValue | null => {
   switch (scalar) {
     case ScalarType.STRING:
-      return create(PropertyValueSchema, { value: { case: 'stringValue', value: v as string } })
+      return makeStringValue(v as string)
     case ScalarType.BOOL:
       return create(PropertyValueSchema, { value: { case: 'boolValue', value: v as boolean } })
     case ScalarType.DOUBLE:
@@ -145,24 +156,31 @@ const scalarToPropertyValue = (v: unknown, scalar: ScalarType): PropertyValue | 
   }
 }
 
+type WellKnownValidation<Desc extends DescMessage> =
+  | { ok: true; msg: MessageShape<Desc>; extras: Record<string, JsonValue> }
+  | { ok: false }
+
 /**
  * Validates properties for a well-known event against its protobuf schema.
- * Returns the constructed proto message plus any extras (keys not in the
- * schema) for downstream PropertyValue mapping. Returns null if validation
- * fails (event should be dropped).
+ *
+ * Returns the constructed proto message plus any extras (keys not in the schema). Extras
+ * with non-serializable types (`undefined`, `function`, `symbol`) are dropped here with a
+ * warn log; everything else passes through to PropertyValue mapping downstream.
+ *
+ * Returns `{ ok: false }` if `create()` throws or protovalidate rejects the message.
  */
 const validateWellKnownProps = <Desc extends DescMessage>(
   schema: Desc,
   kind: string,
   data: Record<string, unknown>
-): { msg: MessageShape<Desc>; extras: Record<string, JsonValue> } | null => {
+): WellKnownValidation<Desc> => {
   const knownNames = new Set(schema.fields.map(f => f.localName))
   const knownData: Record<string, unknown> = {}
   const extras: Record<string, JsonValue> = {}
   for (const [k, v] of Object.entries(data)) {
     if (knownNames.has(k)) {
       knownData[k] = v
-    } else if (v === undefined || typeof v === 'function' || typeof v === 'symbol' || typeof v === 'bigint') {
+    } else if (v === undefined || typeof v === 'function' || typeof v === 'symbol') {
       log.warn(`Extra property "${k}" on event "${kind}" has non-serializable type ${typeof v}, skipping`)
     } else {
       extras[k] = v as JsonValue
@@ -174,7 +192,7 @@ const validateWellKnownProps = <Desc extends DescMessage>(
     msg = create(schema, knownData as MessageInitShape<Desc>)
   } catch (err) {
     log.error(`Event "${kind}" dropped: invalid properties for "${schema.typeName}":`, err)
-    return null
+    return { ok: false }
   }
 
   const result = validator.validate(schema, msg)
@@ -183,36 +201,61 @@ const validateWellKnownProps = <Desc extends DescMessage>(
       `Event "${kind}" dropped: properties validation failed for "${schema.typeName}":`,
       result.kind === 'invalid' ? result.violations.map(v => `${v.field}: ${v.message}`).join(', ') : result.error
     )
-    return null
+    return { ok: false }
   }
 
-  return { msg, extras }
+  return { ok: true, msg, extras }
 }
 
 /**
- * Walks a well-known event's typed message and builds the customProperties map
- * from its scalar fields. Skips fields holding their proto-default value to
- * mirror the canonical JSON behavior of implicit-presence scalars.
+ * Walks a well-known event's typed message and builds the customProperties map from its
+ * scalar fields. Uses reflection to honor explicit field presence — only set fields are
+ * included, so an unset `scrollY` is skipped while an explicit `scrollY: 0` is sent.
+ *
+ * Logs a warn for any non-scalar field or unsupported scalar type, since today's
+ * well-known schemas only use scalars and the moment one doesn't, the maintainer
+ * needs a loud signal at SDK-bump time.
  */
 const buildKnownPropertyMap = <Desc extends DescMessage>(
   schema: Desc,
   msg: MessageShape<Desc>
 ): Record<string, PropertyValue> => {
   const out: Record<string, PropertyValue> = {}
+  const r = reflect(schema, msg, false)
   for (const field of schema.fields) {
     if (field.fieldKind !== 'scalar') {
+      log.warn(`Field "${schema.typeName}.${field.localName}" has unsupported fieldKind "${field.fieldKind}", skipping`)
       continue
     }
-    const v = (msg as unknown as Record<string, unknown>)[field.localName]
-    if (v === '' || v === 0 || v === false || v === 0n) {
+    if (!r.isSet(field)) {
       continue
     }
+    const v = r.get(field)
     const pv = scalarToPropertyValue(v, field.scalar)
     if (pv) {
       out[field.localName] = pv
+    } else {
+      log.warn(
+        `Field "${schema.typeName}.${field.localName}" has unsupported scalar type ${ScalarType[field.scalar]}, skipping`
+      )
     }
   }
   return out
+}
+
+const mapPropsViaHeuristic = (
+  source: Record<string, unknown>,
+  customProperties: Record<string, PropertyValue>,
+  kind: string
+): void => {
+  for (const [k, v] of Object.entries(source)) {
+    const pv = jsValueToPropertyValue(v)
+    if (pv) {
+      customProperties[k] = pv
+    } else if (v !== null && v !== undefined) {
+      log.warn(`Property "${k}" on event "${kind}" not representable (${typeof v}), skipping`)
+    }
+  }
 }
 
 export const toEvent = (
@@ -228,28 +271,19 @@ export const toEvent = (
   if (kind in wellKnownSchemas) {
     const schema = wellKnownSchemas[kind as WellKnownEventName]
     const validated = validateWellKnownProps(schema, kind, props ?? {})
-    if (validated === null) {
+    if (!validated.ok) {
       return null
     }
     customProperties = buildKnownPropertyMap(schema, validated.msg)
-    for (const [k, v] of Object.entries(validated.extras)) {
-      const pv = jsValueToPropertyValue(v)
-      if (pv) {
-        customProperties[k] = pv
-      }
-    }
+    mapPropsViaHeuristic(validated.extras, customProperties, kind)
   } else if (props) {
-    for (const [k, v] of Object.entries(props)) {
-      const pv = jsValueToPropertyValue(v)
-      if (pv) {
-        customProperties[k] = pv
-      }
-    }
+    mapPropsViaHeuristic(props, customProperties, kind)
   }
 
   let event: Event
   try {
     event = create(EventSchema, {
+      eventId: uuidv7(),
       autoProperties: {
         $projectId: projectId,
         $url: window.location.href,
