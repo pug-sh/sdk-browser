@@ -1,10 +1,5 @@
-import {
-  type PropertyValue,
-  PropertyValueSchema,
-} from '@buf/fivebits_cotton.bufbuild_es/common/v1/property_value_pb.js'
-import { type Event, EventSchema } from '@buf/fivebits_cotton.bufbuild_es/sdk/events/v1/events_pb.js'
-import { create, type DescMessage, type MessageInitShape, type MessageShape, ScalarType } from '@bufbuild/protobuf'
-import { reflect, type ScalarValue } from '@bufbuild/protobuf/reflect'
+import { type Event, EventSchema } from '@buf/fivebits_pug.bufbuild_es/sdk/events/v1/events_pb.js'
+import { create, toJson, type DescMessage, type MessageInitShape } from '@bufbuild/protobuf'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
 import { createValidator } from '@bufbuild/protovalidate'
 import { uuidv7 } from 'uuidv7'
