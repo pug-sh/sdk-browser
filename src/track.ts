@@ -1,5 +1,7 @@
-import { type Event, EventSchema } from '@buf/fivebits_cotton.bufbuild_es/sdk/events/v1/events_pb.js'
-import { create, toJson, type DescMessage, type MessageInitShape } from '@bufbuild/protobuf'
+import { type PropertyValue, PropertyValueSchema } from '@buf/fivebits_pug.bufbuild_es/common/v1/property_value_pb.js'
+import { type Event, EventSchema } from '@buf/fivebits_pug.bufbuild_es/sdk/events/v1/events_pb.js'
+import { create, type DescMessage, type MessageInitShape, type MessageShape, ScalarType } from '@bufbuild/protobuf'
+import { reflect, type ScalarValue } from '@bufbuild/protobuf/reflect'
 import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
 import { createValidator } from '@bufbuild/protovalidate'
 import { uuidv7 } from 'uuidv7'
@@ -258,6 +260,17 @@ const mapPropsViaHeuristic = (
   }
 }
 
+const mapObjectValuesViaHeuristic = <T>(
+  source: Record<string, T>,
+  transform: (value: T) => PropertyValue
+): Record<string, PropertyValue> => {
+  const result: Record<string, PropertyValue> = {}
+  for (const [k, v] of Object.entries(source)) {
+    result[k] = transform(v)
+  }
+  return result
+}
+
 export const toEvent = (
   projectId: string,
   kind: string,
@@ -285,16 +298,21 @@ export const toEvent = (
     event = create(EventSchema, {
       eventId: uuidv7(),
       autoProperties: {
-        $projectId: projectId,
-        $url: window.location.href,
-        $referrer: document.referrer,
-        $locale: navigator.language,
-        $screenWidth: String(window.screen.width),
-        $screenHeight: String(window.screen.height),
-        $pageTitle: document.title,
-        $sdkVersion: SDK_VERSION,
-        ...parseUserAgentData(),
-        ...parseUtmParams(window.location.search),
+        $projectId: makeStringValue(projectId),
+        $url: makeStringValue(window.location.href),
+        $referrer: makeStringValue(document.referrer),
+        $locale: makeStringValue(navigator.language),
+        $screenWidth: makeStringValue(String(window.screen.width)),
+        $screenHeight: makeStringValue(String(window.screen.height)),
+        $pageTitle: makeStringValue(document.title),
+        $sdkVersion: makeStringValue(SDK_VERSION),
+        ...mapObjectValuesViaHeuristic(
+          {
+            ...parseUserAgentData(),
+            ...parseUtmParams(window.location.search),
+          },
+          makeStringValue
+        ),
       },
       customProperties,
       kind,

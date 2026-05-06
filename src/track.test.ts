@@ -245,7 +245,7 @@ describe('Event proto integrity', () => {
 
   it('includes auto-properties with $-prefixed keys', () => {
     const ev = toEvent(PROJECT_ID, 'my_event', SESSION_ID, DISTINCT_ID)
-    expect(ev!.autoProperties.$projectId).toBe(PROJECT_ID)
+    expect(ev!.autoProperties.$projectId.value.value).toBe(PROJECT_ID)
     expect(ev!.autoProperties.$sdkVersion).toBeTruthy()
   })
 
