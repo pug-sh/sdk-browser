@@ -13,11 +13,17 @@ npm install pug-web
 ### Analytics
 
 ```ts
-import { init, track, destroy } from 'pug-web'
+import { init, identify, track, destroy } from 'pug-web'
 
 init('your-project-id', {
   token: 'your-api-key',
   endpoint: 'https://your-backend.example.com',
+})
+
+// Identify a signed-in user
+await identify('user@example.com', {
+  name: 'Ada Lovelace',
+  plan: 'pro',
 })
 
 // Manual event
@@ -37,6 +43,91 @@ All standard events (page views, clicks, scrolls, forms, rage clicks, dead click
 | `endpoint` | `string` | `http://localhost:8080` | Backend base URL. |
 | `samplingRate` | `number` | `1` | Fraction of sessions to track (0–1). |
 | `batch` | `Partial<BatchConfig>` | — | Batching overrides (size, wait, storage key). |
+
+### API
+
+#### `identify(externalId, traits?)`
+
+Creates or updates a profile for a known user. Call it after `init()` when a visitor signs in or when you learn their stable user ID.
+
+```ts
+import { identify } from 'pug-web'
+
+await identify('user_123', {
+  email: 'user@example.com',
+  name: 'Ada Lovelace',
+  plan: 'pro',
+})
+```
+
+- `externalId` must be a non-empty string, such as your database user ID or email.
+- `traits` is an optional object of profile properties. Values should be JSON-compatible.
+- On the first identify call, the SDK includes the anonymous ID so anonymous events can be merged into the identified profile.
+- If push is configured, the first identify call also links the browser's push device ID to the profile.
+- `identify()` returns a promise and throws for invalid input or RPC failures.
+
+Use `reset()` when a user signs out or switches accounts:
+
+```ts
+import { reset } from 'pug-web'
+
+reset()
+```
+
+#### `track(event, properties?, options?)`
+
+Sends a manual event. Custom event names are allowed:
+
+```ts
+track('upgrade_clicked', { source: 'settings' })
+```
+
+Well-known events are validated against typed property schemas:
+
+```ts
+track('purchase', {
+  productId: 'sku_123',
+  amount: 49,
+  currency: 'USD',
+})
+```
+
+Pass `{ immediate: true }` to bypass batching for priority events, or `{ timestamp }` to set an explicit epoch-millisecond occurrence time:
+
+```ts
+track('error_occurred', { errorCode: 'PAYMENT_FAILED' }, { immediate: true })
+```
+
+### Well-known events
+
+These event names get typed properties and runtime validation. Extra properties are allowed and are sent as custom properties.
+
+| Event | Properties |
+|---|---|
+| `page_view` | — |
+| `click` | `class`, `id`, `tag`, `text`, `x`, `y` |
+| `rage_click` | `clickCount` (>= 2), `element`, `x`, `y` |
+| `dead_click` | `element`, `text`, `x`, `y` |
+| `scroll` | `percent` (0–100), `scrollY` (>= 0) |
+| `search` | `query` (required) |
+| `add_to_cart` | `productId` (required), `amount` (> 0), `currency` (3-letter code, required when `amount` is set) |
+| `checkout_started` | `productId` (required), `amount` (> 0), `currency` (3-letter code, required when `amount` is set) |
+| `checkout_completed` | `productId` (required), `amount` (> 0), `currency` (3-letter code, required when `amount` is set) |
+| `purchase` | `productId` (required), `amount` (> 0), `currency` (3-letter code, required when `amount` is set) |
+| `form_start` | `formId` (required), `formName` |
+| `form_submit` | `action`, `formId` (required), `formName` |
+| `signup` | — |
+| `login` | — |
+| `logout` | — |
+| `app_open` | — |
+| `app_close` | — |
+| `notification_received` | `campaignId` (required), `notificationType` |
+| `notification_clicked` | `campaignId` (required), `notificationType` |
+| `notification_dismissed` | `campaignId` (required), `notificationType` |
+| `video_play` | `videoId` (required), `positionS` (>= 0) |
+| `video_pause` | `videoId` (required), `positionS` (>= 0) |
+| `error_occurred` | `errorCode` (required) |
+| `share` | — |
 
 ---
 
