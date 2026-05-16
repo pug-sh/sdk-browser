@@ -9,20 +9,20 @@ importers:
   .:
     dependencies:
       '@buf/fivebits_pug.bufbuild_es':
-        specifier: 2.12.0-20260506044109-e00079fd5b34.1
-        version: 2.12.0-20260506044109-e00079fd5b34.1(@bufbuild/protobuf@2.11.0)
+        specifier: 2.12.0-20260516184605-146359367ea1.1
+        version: 2.12.0-20260516184605-146359367ea1.1(@bufbuild/protobuf@2.12.0)
       '@bufbuild/protobuf':
-        specifier: ^2.11.0
-        version: 2.11.0
+        specifier: ^2.12.0
+        version: 2.12.0
       '@bufbuild/protovalidate':
         specifier: ^1.1.1
-        version: 1.1.1(@bufbuild/protobuf@2.11.0)
+        version: 1.1.1(@bufbuild/protobuf@2.12.0)
       '@connectrpc/connect':
         specifier: ^2.1.1
-        version: 2.1.1(@bufbuild/protobuf@2.11.0)
+        version: 2.1.1(@bufbuild/protobuf@2.12.0)
       '@connectrpc/connect-web':
         specifier: ^2.1.1
-        version: 2.1.1(@bufbuild/protobuf@2.11.0)(@connectrpc/connect@2.1.1(@bufbuild/protobuf@2.11.0))
+        version: 2.1.1(@bufbuild/protobuf@2.12.0)(@connectrpc/connect@2.1.1(@bufbuild/protobuf@2.12.0))
       uuidv7:
         specifier: ^1.1.0
         version: 1.1.0
@@ -122,8 +122,8 @@ packages:
     peerDependencies:
       '@bufbuild/protobuf': ^2.12.0
 
-  '@buf/fivebits_pug.bufbuild_es@2.12.0-20260506044109-e00079fd5b34.1':
-    resolution: {tarball: https://buf.build/gen/npm/v1/@buf/fivebits_pug.bufbuild_es/-/fivebits_pug.bufbuild_es-2.12.0-20260506044109-e00079fd5b34.1.tgz}
+  '@buf/fivebits_pug.bufbuild_es@2.12.0-20260516184605-146359367ea1.1':
+    resolution: {tarball: https://buf.build/gen/npm/v1/@buf/fivebits_pug.bufbuild_es/-/fivebits_pug.bufbuild_es-2.12.0-20260516184605-146359367ea1.1.tgz}
     peerDependencies:
       '@bufbuild/protobuf': ^2.12.0
 
@@ -137,8 +137,8 @@ packages:
     peerDependencies:
       '@bufbuild/protobuf': ^2.6.2
 
-  '@bufbuild/protobuf@2.11.0':
-    resolution: {integrity: sha512-sBXGT13cpmPR5BMgHE6UEEfEaShh5Ror6rfN3yEK5si7QVrtZg8LEPQb0VVhiLRUslD2yLnXtnRzG035J/mZXQ==}
+  '@bufbuild/protobuf@2.12.0':
+    resolution: {integrity: sha512-B/XlCaFIP8LOwzo+bz5uFzATYokcwCKQcghqnlfwSmM5eX/qTkvDBnDPs+gXtX/RyjxJ4DRikECcPJbyALA8FA==}
 
   '@bufbuild/protovalidate@1.1.1':
     resolution: {integrity: sha512-sE6CojU25nfeb1w88Sm+jRnmk4GvQTeEZvLDHHDPvIHbj2NsDJWFAUJdJr+RcuMnjdWmbur+rAS38VuEK/XviQ==}
@@ -1109,39 +1109,39 @@ snapshots:
     dependencies:
       css-tree: 3.2.1
 
-  '@buf/bufbuild_protovalidate.bufbuild_es@2.12.0-20251209175733-2a1774d88802.1(@bufbuild/protobuf@2.11.0)':
+  '@buf/bufbuild_protovalidate.bufbuild_es@2.12.0-20251209175733-2a1774d88802.1(@bufbuild/protobuf@2.12.0)':
     dependencies:
-      '@bufbuild/protobuf': 2.11.0
+      '@bufbuild/protobuf': 2.12.0
 
-  '@buf/fivebits_pug.bufbuild_es@2.12.0-20260506044109-e00079fd5b34.1(@bufbuild/protobuf@2.11.0)':
+  '@buf/fivebits_pug.bufbuild_es@2.12.0-20260516184605-146359367ea1.1(@bufbuild/protobuf@2.12.0)':
     dependencies:
-      '@buf/bufbuild_protovalidate.bufbuild_es': 2.12.0-20251209175733-2a1774d88802.1(@bufbuild/protobuf@2.11.0)
-      '@bufbuild/protobuf': 2.11.0
+      '@buf/bufbuild_protovalidate.bufbuild_es': 2.12.0-20251209175733-2a1774d88802.1(@bufbuild/protobuf@2.12.0)
+      '@bufbuild/protobuf': 2.12.0
 
-  '@bufbuild/cel-spec@0.4.0(@bufbuild/protobuf@2.11.0)':
+  '@bufbuild/cel-spec@0.4.0(@bufbuild/protobuf@2.12.0)':
     dependencies:
-      '@bufbuild/protobuf': 2.11.0
+      '@bufbuild/protobuf': 2.12.0
 
-  '@bufbuild/cel@0.4.0(@bufbuild/protobuf@2.11.0)':
+  '@bufbuild/cel@0.4.0(@bufbuild/protobuf@2.12.0)':
     dependencies:
-      '@bufbuild/cel-spec': 0.4.0(@bufbuild/protobuf@2.11.0)
-      '@bufbuild/protobuf': 2.11.0
+      '@bufbuild/cel-spec': 0.4.0(@bufbuild/protobuf@2.12.0)
+      '@bufbuild/protobuf': 2.12.0
 
-  '@bufbuild/protobuf@2.11.0': {}
+  '@bufbuild/protobuf@2.12.0': {}
 
-  '@bufbuild/protovalidate@1.1.1(@bufbuild/protobuf@2.11.0)':
+  '@bufbuild/protovalidate@1.1.1(@bufbuild/protobuf@2.12.0)':
     dependencies:
-      '@bufbuild/cel': 0.4.0(@bufbuild/protobuf@2.11.0)
-      '@bufbuild/protobuf': 2.11.0
+      '@bufbuild/cel': 0.4.0(@bufbuild/protobuf@2.12.0)
+      '@bufbuild/protobuf': 2.12.0
 
-  '@connectrpc/connect-web@2.1.1(@bufbuild/protobuf@2.11.0)(@connectrpc/connect@2.1.1(@bufbuild/protobuf@2.11.0))':
+  '@connectrpc/connect-web@2.1.1(@bufbuild/protobuf@2.12.0)(@connectrpc/connect@2.1.1(@bufbuild/protobuf@2.12.0))':
     dependencies:
-      '@bufbuild/protobuf': 2.11.0
-      '@connectrpc/connect': 2.1.1(@bufbuild/protobuf@2.11.0)
+      '@bufbuild/protobuf': 2.12.0
+      '@connectrpc/connect': 2.1.1(@bufbuild/protobuf@2.12.0)
 
-  '@connectrpc/connect@2.1.1(@bufbuild/protobuf@2.11.0)':
+  '@connectrpc/connect@2.1.1(@bufbuild/protobuf@2.12.0)':
     dependencies:
-      '@bufbuild/protobuf': 2.11.0
+      '@bufbuild/protobuf': 2.12.0
 
   '@csstools/color-helpers@6.0.2': {}
 
