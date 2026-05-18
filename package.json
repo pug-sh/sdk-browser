@@ -16,7 +16,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@buf/fivebits_pug.bufbuild_es": "2.12.0-20260516184605-146359367ea1.1",
+    "@buf/fivebits_pug.bufbuild_es": "2.12.0-20260518104940-7cfc94507726.1",
     "@bufbuild/protobuf": "^2.12.0",
     "@bufbuild/protovalidate": "^1.1.1",
     "@connectrpc/connect": "^2.1.1",

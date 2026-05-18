@@ -1,29 +1,36 @@
 import {
-  AddToCartPropertiesSchema,
   AppClosePropertiesSchema,
   AppOpenPropertiesSchema,
-  CheckoutCompletedPropertiesSchema,
+} from '@buf/fivebits_pug.bufbuild_es/common/events/v1/app_events_pb.js'
+import { SignupPropertiesSchema } from '@buf/fivebits_pug.bufbuild_es/common/events/v1/auth_events_pb.js'
+import {
+  AddToCartPropertiesSchema,
   CheckoutStartedPropertiesSchema,
-  ClickPropertiesSchema,
-  DeadClickPropertiesSchema,
-  ErrorOccurredPropertiesSchema,
+  PurchasePropertiesSchema,
+} from '@buf/fivebits_pug.bufbuild_es/common/events/v1/commerce_events_pb.js'
+import { SearchPropertiesSchema } from '@buf/fivebits_pug.bufbuild_es/common/events/v1/discovery_events_pb.js'
+import { ErrorOccurredPropertiesSchema } from '@buf/fivebits_pug.bufbuild_es/common/events/v1/error_events_pb.js'
+import {
   FormStartPropertiesSchema,
   FormSubmitPropertiesSchema,
-  LoginPropertiesSchema,
-  LogoutPropertiesSchema,
+} from '@buf/fivebits_pug.bufbuild_es/common/events/v1/form_events_pb.js'
+import {
+  VideoPausePropertiesSchema,
+  VideoPlayPropertiesSchema,
+} from '@buf/fivebits_pug.bufbuild_es/common/events/v1/media_events_pb.js'
+import {
+  ClickPropertiesSchema,
+  DeadClickPropertiesSchema,
+  PageViewPropertiesSchema,
+  RageClickPropertiesSchema,
+  ScrollPropertiesSchema,
+} from '@buf/fivebits_pug.bufbuild_es/common/events/v1/navigation_events_pb.js'
+import {
   NotificationClickedPropertiesSchema,
   NotificationDismissedPropertiesSchema,
   NotificationReceivedPropertiesSchema,
-  PageViewPropertiesSchema,
-  PurchasePropertiesSchema,
-  RageClickPropertiesSchema,
-  ScrollPropertiesSchema,
-  SearchPropertiesSchema,
-  SharePropertiesSchema,
-  SignupPropertiesSchema,
-  VideoPausePropertiesSchema,
-  VideoPlayPropertiesSchema,
-} from '@buf/fivebits_pug.bufbuild_es/common/v1/well_known_events_pb.js'
+} from '@buf/fivebits_pug.bufbuild_es/common/events/v1/notification_events_pb.js'
+import { SharePropertiesSchema } from '@buf/fivebits_pug.bufbuild_es/common/events/v1/social_events_pb.js'
 import type { JsonValue, MessageInitShape } from '@bufbuild/protobuf'
 
 /** Options passed to `track()`. `immediate` bypasses batching for priority events; `timestamp` overrides the default current-time (epoch milliseconds, e.g. `Date.now()`). */
@@ -38,15 +45,12 @@ export const wellKnownSchemas = Object.freeze({
   add_to_cart: AddToCartPropertiesSchema,
   app_close: AppClosePropertiesSchema,
   app_open: AppOpenPropertiesSchema,
-  checkout_completed: CheckoutCompletedPropertiesSchema,
   checkout_started: CheckoutStartedPropertiesSchema,
   click: ClickPropertiesSchema,
   dead_click: DeadClickPropertiesSchema,
   error_occurred: ErrorOccurredPropertiesSchema,
   form_start: FormStartPropertiesSchema,
   form_submit: FormSubmitPropertiesSchema,
-  login: LoginPropertiesSchema,
-  logout: LogoutPropertiesSchema,
   notification_clicked: NotificationClickedPropertiesSchema,
   notification_dismissed: NotificationDismissedPropertiesSchema,
   notification_received: NotificationReceivedPropertiesSchema,
