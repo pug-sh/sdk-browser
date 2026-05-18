@@ -1,30 +1,5 @@
-import {
-  AddToCartPropertiesSchema,
-  AppClosePropertiesSchema,
-  AppOpenPropertiesSchema,
-  CheckoutCompletedPropertiesSchema,
-  CheckoutStartedPropertiesSchema,
-  ClickPropertiesSchema,
-  DeadClickPropertiesSchema,
-  ErrorOccurredPropertiesSchema,
-  FormStartPropertiesSchema,
-  FormSubmitPropertiesSchema,
-  LoginPropertiesSchema,
-  LogoutPropertiesSchema,
-  NotificationClickedPropertiesSchema,
-  NotificationDismissedPropertiesSchema,
-  NotificationReceivedPropertiesSchema,
-  PageViewPropertiesSchema,
-  PurchasePropertiesSchema,
-  RageClickPropertiesSchema,
-  ScrollPropertiesSchema,
-  SearchPropertiesSchema,
-  SharePropertiesSchema,
-  SignupPropertiesSchema,
-  VideoPausePropertiesSchema,
-  VideoPlayPropertiesSchema,
-} from '@buf/fivebits_pug.bufbuild_es/common/v1/well_known_events_pb.js'
 import type { JsonValue, MessageInitShape } from '@bufbuild/protobuf'
+import { wellKnownSchemas } from './well-known-events.generated.js'
 
 /** Options passed to `track()`. `immediate` bypasses batching for priority events; `timestamp` overrides the default current-time (epoch milliseconds, e.g. `Date.now()`). */
 export interface TrackOptions {
@@ -33,33 +8,7 @@ export interface TrackOptions {
 }
 
 export type { JsonValue }
-
-export const wellKnownSchemas = Object.freeze({
-  add_to_cart: AddToCartPropertiesSchema,
-  app_close: AppClosePropertiesSchema,
-  app_open: AppOpenPropertiesSchema,
-  checkout_completed: CheckoutCompletedPropertiesSchema,
-  checkout_started: CheckoutStartedPropertiesSchema,
-  click: ClickPropertiesSchema,
-  dead_click: DeadClickPropertiesSchema,
-  error_occurred: ErrorOccurredPropertiesSchema,
-  form_start: FormStartPropertiesSchema,
-  form_submit: FormSubmitPropertiesSchema,
-  login: LoginPropertiesSchema,
-  logout: LogoutPropertiesSchema,
-  notification_clicked: NotificationClickedPropertiesSchema,
-  notification_dismissed: NotificationDismissedPropertiesSchema,
-  notification_received: NotificationReceivedPropertiesSchema,
-  page_view: PageViewPropertiesSchema,
-  purchase: PurchasePropertiesSchema,
-  rage_click: RageClickPropertiesSchema,
-  scroll: ScrollPropertiesSchema,
-  search: SearchPropertiesSchema,
-  share: SharePropertiesSchema,
-  signup: SignupPropertiesSchema,
-  video_pause: VideoPausePropertiesSchema,
-  video_play: VideoPlayPropertiesSchema,
-} as const)
+export { wellKnownSchemas }
 
 type WellKnownSchemas = typeof wellKnownSchemas
 export type WellKnownEventName = keyof WellKnownSchemas
