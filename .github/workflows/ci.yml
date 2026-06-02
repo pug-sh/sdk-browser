@@ -27,6 +27,17 @@ jobs:
 
       - run: bun run build
 
+      # Fail if the committed generated files don't match a fresh `bun run build`
+      # — e.g. someone bumped the package version or the @buf dependency without
+      # re-running the codegen (`prebuild` regenerates both files).
+      - name: Verify generated files are up to date
+        run: |
+          if ! git diff --quiet -- src/version.ts src/well-known-events.generated.ts; then
+            echo "::error::Generated files are out of date. Run 'bun run build' and commit src/version.ts and src/well-known-events.generated.ts."
+            git diff -- src/version.ts src/well-known-events.generated.ts
+            exit 1
+          fi
+
       - run: bun run lint
 
       - run: bun run test
