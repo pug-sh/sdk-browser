@@ -14,29 +14,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          version: 9
+          bun-version: 1.3.14
 
+      # Node is still required: the `prebuild` script shells out to `node`.
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Get pnpm store directory
-        id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+      - run: bun install --frozen-lockfile
 
-      - uses: actions/cache@v4
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
+      - run: bun run build
 
-      - run: pnpm install --frozen-lockfile
+      # Fail if the committed generated files don't match a fresh `bun run build`
+      # — e.g. someone bumped the package version or the @buf dependency without
+      # re-running the codegen (`prebuild` regenerates both files).
+      - name: Verify generated files are up to date
+        run: |
+          if ! git diff --quiet -- src/version.ts src/well-known-events.generated.ts; then
+            echo "::error::Generated files are out of date. Run 'bun run build' and commit src/version.ts and src/well-known-events.generated.ts."
+            git diff -- src/version.ts src/well-known-events.generated.ts
+            exit 1
+          fi
 
-      - run: pnpm run build
+      - run: bun run lint
 
-      - run: pnpm run lint
-
-      - run: pnpm run test
+      - run: bun run test
