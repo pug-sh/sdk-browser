@@ -159,9 +159,6 @@ export const init = (projectId: string, options: InitOptions) => {
 }
 
 export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
-  if (typeof window === 'undefined') {
-    return
-  }
   if (!state) {
     log.warn('setAutoCapture() called before init().')
     return
@@ -169,16 +166,12 @@ export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
   state.desiredAutoCapture = autoCapture
   if (!state.trackingConsent.isGranted()) {
     log.debug('setAutoCapture() stored selection; listeners activate after opt-in.')
-    state.autoCapture.set(false)
     return
   }
   state.autoCapture.set(autoCapture)
 }
 
 export const optInTracking = (): void => {
-  if (typeof window === 'undefined') {
-    return
-  }
   if (!state) {
     log.warn('optInTracking() called before init().')
     return
@@ -189,9 +182,6 @@ export const optInTracking = (): void => {
 }
 
 export const optOutTracking = (): void => {
-  if (typeof window === 'undefined') {
-    return
-  }
   if (!state) {
     log.warn('optOutTracking() called before init().')
     return
@@ -201,6 +191,7 @@ export const optOutTracking = (): void => {
   log.debug('Tracking opted out.')
 }
 
+/** Reflects tracking consent only — independent of `dryRun`, which suppresses delivery without changing consent. */
 export const isTrackingEnabled = (): boolean => {
   if (!state) {
     log.warn('isTrackingEnabled() called before init().')
