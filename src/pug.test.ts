@@ -96,8 +96,35 @@ vi.mock('./parsers.js', () => ({
 
 const importPug = async () => import('./pug.js')
 
+const createMockStorage = (): Storage => {
+  const store: Record<string, string> = {}
+  return {
+    getItem: (key: string) => store[key] ?? null,
+    setItem: (key: string, value: string) => {
+      store[key] = value
+    },
+    removeItem: (key: string) => {
+      delete store[key]
+    },
+    clear: () => {
+      for (const key of Object.keys(store)) {
+        delete store[key]
+      }
+    },
+    get length() {
+      return Object.keys(store).length
+    },
+    key: (index: number) => Object.keys(store)[index] ?? null,
+  }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: createMockStorage(),
+    writable: true,
+    configurable: true,
+  })
   trackerSpies.pageView.mockImplementation(() => cleanupSpies.pageView)
   trackerSpies.click.mockImplementation(() => cleanupSpies.click)
   trackerSpies.scroll.mockImplementation(() => cleanupSpies.scroll)
@@ -442,6 +469,77 @@ describe('tracking consent', () => {
 
     destroy()
     expect(cleanupSpies.click).toHaveBeenCalledOnce()
+  })
+
+  it('does not persist consent by default', async () => {
+    const { init, optOutTracking } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false })
+    optOutTracking()
+
+    expect(localStorage.getItem('__pug_project-id_consent__')).toBeNull()
+  })
+
+  it('persists the consent decision when persistTrackingConsent is enabled', async () => {
+    const { init, optOutTracking } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false, persistTrackingConsent: true })
+    optOutTracking()
+
+    expect(localStorage.getItem('__pug_project-id_consent__')).toBe('denied')
+  })
+
+  it('restores a persisted opt-out across re-init, overriding the default', async () => {
+    const { destroy, init, isTrackingEnabled, optOutTracking } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false, persistTrackingConsent: true })
+    optOutTracking()
+    destroy()
+
+    // Re-init with a granted default; the persisted opt-out must win.
+    init('project-id', {
+      apiKey: 'api-key',
+      autoCapture: false,
+      persistTrackingConsent: true,
+      defaultTrackingConsent: 'granted',
+    })
+
+    expect(isTrackingEnabled()).toBe(false)
+  })
+
+  it('ignores persisted consent when persistTrackingConsent is off', async () => {
+    const { destroy, init, isTrackingEnabled, optOutTracking } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false, persistTrackingConsent: true })
+    optOutTracking()
+    destroy()
+
+    // Persistence disabled on re-init: the stored value is not read back.
+    init('project-id', { apiKey: 'api-key', autoCapture: false, defaultTrackingConsent: 'granted' })
+
+    expect(isTrackingEnabled()).toBe(true)
+  })
+
+  it('preserves the persisted consent decision across destroy()', async () => {
+    const { destroy, init, optOutTracking } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false, persistTrackingConsent: true })
+    optOutTracking()
+    destroy()
+
+    // The consent choice intentionally survives teardown.
+    expect(localStorage.getItem('__pug_project-id_consent__')).toBe('denied')
+  })
+
+  it('preserves the persisted consent decision across reset()', async () => {
+    const { init, optOutTracking, reset } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false, persistTrackingConsent: true })
+    optOutTracking()
+    reset()
+
+    // reset() clears profile identity but not the user's consent choice.
+    expect(localStorage.getItem('__pug_project-id_consent__')).toBe('denied')
   })
 })
 

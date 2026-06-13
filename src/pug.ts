@@ -39,6 +39,11 @@ export interface InitOptions {
   readonly session?: SessionConfig
   readonly autoCapture?: AutoCaptureConfig
   readonly defaultTrackingConsent?: TrackingConsent
+  /**
+   * Persist the consent decision to `localStorage` so an opt-out survives reloads. When enabled, a
+   * previously stored decision takes precedence over `defaultTrackingConsent`. Defaults to `false`.
+   */
+  readonly persistTrackingConsent?: boolean
 }
 
 export type { AutoCaptureConfig, AutoCaptureSelection, TrackingConsent }
@@ -111,7 +116,11 @@ export const init = (projectId: string, options: InitOptions) => {
   }
 
   const transport = createBatchedTransport(config.endpoint, options.apiKey, projectId, options.batch)
-  const trackingConsent = createTrackingConsent(options.defaultTrackingConsent ?? 'granted')
+  const trackingConsent = createTrackingConsent({
+    projectId,
+    defaultConsent: options.defaultTrackingConsent ?? 'granted',
+    persist: options.persistTrackingConsent ?? false,
+  })
   const autoCapture = createAutoCaptureController(track, trackingConsent.isGranted)
 
   state = {
