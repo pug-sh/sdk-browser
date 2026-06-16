@@ -23,7 +23,12 @@ import {
 } from './profile.js'
 import { configureSession, destroySession, resetIdentity, resolveSessionId, type SessionConfig } from './session.js'
 import { type JsonValue, type TrackFn, type TrackOptions, toEvent } from './track.js'
-import { createTrackingConsent, type TrackingConsent, type TrackingConsentController } from './tracking-consent.js'
+import {
+  createTrackingConsent,
+  type TrackingConsent,
+  type TrackingConsentConfig,
+  type TrackingConsentController,
+} from './tracking-consent.js'
 import { DEFAULT_ENDPOINT, DEVICE_ID_KEY } from './utils.js'
 
 export interface PugConfig {
@@ -38,10 +43,10 @@ export interface InitOptions {
   readonly dryRun?: boolean
   readonly session?: SessionConfig
   readonly autoCapture?: AutoCaptureConfig
-  readonly defaultTrackingConsent?: TrackingConsent
+  readonly trackingConsent?: TrackingConsent | TrackingConsentConfig
 }
 
-export type { AutoCaptureConfig, AutoCaptureSelection, TrackingConsent }
+export type { AutoCaptureConfig, AutoCaptureSelection, TrackingConsent, TrackingConsentConfig }
 
 interface PugState {
   readonly config: PugConfig
@@ -111,7 +116,7 @@ export const init = (projectId: string, options: InitOptions) => {
   }
 
   const transport = createBatchedTransport(config.endpoint, options.apiKey, projectId, options.batch)
-  const trackingConsent = createTrackingConsent(options.defaultTrackingConsent ?? 'granted')
+  const trackingConsent = createTrackingConsent(projectId, options.trackingConsent)
   const autoCapture = createAutoCaptureController(track, trackingConsent.isGranted)
 
   state = {
