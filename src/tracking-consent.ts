@@ -34,7 +34,7 @@ export const createTrackingConsent = (
       // Re-write so a cookie-backed store refreshes its expiry.
       store.setItem(storageKey, stored)
     } else if (stored !== null) {
-      log.warn(`Stored tracking consent "${stored}" at "${storageKey}" is invalid, ignoring.`)
+      log.warn(`Stored tracking consent at "${storageKey}" is invalid, ignoring.`)
     }
   }
 

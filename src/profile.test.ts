@@ -164,7 +164,7 @@ describe('cross-subdomain identity', () => {
     const anonId = profile.getAnonymousId()
     expect(anonId.startsWith('anon-')).toBe(true)
     expect(logSpies.warn).toHaveBeenCalledWith(
-      'Stored profile ID "not-prefixed" has unexpected format (missing "anon-" prefix), regenerating.',
+      'Stored profile ID has unexpected format (missing "anon-" prefix), regenerating.',
     )
   })
 

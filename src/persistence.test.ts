@@ -163,6 +163,27 @@ describe('createPersistentStore', () => {
     expect(store?.getItem('k')).toBeNull()
     expect(logSpies.warn).toHaveBeenCalledWith('Failed to read "k" from localStorage:', expect.any(Error))
   })
+
+  it('never throws when the cookie layer throws (treats it as a miss/failure)', () => {
+    const { layer } = createFakeCookieLayer(true)
+    layer.get = () => {
+      throw new Error('cookie read')
+    }
+    layer.set = () => {
+      throw new Error('cookie write')
+    }
+    layer.remove = () => {
+      throw new Error('cookie remove')
+    }
+    const store = createPersistentStore(layer)
+    // A thrown read is treated as a miss; cross-subdomain mode does not fall back to localStorage.
+    expect(() => store?.getItem('k')).not.toThrow()
+    expect(store?.getItem('k')).toBeNull()
+    // A thrown write is a cookie failure; cross-subdomain mode reports the cookie's outcome.
+    expect(() => store?.setItem('k', 'v')).not.toThrow()
+    expect(store?.setItem('k', 'v')).toBe(false)
+    expect(() => store?.removeItem('k')).not.toThrow()
+  })
 })
 
 describe('resolveStore', () => {

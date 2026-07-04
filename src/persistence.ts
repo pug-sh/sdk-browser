@@ -34,7 +34,12 @@ export const createPersistentStore = (cookies: CookieLayer | null): PersistentSt
     crossSubdomain,
     getItem: key => {
       if (cookies) {
-        const value = cookies.get(key)
+        let value: string | null = null
+        try {
+          value = cookies.get(key)
+        } catch (err) {
+          log.warn(`Failed to read "${key}" from cookies:`, err)
+        }
         if (value !== null) {
           return value
         }
@@ -57,7 +62,14 @@ export const createPersistentStore = (cookies: CookieLayer | null): PersistentSt
       return null
     },
     setItem: (key, value) => {
-      const cookiePersisted = cookies ? cookies.set(key, value) : false
+      let cookiePersisted = false
+      if (cookies) {
+        try {
+          cookiePersisted = cookies.set(key, value)
+        } catch (err) {
+          log.warn(`Failed to write "${key}" to cookies:`, err)
+        }
+      }
       // The probe passing at init does not guarantee later writes land (cookies can be disabled
       // or dropped mid-session). In cross-subdomain mode the cookie is the layer reads trust, so
       // a dropped write means the value will not survive a page load — say so, once per key.
@@ -80,7 +92,13 @@ export const createPersistentStore = (cookies: CookieLayer | null): PersistentSt
       return crossSubdomain ? cookiePersisted : cookiePersisted || localPersisted
     },
     removeItem: key => {
-      cookies?.remove(key)
+      if (cookies) {
+        try {
+          cookies.remove(key)
+        } catch (err) {
+          log.warn(`Failed to remove "${key}" from cookies:`, err)
+        }
+      }
       if (local) {
         try {
           local.removeItem(key)

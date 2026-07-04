@@ -77,7 +77,7 @@ describe('createTrackingConsent', () => {
     const createTrackingConsent = await loadFactory()
     const consent = createTrackingConsent('proj', { default: 'granted', persist: true })
     expect(consent.getConsent()).toBe('granted')
-    expect(logSpies.warn).toHaveBeenCalledWith(`Stored tracking consent "maybe" at "${KEY}" is invalid, ignoring.`)
+    expect(logSpies.warn).toHaveBeenCalledWith(`Stored tracking consent at "${KEY}" is invalid, ignoring.`)
   })
 
   it('falls back to in-memory and warns when storage is unavailable', async () => {

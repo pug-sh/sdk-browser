@@ -39,7 +39,7 @@ export const getAnonymousId = (): string => {
       store?.setItem(storageKey, stored)
       return anonymousId
     }
-    log.warn(`Stored profile ID "${stored}" has unexpected format (missing "anon-" prefix), regenerating.`)
+    log.warn('Stored profile ID has unexpected format (missing "anon-" prefix), regenerating.')
   }
 
   anonymousId = `anon-${uuidv7()}`
