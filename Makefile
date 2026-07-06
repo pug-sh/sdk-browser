@@ -46,10 +46,14 @@ typed-events:
 	node scripts/gen-well-known-events.mjs
 	rm -rf .codegen-tmp
 
-# CI gate: committed typed-event codegen must match a fresh generate.
-check-codegen: typed-events
-	@git diff --exit-code -- src/well-known-events.generated.ts \
-	  || { echo "codegen drift — run 'make typed-events' and commit"; exit 1; }
+# CI gate: committed codegen (src/gen + typed events) must match a fresh generate.
+# Depends on `protos` (not just `typed-events`) so a standalone `make check-codegen`
+# also regenerates src/gen; otherwise src/gen drift passes unchecked here while the
+# real GitHub CI (which diffs both paths) fails. buf.gen.yaml's clean:true means a
+# stale src/gen would otherwise be silently overwritten with no drift reported.
+check-codegen: protos
+	@git diff --exit-code -- src/gen src/well-known-events.generated.ts \
+	  || { echo "codegen drift — run 'make protos' and commit"; exit 1; }
 
 build:
 	bun run build
