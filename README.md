@@ -5,7 +5,7 @@ Browser-side analytics and event tracking for Pug. Auto-captures page views, cli
 ## Installation
 
 ```bash
-npm install pug-web
+npm install @pug-sh/browser
 ```
 
 ## Usage
@@ -13,7 +13,7 @@ npm install pug-web
 ### Analytics
 
 ```ts
-import { init, identify, track, destroy } from 'pug-web'
+import { init, identify, track, destroy } from '@pug-sh/browser'
 
 init('your-project-id', {
   apiKey: 'your-api-key',
@@ -50,7 +50,7 @@ init('your-project-id', {
 For consent-first flows, start with tracking consent denied. While denied, automatic listeners are not attached, and manual `track()` and `identify()` are dropped (events are not queued for later replay). Set `persist: true` to remember the user's choice across reloads — it is persisted like identity (through the cross-subdomain cookie when active, so an opt-out on one subdomain applies on siblings, plus `localStorage`); otherwise consent is in-memory and you pass the initial value yourself on each `init()`.
 
 ```ts
-import { init, optInTracking, optOutTracking, setAutoCapture } from 'pug-web'
+import { init, optInTracking, optOutTracking, setAutoCapture } from '@pug-sh/browser'
 
 init('your-project-id', {
   apiKey: 'your-api-key',
@@ -140,7 +140,7 @@ A runnable demo of both controls lives in [`examples/privacy/`](./examples/priva
 Creates or updates a profile for a known user. Call it after `init()` when a visitor signs in or when you learn their stable user ID.
 
 ```ts
-import { identify } from 'pug-web'
+import { identify } from '@pug-sh/browser'
 
 await identify('user_123', {
   email: 'user@example.com',
@@ -158,7 +158,7 @@ await identify('user_123', {
 Use `reset()` when a user signs out or switches accounts:
 
 ```ts
-import { reset } from 'pug-web'
+import { reset } from '@pug-sh/browser'
 
 reset()
 ```
@@ -242,7 +242,7 @@ You need a service worker to receive push messages. Choose one of two approaches
 Copy `pug_sw.js` from this package into your public root (or wherever your site is served from). It handles `install`, `activate`, `push`, and `notificationclick` out of the box.
 
 ```
-cp node_modules/pug-web/pug_sw.js public/pug_sw.js
+cp node_modules/@pug-sh/browser/pug_sw.js public/pug_sw.js
 ```
 
 Then pass the path when calling `subscribePush` (defaults to `/pug_sw.js` if omitted):
@@ -291,7 +291,7 @@ Registers the browser for push notifications and sends the subscription to Pug's
 **You are responsible for requesting notification permission** before calling `subscribePush`. The browser's `pushManager.subscribe()` will throw if permission has not been granted.
 
 ```ts
-import { subscribePush } from 'pug-web'
+import { subscribePush } from '@pug-sh/browser'
 
 const handleEnablePush = async () => {
   const permission = await Notification.requestPermission()
@@ -325,8 +325,8 @@ Tracks `notification_clicked` events reliably across two cases:
 Call it once after `init()`. It returns a cleanup function — pass it to `destroy()` or call it on SPA teardown.
 
 ```ts
-import { init, track, destroy } from 'pug-web'
-import { setupNotificationClickTracking } from 'pug-web'
+import { init, track, destroy } from '@pug-sh/browser'
+import { setupNotificationClickTracking } from '@pug-sh/browser'
 
 init('your-project-id', { apiKey: 'your-api-key' })
 
@@ -361,7 +361,7 @@ The `notification_clicked` event receives whatever was set in `event.notificatio
 Unsubscribes the browser from push notifications. Does not remove the device from the backend — call your own backend API if you need server-side cleanup.
 
 ```ts
-import { unsubscribePush } from 'pug-web'
+import { unsubscribePush } from '@pug-sh/browser'
 
 await unsubscribePush({ swPath: '/pug_sw.js' })
 ```

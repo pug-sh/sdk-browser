@@ -1,7 +1,7 @@
 {
-  "name": "@poluruprvn/pug-web",
-  "version": "0.0.8",
-  "description": "Pug Web SDK for event tracking",
+  "name": "@pug-sh/browser",
+  "version": "0.0.1",
+  "description": "Pug browser SDK for event tracking and product analytics",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,9 +18,21 @@
     "README.md",
     "LICENSE"
   ],
+  "homepage": "https://pug.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pug-sh/sdk-browser.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pug-sh/sdk-browser/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "prebuild": "echo \"export const SDK_VERSION = '$(node -p \"require('./package.json').version\")'\" > src/version.ts",
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "watch": "tsc -w",
     "dev": "tsc -w & serve . & sleep 1 && open http://localhost:3000 && wait",
     "serve": "serve . & sleep 1 && open http://localhost:3000 && wait",
@@ -39,9 +51,12 @@
   "keywords": [
     "analytics",
     "tracking",
-    "sdk"
+    "events",
+    "sdk",
+    "browser",
+    "web"
   ],
-  "author": "Pug",
+  "author": "pug.sh",
   "license": "MIT",
   "devDependencies": {
     "@biomejs/biome": "2.5.2",
