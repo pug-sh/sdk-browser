@@ -1,7 +1,7 @@
 import { fromJson, JsonValue, toJson } from '@bufbuild/protobuf'
-import { ConnectError } from '@connectrpc/connect'
 import { type Event, EventSchema } from './gen/sdk/events/v1/events_pb.js'
 import { log } from './logger.js'
+import { RpcError } from './rpc.js'
 import { createTransport } from './transport.js'
 import { isStorageAvailable, makeStorageKey } from './utils.js'
 
@@ -180,10 +180,10 @@ export const DEFAULT_BATCH_CONFIG: BatchConfig = {
 const PERMANENT_GRPC_CODES = new Set([3, 5, 6, 7, 9, 12, 16])
 
 const isPermanentError = (err: unknown) => {
-  if (err instanceof ConnectError) {
+  if (err instanceof RpcError) {
     return PERMANENT_GRPC_CODES.has(err.code)
   }
-  // Non-ConnectError errors (TypeError, SyntaxError, etc.) indicate code or
+  // Non-RpcError errors (TypeError, SyntaxError, etc.) indicate code or
   // data bugs that retrying cannot fix. Treat them as permanent to avoid
   // poison events stalling the entire queue in an infinite retry loop.
   return true

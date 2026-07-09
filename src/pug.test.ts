@@ -27,9 +27,7 @@ const transportSpies = {
   destroy: vi.fn(),
 }
 
-const profilesClientSpies = {
-  identify: vi.fn(() => Promise.resolve({})),
-}
+const unaryCallSpy = vi.fn(() => Promise.resolve({}))
 
 const trackerSpies = {
   pageView: vi.fn(() => cleanupSpies.pageView),
@@ -44,12 +42,9 @@ vi.mock('./batch.js', () => ({
   createBatchedTransport: vi.fn(() => transportSpies),
 }))
 
-vi.mock('@connectrpc/connect', () => ({
-  createClient: vi.fn(() => profilesClientSpies),
-}))
-
-vi.mock('./api-transport.js', () => ({
-  createApiTransport: vi.fn(() => ({})),
+vi.mock('./rpc.js', () => ({
+  unaryCall: unaryCallSpy,
+  RpcError: class RpcError extends Error {},
 }))
 
 vi.mock('./events/page_view.js', () => ({
@@ -108,7 +103,7 @@ beforeEach(() => {
   trackerSpies.rageClick.mockImplementation(() => cleanupSpies.rageClick)
   trackerSpies.deadClick.mockImplementation(() => cleanupSpies.deadClick)
   transportSpies.send.mockImplementation(() => Promise.resolve())
-  profilesClientSpies.identify.mockImplementation(() => Promise.resolve({}))
+  unaryCallSpy.mockImplementation(() => Promise.resolve({}))
   vi.mocked(isIdentified).mockReturnValue(false)
   localStorage.clear()
 })
@@ -340,7 +335,7 @@ describe('tracking consent', () => {
     init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: 'denied' })
 
     await expect(identify('user-1')).resolves.toBeUndefined()
-    expect(profilesClientSpies.identify).not.toHaveBeenCalled()
+    expect(unaryCallSpy).not.toHaveBeenCalled()
     expect(markIdentified).not.toHaveBeenCalled()
   })
 
@@ -468,7 +463,7 @@ describe('identify', () => {
     optInTracking()
     await identify('user-1')
 
-    expect(profilesClientSpies.identify).toHaveBeenCalledOnce()
+    expect(unaryCallSpy).toHaveBeenCalledOnce()
     expect(markIdentified).toHaveBeenCalledWith('user-1')
   })
 
@@ -478,13 +473,13 @@ describe('identify', () => {
     init('project-id', { apiKey: 'api-key', autoCapture: false })
 
     await expect(identify('')).resolves.toBeUndefined()
-    expect(profilesClientSpies.identify).not.toHaveBeenCalled()
+    expect(unaryCallSpy).not.toHaveBeenCalled()
     expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('non-empty externalId'))
   })
 
   it('swallows RPC failures without throwing', async () => {
     vi.mocked(isIdentified).mockReturnValue(true)
-    profilesClientSpies.identify.mockImplementationOnce(() => Promise.reject(new Error('rpc down')))
+    unaryCallSpy.mockImplementationOnce(() => Promise.reject(new Error('rpc down')))
     const { identify, init } = await importPug()
 
     init('project-id', { apiKey: 'api-key', autoCapture: false })
