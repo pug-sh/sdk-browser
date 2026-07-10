@@ -1,7 +1,7 @@
 import { create, type JsonObject } from '@bufbuild/protobuf'
 import { DevicesService, SubscribeRequestSchema } from './gen/sdk/devices/v1/devices_pb.js'
 import { log } from './logger.js'
-import { unaryCall } from './rpc.js'
+import { ONE_SHOT_TIMEOUT_MS, unaryCall } from './rpc.js'
 import type { JsonValue, TrackFn, WellKnownEventName } from './track.js'
 import { DEVICE_ID_KEY, isStorageAvailable, urlBase64ToUint8Array } from './utils.js'
 
@@ -149,8 +149,9 @@ export const subscribePush = async (vapidPublicKey: string, options: PushOptions
 
   // subscribePush is a critical operation, so a server rejection (invalid request) throws an
   // RpcError — unlike toEvent, which drops invalid events with an error log to honor the
-  // "track() must never throw" invariant.
-  await unaryCall(options.endpoint, options.apiKey, DevicesService.method.subscribe, request)
+  // "track() must never throw" invariant. It's a one-shot with no retry, so it gets the longer
+  // one-shot timeout rather than the 5s batch default (a slow push service must not abort at 5s).
+  await unaryCall(options.endpoint, options.apiKey, DevicesService.method.subscribe, request, ONE_SHOT_TIMEOUT_MS)
 }
 
 export const eventNotificationClick = 'notification_clicked' satisfies WellKnownEventName

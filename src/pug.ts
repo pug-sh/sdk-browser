@@ -20,7 +20,7 @@ import {
   markIdentified,
   resolveDistinctId,
 } from './profile.js'
-import { unaryCall } from './rpc.js'
+import { ONE_SHOT_TIMEOUT_MS, unaryCall } from './rpc.js'
 import {
   clearSession,
   configureSession,
@@ -322,9 +322,13 @@ export const identify = async (externalId: string, traits?: Record<string, JsonV
     })
 
     try {
-      await unaryCall(state.config.endpoint, state.apiKey, ProfilesSDKService.method.identify, req)
+      await unaryCall(state.config.endpoint, state.apiKey, ProfilesSDKService.method.identify, req, ONE_SHOT_TIMEOUT_MS)
       markIdentified(externalId)
     } catch (err) {
+      // The server is the sole validator (the SDK does no client-side field checks by design), so a
+      // rejection here is the only signal that a trait or externalId was invalid. Surface the error
+      // as-is: an RpcError carries the server's message plus a gRPC code with whatever field-level
+      // detail the server chose to include.
       log.error('Failed to identify:', err)
     }
   } catch (err) {

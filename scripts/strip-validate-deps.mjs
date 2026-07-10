@@ -37,10 +37,13 @@ const stripFile = path => {
   const out = src
     // Drop the import line: `import { file_buf_validate_validate } from ".../validate_pb.js";`
     .replace(new RegExp(`^import \\{ ${IMPORT} \\} from "[^"]*validate_pb\\.js";\\n`, 'm'), '')
-    // Drop it from the fileDesc() deps array in every position.
-    .replace(new RegExp(`\\[${IMPORT}, `, 'g'), '[')
-    .replace(new RegExp(`, ${IMPORT}\\]`, 'g'), ']')
+    // Drop it from the fileDesc() deps array in every position — sole, first, middle, or last.
+    // buf/validate sorts first in generated deps today, but don't depend on that ordering. The
+    // lookahead on the non-first case matches `, IMPORT` only when it's followed by `,` or `]`,
+    // so it removes a whole element without clipping a longer identifier that merely starts with it.
     .replace(new RegExp(`\\[${IMPORT}\\]`, 'g'), '[]')
+    .replace(new RegExp(`\\[${IMPORT}, `, 'g'), '[')
+    .replace(new RegExp(`, ${IMPORT}(?=[,\\]])`, 'g'), '')
   if (out !== src) {
     writeFileSync(path, out)
     touched++

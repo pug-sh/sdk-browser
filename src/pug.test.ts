@@ -45,6 +45,7 @@ vi.mock('./batch.js', () => ({
 vi.mock('./rpc.js', () => ({
   unaryCall: unaryCallSpy,
   RpcError: class RpcError extends Error {},
+  ONE_SHOT_TIMEOUT_MS: 15000,
 }))
 
 vi.mock('./events/page_view.js', () => ({
@@ -465,6 +466,20 @@ describe('identify', () => {
 
     expect(unaryCallSpy).toHaveBeenCalledOnce()
     expect(markIdentified).toHaveBeenCalledWith('user-1')
+  })
+
+  it('uses a longer-than-default timeout for the one-shot identify RPC', async () => {
+    vi.mocked(isIdentified).mockReturnValue(true)
+    const { identify, init, optInTracking } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: 'denied' })
+    optInTracking()
+    await identify('user-1')
+
+    // identify is a one-shot with no retry, so aborting a cold backend at the 5s batch default
+    // would permanently lose the call. It gets an explicit longer timeout instead.
+    const timeoutArg = unaryCallSpy.mock.calls[0][4]
+    expect(timeoutArg).toBeGreaterThan(5000)
   })
 
   it('does not throw on an invalid externalId', async () => {
