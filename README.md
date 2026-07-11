@@ -10,6 +10,9 @@ npm install @pug-sh/browser
 
 ### Script tag (CDN)
 
+<details>
+<summary>Loader snippet and one-tag install</summary>
+
 No bundler? Load the SDK from jsDelivr with the loader snippet — paste it into `<head>`. It fetches a single self-contained file (the whole SDK in one request), and exposes the full npm API on `window.pug`. Calls made before the script loads (`init`, `track`, consent changes) are queued and replayed in order once it arrives:
 
 ```html
@@ -45,6 +48,8 @@ Always call `pug.init()` first in the snippet — the SDK drops calls made befor
   data-options='{"trackingConsent":{"default":"denied","persist":true}}'
 ></script>
 ```
+
+</details>
 
 ## Usage
 
@@ -114,9 +119,15 @@ optOutTracking()
 | `endpoint` | `string` | `https://api.pugs.dev` | Backend base URL. |
 | `batch` | `Partial<BatchConfig>` | — | Batching overrides (size, wait, storage key). |
 | `autoCapture` | `boolean \| AutoCaptureSelection` | `true` | Controls SDK-owned automatic listeners. `false` disables all automatic capture; an object enables only keys set to `true`. |
-| `trackingConsent` | `'granted' \| 'denied' \| { default?, persist? }` | `'granted'` | Tracking consent. While denied, automatic listeners stay off and `track()` / `identify()` are ignored. Object form: `default` is the first-run seed; `persist: true` persists the choice and restores it on the next `init()` — it rides the cross-subdomain cookie when active, so an opt-out applies on sibling subdomains. |
-| `crossSubdomainTracking` | `boolean \| { domain: string }` | `false` | **Off by default** — cross-subdomain identity relaxes browser same-origin isolation to the weaker same-site model, so it is an explicit opt-in. `false` keeps persistence origin-scoped in `localStorage`. `true` shares identity (anonymous ID, external ID, session, persisted consent) across subdomains via a first-party cookie on the registrable domain (e.g. `.example.com`), auto-discovered with a write-probe; it degrades to a host-only cookie on localhost and IP hosts, and to `localStorage` when cookies are blocked, and cookies set from HTTPS carry `Secure` (shared only among HTTPS subdomains). ⚠️ On a custom multi-tenant domain not on the [Public Suffix List](https://publicsuffix.org/) (e.g. `a.myplatform.com` and `b.myplatform.com` as separate tenants) the probe returns the shared `myplatform.com`, letting sibling tenants read each other's identity — use `{ domain }` to pin an explicit cookie domain there. Cross-subdomain sessions end by idle/max timeout only — the "rotate when all tabs closed" heuristic is origin-scoped and is disabled in this mode. |
-| `sanitizeUrl` | `(url: string) => string` | — | Redacts URLs before they leave the device — rewrites `$url`, `$referrer`, and captured form actions to mask routes or strip PII query params. Fails closed: throwing or returning a non-string drops the URL. See [Privacy controls](#privacy-controls). |
+| `trackingConsent` | `'granted' \| 'denied' \| TrackingConsentConfig` | `'granted'` | Initial consent. While denied, automatic listeners stay off and `track()` / `identify()` are ignored. Object form: `default` seeds the first run; `persist: true` remembers the choice across reloads. |
+| `crossSubdomainTracking` | `boolean \| { domain: string }` | `false` | **Off by default** — sharing identity across subdomains weakens browser isolation from same-origin to same-site, so it is an explicit opt-in. `false` keeps persistence origin-scoped in `localStorage`; `true` shares identity (anonymous ID, external ID, session, consent) across subdomains via a first-party cookie on the auto-discovered registrable domain, and `{ domain }` pins that cookie domain explicitly. See [Cross-subdomain tracking](#cross-subdomain-tracking) for fallback behavior and the multi-tenant caveat. |
+| `sanitizeUrl` | `(url: string) => string` | — | Rewrites outgoing URLs (`$url`, `$referrer`, form actions) before they're sent — e.g. to mask IDs or strip PII. See [Privacy controls](#privacy-controls). |
+
+#### Cross-subdomain tracking
+
+With `crossSubdomainTracking: true`, identity is written to a first-party cookie on the registrable domain (e.g. `.example.com`), auto-discovered with a write-probe. It degrades to a host-only cookie on localhost and IP hosts, and to `localStorage` when cookies are blocked; cookies set from HTTPS carry `Secure`, so identity is shared only among HTTPS subdomains. Sessions end by idle/max timeout only — the "rotate when all tabs closed" heuristic is origin-scoped and is disabled in this mode.
+
+**Warning:** on a custom multi-tenant domain not on the [Public Suffix List](https://publicsuffix.org/) (e.g. `a.myplatform.com` and `b.myplatform.com` as separate tenants), the write-probe returns the shared `myplatform.com`, letting sibling tenants read each other's identity — pin an explicit `{ domain }` there.
 
 ### Tracking consent API
 
