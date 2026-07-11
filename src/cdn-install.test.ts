@@ -535,22 +535,25 @@ describe('loader snippet fixture', () => {
     expect(normalize(example)).toBe(normalize(canonical))
   })
 
-  it('deliberately leaves a pre-existing foreign window.pug untouched (no clobber, no load)', () => {
-    // A real foreign global already on the page (e.g. the pug template engine). The snippet's
-    // `if (w.pug) return` bails by design: it must never overwrite an unrelated global, so it does
-    // not stub, does not inject the bundle script, and — accepted tradeoff — the snippet's trailing
-    // `pug.init(...)` (outside SNIPPET_RE) would then hit the foreign object. installPug's foreign
-    // global guard (see "refuses to overwrite a foreign window.pug" above) is the reachable warning
-    // + safety net in the one-tag / direct-bundle-load path where no snippet runs first.
+  it('warns and leaves a pre-existing foreign window.pug untouched (no clobber, no load)', () => {
+    // A real foreign global already on the page (e.g. the pug template engine). On a `window.pug`
+    // that is not our loader stub (no `_q`), the snippet warns and bails: it must never overwrite an
+    // unrelated global, so it writes no stub and injects no bundle script. The trailing `pug.init(...)`
+    // (outside SNIPPET_RE) still reaches the foreign object, but the branded warning names the cause.
+    // installPug's foreign-global guard (see "refuses to overwrite a foreign window.pug" above) is the
+    // matching net on the one-tag / direct-bundle-load path where no snippet runs first.
     const foreign = { render: () => 'template engine' }
     const fakeDoc = makeFakeDocument()
     const w: { pug?: PugStub } = { pug: foreign as unknown as PugStub }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const runSnippet = new Function('window', 'document', extractSnippet('../README.md'))
 
     runSnippet(w, fakeDoc)
 
     expect(w.pug).toBe(foreign) // untouched — the snippet wrote no stub over it
     expect(fakeDoc.appended).toHaveLength(0) // and never injected the bundle script
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[Pug SDK]'))
+    warn.mockRestore()
   })
 
   it('caps the queue at 1000 entries when the bundle never arrives', () => {

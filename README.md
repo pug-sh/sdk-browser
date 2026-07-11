@@ -15,7 +15,7 @@ No bundler? Load the SDK from jsDelivr with the loader snippet — paste it into
 ```html
 <script>
   !(function (w, d) {
-    if (w.pug) return;
+    if (w.pug) { if (!w.pug._q) console.warn('[Pug SDK] window.pug already defined by another script; not loaded.'); return; }
     var q = [];
     var pug = (w.pug = { _q: q, _v: 1 });
     var methods = ('init track identify reset destroy setAutoCapture optInTracking optOutTracking ' +
