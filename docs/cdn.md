@@ -141,6 +141,7 @@ SRI and auto-updating URLs are mutually exclusive: a rolling `@1` URL changes by
 
 ## Troubleshooting
 
+- **A flood of `+esm` module requests in the network tab** — you loaded jsDelivr's `/+esm` endpoint (`.../@pug-sh/browser/+esm`), which serves the *unbundled* ESM build as one request per module (100+). That build is meant for bundlers — which inline and tree-shake it — not for loading straight into a browser. Use the `.../dist/cdn/pug.min.js` bundle URL above instead; it is a single self-contained request. (npm + a bundler is unaffected — the bundler folds every module into your app bundle, so none of those requests reach the browser.)
 - **"N call(s) were queued before pug.init()"** — move `pug.init(...)` to the top of your snippet, right after the loader IIFE.
 - **"window.pug is already defined and is not the Pug loader stub"** — another library owns the `pug` global (commonly the [pug template engine](https://pugjs.org) runtime). The bundle refuses to overwrite it; load the conflicting library under a different name or use the npm package.
 - **"Pug SDK vX is already loaded; ignoring duplicate load of vX"** — the tag is included twice (second snippet paste, GTM double-fire, SPA re-mount). Harmless: the first instance wins.

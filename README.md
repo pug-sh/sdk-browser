@@ -10,7 +10,7 @@ npm install @pug-sh/browser
 
 ### Script tag (CDN)
 
-No bundler? Load the SDK from jsDelivr with the loader snippet — paste it into `<head>`. Calls made before the script loads (`init`, `track`, consent changes) are queued and replayed in order once it arrives, and the whole npm API is available on `window.pug`:
+No bundler? Load the SDK from jsDelivr with the loader snippet — paste it into `<head>`. It fetches a single self-contained file (the whole SDK in one request), and exposes the full npm API on `window.pug`. Calls made before the script loads (`init`, `track`, consent changes) are queued and replayed in order once it arrives:
 
 ```html
 <script>
