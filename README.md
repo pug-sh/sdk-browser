@@ -8,6 +8,42 @@ Browser-side analytics and event tracking for Pug. Auto-captures page views, cli
 npm install @pug-sh/browser
 ```
 
+### Script tag (CDN)
+
+No bundler? Load the SDK from jsDelivr with the loader snippet — paste it into `<head>`. Calls made before the script loads (`init`, `track`, consent changes) are queued and replayed in order once it arrives, and the whole npm API is available on `window.pug`:
+
+```html
+<script>
+  !(function (w, d) {
+    if (w.pug) return;
+    var q = [];
+    var pug = (w.pug = { _q: q, _v: 1 });
+    var methods = ('init track identify reset destroy setAutoCapture optInTracking optOutTracking ' +
+      'isTrackingEnabled getTrackingConsent rotate ready').split(' ');
+    for (var i = 0; i < methods.length; i++) (function (m) {
+      pug[m] = function () { if (q.length < 1000) q.push([m, [].slice.call(arguments)]); };
+    })(methods[i]);
+    var s = d.createElement('script');
+    s.async = true;
+    s.src = 'https://cdn.jsdelivr.net/npm/@pug-sh/browser@0.0.3/dist/cdn/pug.min.js';
+    s.onerror = function () { console.warn('[Pug SDK] Failed to load ' + s.src); };
+    d.head.appendChild(s);
+  })(window, document);
+
+  pug.init('your-project-id', { apiKey: 'your-api-key' });
+</script>
+```
+
+Always call `pug.init()` first in the snippet — the SDK drops calls made before init. To keep the page free of inline JavaScript (e.g. under a strict CSP), use the one-tag install instead:
+
+```html
+<script async src="https://cdn.jsdelivr.net/npm/@pug-sh/browser@0.0.3/dist/cdn/pug.min.js"
+  data-project-id="your-project-id" data-api-key="your-api-key"
+  data-options='{"trackingConsent":{"default":"denied","persist":true}}'></script>
+```
+
+See [docs/cdn.md](./docs/cdn.md) for queue semantics, consent/CMP integration, version pinning + SRI, and CSP notes.
+
 ## Usage
 
 ### Analytics
