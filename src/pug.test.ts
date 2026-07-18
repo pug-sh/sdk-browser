@@ -232,7 +232,7 @@ describe('init autoCapture', () => {
     expect(trackerSpies.scroll).toHaveBeenCalledOnce()
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Unknown autoCapture keys: madeUp'))
     expect(logSpies.warn).toHaveBeenCalledWith(
-      expect.stringContaining('autoCapture values must be boolean for keys: click'),
+      expect.stringContaining('autoCapture values must be `true` for keys: click'),
     )
   })
 
@@ -250,12 +250,42 @@ describe('init autoCapture', () => {
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('autoCapture is an allowlist'))
   })
 
-  it('does not warn about the allowlist when a selection enables at least one tracker', async () => {
+  it('does not warn about the allowlist for a selection that only enables', async () => {
     const { init } = await importPug()
 
     init('project-id', { apiKey: 'api-key', autoCapture: { scroll: true } })
 
     expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('autoCapture is an allowlist'))
+  })
+
+  // The quieter half of the denylist misread: this one still enables something, so a check keyed on
+  // "enables nothing" stays silent while click, form, rageClick and deadClick are all lost.
+  it('warns about the allowlist when a selection mixes `true` with an explicit `false`', async () => {
+    const { init } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: { pageView: true, scroll: false } as never })
+
+    expect(trackerSpies.pageView).toHaveBeenCalledOnce()
+    expect(trackerSpies.click).not.toHaveBeenCalled()
+    expect(trackerSpies.deadClick).not.toHaveBeenCalled()
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('autoCapture is an allowlist'))
+    // The message must name what survived, since that is what reveals the loss.
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('This selection enables pageView.'))
+  })
+
+  // Validation lives in setDesired, not reconcile, so consent-first integrations hear about a bad
+  // selection at init() rather than whenever the user eventually opts in.
+  it('validates the selection at init even while tracking consent is denied', async () => {
+    const { init } = await importPug()
+
+    init('project-id', {
+      apiKey: 'api-key',
+      trackingConsent: 'denied',
+      autoCapture: { deadClick: false } as never,
+    })
+
+    expect(trackerSpies.deadClick).not.toHaveBeenCalled()
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('autoCapture is an allowlist'))
   })
 
   it('logs an aggregate error when tracker setup fails', async () => {

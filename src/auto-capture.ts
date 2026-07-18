@@ -44,19 +44,44 @@ const trackers = {
 
 const trackerKeys = Object.keys(trackers) as AutoCaptureKey[]
 
-const normalizeAutoCapture = (autoCapture: AutoCaptureConfig | undefined): AutoCaptureKey[] => {
+/**
+ * Resolves a selection to the trackers it enables. Pure: every diagnostic lives in
+ * `validateAutoCapture`, because this runs on each reconcile while warnings must fire exactly once,
+ * at config time.
+ *
+ * A wrong top-level type defaults to all trackers (most likely a mistake, and capture is the
+ * default); a mostly-valid object keeps its good keys and ignores the rest.
+ */
+const resolveAutoCapture = (autoCapture: AutoCaptureConfig | undefined): AutoCaptureKey[] => {
   if (autoCapture === undefined || autoCapture === true) {
     return trackerKeys
   }
   if (autoCapture === false) {
     return []
   }
-  // Two failure policies for malformed JS input (TS callers are constrained by the type):
-  // a wrong top-level type is most likely a mistake, so default to all trackers; a mostly-valid
-  // object with a few bad fields keeps the good keys and ignores the rest.
+  if (typeof autoCapture !== 'object' || autoCapture === null || Array.isArray(autoCapture)) {
+    return trackerKeys
+  }
+  const selection = autoCapture as Record<string, unknown>
+  return trackerKeys.filter(key => selection[key] === true)
+}
+
+/**
+ * Reports a misconfigured selection, once, when it is set.
+ *
+ * Deliberately called from `setDesired` rather than from `reconcile`: reconcile only consults the
+ * selection when consent is granted, so validating there would say nothing at all for the
+ * consent-first flows the README recommends — the integrator would get the diagnosis at
+ * `optInTracking()` time, in a user's browser, long after they stopped watching the console — and
+ * would then re-warn on every opt-in/opt-out cycle.
+ */
+const validateAutoCapture = (autoCapture: AutoCaptureConfig | undefined): void => {
+  if (autoCapture === undefined || typeof autoCapture === 'boolean') {
+    return
+  }
   if (typeof autoCapture !== 'object' || autoCapture === null || Array.isArray(autoCapture)) {
     log.warn(`autoCapture must be a boolean or object, got ${typeof autoCapture}. Defaulting to all trackers.`)
-    return trackerKeys
+    return
   }
 
   // The type constrains TS callers to `true`, but this value is runtime-untrusted: the CDN one-tag
@@ -70,22 +95,25 @@ const normalizeAutoCapture = (autoCapture: AutoCaptureConfig | undefined): AutoC
 
   const invalidKeys = trackerKeys.filter(key => selection[key] !== undefined && typeof selection[key] !== 'boolean')
   if (invalidKeys.length > 0) {
-    log.warn(`autoCapture values must be boolean for keys: ${invalidKeys.join(', ')}. Ignoring invalid values.`)
+    log.warn(`autoCapture values must be \`true\` for keys: ${invalidKeys.join(', ')}. Ignoring invalid values.`)
   }
 
-  const enabled = trackerKeys.filter(key => selection[key] === true)
-  // An object that names trackers but enables none is the allowlist misread as a denylist
-  // (`{ deadClick: false }` meaning "everything except dead clicks"), which silently yields no
-  // capture at all. TS callers cannot express it — AutoCaptureSelection's values are typed `true` —
-  // but JS and CDN callers can, so the loss has to be audible rather than a debug line.
-  if (enabled.length === 0 && trackerKeys.some(key => selection[key] !== undefined)) {
+  // An explicit `false` is the allowlist misread as a denylist (`{ deadClick: false }` for
+  // "everything except dead clicks"). Keyed on the `false` itself rather than on a zero enabled
+  // count, because the partial form is the quieter half of the same mistake:
+  // `{ pageView: true, scroll: false }` still enables something, so a count-based check stays
+  // silent while click, form, rageClick and deadClick are lost. TS callers cannot write either
+  // without a cast — AutoCaptureSelection's values are typed `true` — but JS and CDN callers can.
+  const disabledKeys = trackerKeys.filter(key => selection[key] === false)
+  if (disabledKeys.length > 0) {
+    const enabled = trackerKeys.filter(key => selection[key] === true)
     log.warn(
-      'autoCapture is an allowlist — only keys set to `true` are enabled — so this selection disables ALL ' +
-        'automatic capture. List the trackers to enable (e.g. { pageView: true }), or pass `false` to disable ' +
-        'capture deliberately.',
+      `autoCapture is an allowlist — only keys set to \`true\` are enabled — so \`false\` on ` +
+        `${disabledKeys.join(', ')} changes nothing: those trackers are off either way, as is every key you did ` +
+        `not list. This selection enables ${enabled.length > 0 ? enabled.join(', ') : 'nothing at all'}. Pass ` +
+        '`false` as the whole autoCapture value to disable capture deliberately.',
     )
   }
-  return enabled
 }
 
 /**
@@ -127,7 +155,7 @@ export const createAutoCaptureController = (track: TrackFn, isConsentGranted: ()
   // Effective listeners = desired selection gated by consent. Idempotent: already-enabled trackers
   // that stay enabled are left untouched (no teardown + re-setup).
   const reconcile = (): void => {
-    const enabledTrackers = new Set(isConsentGranted() ? normalizeAutoCapture(desired) : [])
+    const enabledTrackers = new Set(isConsentGranted() ? resolveAutoCapture(desired) : [])
 
     for (const key of trackerKeys) {
       if (!enabledTrackers.has(key)) {
@@ -152,8 +180,13 @@ export const createAutoCaptureController = (track: TrackFn, isConsentGranted: ()
   }
 
   return {
-    /** Store the desired selection and reconcile the live listeners against current consent. */
+    /**
+     * Store the desired selection and reconcile the live listeners against current consent.
+     * Validation happens here, not in `reconcile`, so a bad selection is reported when it is set
+     * even if consent is currently denied.
+     */
     setDesired: (autoCapture: AutoCaptureConfig | undefined): void => {
+      validateAutoCapture(autoCapture)
       desired = autoCapture
       reconcile()
     },

@@ -22,6 +22,7 @@ export {
 export { rotate, type SessionConfig } from './session.js'
 // Deprecated aliases for backward compatibility — remove in next major version.
 export {
+  type TrackEventProps,
   type TrackFn,
   type TrackOptions,
   type WellKnownEventName,

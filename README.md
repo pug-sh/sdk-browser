@@ -108,7 +108,7 @@ init('your-project-id', {
 // Captures page views and clicks. scroll, form, rageClick and deadClick stay off.
 ```
 
-Because it is an allowlist rather than a denylist, there is no way to spell "everything except X": `{ scroll: false }` would enable nothing at all, silently turning off all capture. So the values are typed `true` and TypeScript rejects that shape — list what you want enabled, or pass `false` to turn everything off deliberately. (Plain JS and the one-tag install aren't type-checked, so the SDK also warns at runtime if a selection enables nothing.)
+Because it is an allowlist rather than a denylist, there is no way to spell "everything except X". Setting a key to `false` never turns *other* trackers on: `{ scroll: false }` enables nothing at all, and `{ pageView: true, scroll: false }` enables only page views — click, form, rage click and dead click are off too. So the values are typed `true` and TypeScript rejects an explicit `false` — list what you want enabled, or pass `false` as the whole value to turn everything off deliberately. (Plain JS and the one-tag install aren't type-checked, so the SDK also warns at runtime when a selection sets any key to `false`, naming what it actually enabled.)
 
 For consent-first flows, start with tracking consent denied. While denied, automatic listeners are not attached, and manual `track()` and `identify()` are dropped (events are not queued for later replay). Set `persist: true` to remember the user's choice across reloads — it is persisted like identity (through the cross-subdomain cookie when active, so an opt-out on one subdomain applies on siblings, plus `localStorage`); otherwise consent is in-memory and you pass the initial value yourself on each `init()`.
 

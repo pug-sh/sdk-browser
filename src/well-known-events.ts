@@ -16,9 +16,25 @@ export type WellKnownEventPropsMap = { [K in WellKnownEventName]: MessageInitSha
  * Properties accepted for an event: a well-known event's typed shape (plus arbitrary extras, which
  * are always allowed and sent as custom properties) when the name is a known one, and a loose bag
  * for any other string.
+ *
+ * The `[E] extends [WellKnownEventName]` tuple wrapper is load-bearing, not a stray: it makes the
+ * conditional **non-distributive**. A bare `E extends WellKnownEventName` distributes over the
+ * 119-member name union whenever `E` is still generic, which is exactly what happens inside a
+ * wrapper that forwards its own type parameter:
+ *
+ * ```ts
+ * const wrap: TrackFn = (event, props, options) => track(event, props, options)
+ * // distributive: error TS2590: Expression produces a union type that is too complex to represent.
+ * ```
+ *
+ * That is a compiler resource bailout, not a diagnosable error — it names no cause and suggests no
+ * fix, and `TrackFn` is a public export, so typing a wrapper with it is the obvious thing to reach
+ * for. Wrapping both sides in tuples evaluates the check once against the whole of `E` instead of
+ * once per member. Call sites are unaffected (`E` is a single literal there, so distribution was a
+ * no-op) and every guard in `track-types.test-d.ts` still fires.
  */
-export type TrackEventProps<E extends string> = E extends WellKnownEventName
-  ? WellKnownEventPropsMap[E] & Record<string, JsonValue>
+export type TrackEventProps<E extends string> = [E] extends [WellKnownEventName]
+  ? WellKnownEventPropsMap[E & WellKnownEventName] & Record<string, JsonValue>
   : Record<string, JsonValue>
 
 /**

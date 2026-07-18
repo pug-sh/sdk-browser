@@ -10,7 +10,7 @@
  * Keep each `@ts-expect-error` call on a single line — the directive only applies to the line that
  * follows it, so a formatter-wrapped call would silently stop being checked.
  */
-import { track } from './index.js'
+import { type TrackEventProps, type TrackFn, type TrackOptions, track, type WellKnownEventName } from './index.js'
 
 // ── Well-known events: correct payloads must compile ─────────────────────────────────────────────
 track('purchase', { productId: 'sku_123', amount: 49, currency: 'USD' })
@@ -41,3 +41,25 @@ track('purchase', { amount: 49, currency: 999 })
 
 // @ts-expect-error — immediate is typed boolean
 track('purchase', { amount: 49 }, { immediate: 'yes' })
+
+// ── Wrappers must compile ────────────────────────────────────────────────────────────────────────
+// `TrackFn` is a public export, so typing an analytics facade with it is the obvious move. These
+// guard the tuple wrapper in `TrackEventProps`: with a distributive conditional both forms fail with
+// `TS2590: Expression produces a union type that is too complex to represent` — a compiler resource
+// bailout that names no cause and suggests no fix. Exported because `noUnusedLocals` is on.
+
+export const forward: TrackFn = (event, props, options) => {
+  track(event, props, options)
+}
+
+export const wrap = <E extends WellKnownEventName | (string & {})>(
+  event: E,
+  props?: TrackEventProps<E>,
+  options?: TrackOptions,
+): void => track(event, props, options)
+
+// Forwarding must not cost the caller their type-checking.
+wrap('purchase', { productId: 'sku_123', amount: 49, currency: 'USD' })
+
+// @ts-expect-error — amount is typed number, through the wrapper too
+wrap('purchase', { amount: '49' })
