@@ -391,7 +391,13 @@ export const track: TrackFn = (kind: string, props?: Record<string, unknown>, op
 
     log.debug(`track("${kind}")`)
     const immediate = opts?.immediate ?? false
-    const event = toEvent(state.config.projectId, kind, resolveSessionId(), resolveDistinctId(), props, opts)
+    const event = toEvent(
+      state.config.projectId,
+      kind,
+      { sessionId: resolveSessionId(), distinctId: resolveDistinctId() },
+      props,
+      opts,
+    )
     if (!event) {
       // error already logged by toEvent
       return

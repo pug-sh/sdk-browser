@@ -203,11 +203,19 @@ const mapObjectValuesViaHeuristic = <T>(
   return result
 }
 
+/**
+ * Event identity is a closed choice: either the server derives it (cookieless
+ * mode — the event carries the flag and NO ids, which the backend requires:
+ * a cookieless event that sends identity is rejected at validation), or the
+ * caller supplies both ids. The union makes "cookieless with ids" and
+ * "consented without ids" unrepresentable at compile time.
+ */
+export type EventIdentity = { readonly cookieless: true } | { readonly sessionId: string; readonly distinctId: string }
+
 export const toEvent = (
   projectId: string,
   kind: string,
-  sessionId: string,
-  distinctId: string,
+  identity: EventIdentity,
   props?: Record<string, unknown>,
   opts?: TrackOptions,
 ): Event | null => {
@@ -242,8 +250,9 @@ export const toEvent = (
       },
       customProperties,
       kind,
-      sessionId,
-      distinctId,
+      ...('cookieless' in identity
+        ? { cookieless: true }
+        : { sessionId: identity.sessionId, distinctId: identity.distinctId }),
       occurTime: opts?.timestamp && Number.isFinite(opts.timestamp) ? timestampFromMs(opts.timestamp) : timestampNow(),
     })
   } catch (err) {
