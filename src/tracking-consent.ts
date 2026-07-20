@@ -2,7 +2,7 @@ import { log } from './logger.js'
 import { type PersistentStore, resolveStore } from './persistence.js'
 import { makeStorageKey } from './utils.js'
 
-export type TrackingConsent = 'granted' | 'denied'
+export type TrackingConsent = 'granted' | 'denied' | 'cookieless'
 
 export interface TrackingConsentConfig {
   /** First-run seed used when nothing is persisted yet. Defaults to 'granted'. */
@@ -12,7 +12,8 @@ export interface TrackingConsentConfig {
 }
 
 /** Narrows an untrusted value to a valid consent state. Everything else is out-of-domain. */
-const isConsent = (value: unknown): value is TrackingConsent => value === 'granted' || value === 'denied'
+const isConsent = (value: unknown): value is TrackingConsent =>
+  value === 'granted' || value === 'denied' || value === 'cookieless'
 
 export const createTrackingConsent = (
   projectId: string,
@@ -73,17 +74,24 @@ export const createTrackingConsent = (
     }
   }
 
+  const set = (value: TrackingConsent): void => {
+    if (!isConsent(value)) {
+      log.warn(`Invalid tracking consent state ${JSON.stringify(value)}; keeping "${status}".`)
+      return
+    }
+    status = value
+    write(value)
+  }
+
   return {
     getConsent: (): TrackingConsent => status,
+    /** True only for full consent — gates identity-storage writes, NOT event flow. */
     isGranted: (): boolean => status === 'granted',
-    optIn: (): void => {
-      status = 'granted'
-      write('granted')
-    },
-    optOut: (): void => {
-      status = 'denied'
-      write('denied')
-    },
+    /** True when events flow at all (granted or cookieless) — gates listeners and track()/identify(). */
+    isTracking: (): boolean => status === 'granted' || status === 'cookieless',
+    set,
+    optIn: (): void => set('granted'),
+    optOut: (): void => set('denied'),
   }
 }
 

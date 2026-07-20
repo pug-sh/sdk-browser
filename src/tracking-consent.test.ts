@@ -74,6 +74,47 @@ describe('createTrackingConsent', () => {
     }
   })
 
+  it('accepts cookieless as a default seed and reports tracking active but not granted', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', 'cookieless')
+    expect(consent.getConsent()).toBe('cookieless')
+    expect(consent.isGranted()).toBe(false)
+    expect(consent.isTracking()).toBe(true)
+  })
+
+  it('isTracking is true for granted, false for denied', async () => {
+    const createTrackingConsent = await loadFactory()
+    expect(createTrackingConsent('proj', 'granted').isTracking()).toBe(true)
+    expect(createTrackingConsent('proj', 'denied').isTracking()).toBe(false)
+  })
+
+  it('set() transitions between all three states and persists when enabled', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { default: 'granted', persist: true })
+    consent.set('cookieless')
+    expect(consent.getConsent()).toBe('cookieless')
+    expect(localStorage.getItem(KEY)).toBe('cookieless')
+    consent.set('denied')
+    expect(consent.getConsent()).toBe('denied')
+    consent.set('granted')
+    expect(consent.getConsent()).toBe('granted')
+  })
+
+  it('restores a persisted cookieless choice over the default seed', async () => {
+    const createTrackingConsent = await loadFactory()
+    localStorage.setItem(KEY, 'cookieless')
+    const consent = createTrackingConsent('proj', { default: 'granted', persist: true })
+    expect(consent.getConsent()).toBe('cookieless')
+  })
+
+  it('rejects an invalid state passed to set() and keeps the current state', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', 'granted')
+    consent.set('Cookieless' as never)
+    expect(consent.getConsent()).toBe('granted')
+    expect(logSpies.warn).toHaveBeenCalled()
+  })
+
   it('does not touch storage when persist is false', async () => {
     const createTrackingConsent = await loadFactory()
     const consent = createTrackingConsent('proj', { default: 'granted' })
