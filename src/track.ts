@@ -10,6 +10,8 @@ import type { TrackOptions } from './well-known-events.js'
 
 export type {
   JsonValue,
+  PropValue,
+  TrackEventProps,
   TrackFn,
   TrackOptions,
   WellKnownEventName,
