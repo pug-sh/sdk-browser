@@ -9,6 +9,10 @@
 # builds and CI never touch BSR (proto/ + src/gen are committed). To bump: run
 # `make proto-latest` for the newest commit, set PROTO_COMMIT below, then
 # `make sync-protos && make protos` and review + commit the diff.
+# RELEASE BLOCKER: proto/sdk/events/v1/events.proto is hand-patched ahead of the
+# BSR (cookieless field, pug repo branch feat/cookieless-identity). Before any
+# npm/CDN release: merge that branch, run `make proto-latest`, bump PROTO_COMMIT,
+# `make sync-protos && make protos`, and confirm the sync produces no diff.
 PROTO_MODULE  := buf.build/pugsh/pug
 PROTO_COMMIT  := 739d784162d649a3be748db76d3fafd8
 

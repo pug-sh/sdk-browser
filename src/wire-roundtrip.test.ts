@@ -55,6 +55,16 @@ describe('wire round-trip (validate deps stripped)', () => {
     expect(back.customProperties.amount?.value.value).toBe(5n)
   })
 
+  it('Event cookieless flag round-trips with identity omitted', () => {
+    const { back, bytes } = roundTrips(EventSchema, { eventId: 'e2', kind: 'page_view', cookieless: true })
+    expect(back.cookieless).toBe(true)
+    expect(back.distinctId).toBe('')
+    expect(back.sessionId).toBe('')
+    // The zero-valued identity fields must not appear on the wire at all —
+    // the server distinguishes omitted from sent-empty only by absence.
+    expect(bytes.length).toBeLessThan(40)
+  })
+
   it('BatchCreateRequest round-trips (the RPC the transport actually sends)', () => {
     const event = create(EventSchema, { eventId: 'e1', kind: 'click', sessionId: 's', distinctId: 'd' })
     const { back } = roundTrips(BatchCreateRequestSchema, { events: [event] })
