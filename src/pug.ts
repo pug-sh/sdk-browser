@@ -148,7 +148,7 @@ export const init = (projectId: string, options: InitOptions) => {
   const trackingConsent = createTrackingConsent(projectId, options.trackingConsent, store)
 
   try {
-    configureSession(projectId, options.session, store)
+    configureSession(projectId, options.session, store, trackingConsent.isGranted)
   } catch (err) {
     log.warn('Failed to configure session tracking:', err)
   }

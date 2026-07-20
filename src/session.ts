@@ -48,6 +48,7 @@ export const configureSession = (
   projectId: string,
   sessionConfig?: SessionConfig,
   persistentStore?: PersistentStore | null,
+  isGranted?: () => boolean,
 ): void => {
   store = resolveStore(persistentStore)
   if (!store) {
@@ -75,6 +76,15 @@ export const configureSession = (
   // an init on one subdomain with no live tabs there would rotate a session still active on a
   // sibling subdomain. In that mode sessions end by idle/max timeout only.
   if (store?.crossSubdomain) {
+    return
+  }
+
+  // The tab registry is a device write, so it needs full consent: in cookieless
+  // mode the SDK stores nothing (and never resolves a session), and in denied
+  // mode nothing may be written either. Same accepted degradation as the
+  // cross-subdomain skip above — if consent is granted mid-page, sessions end
+  // by idle/max timeout only until the next init() under granted consent.
+  if (!(isGranted?.() ?? true)) {
     return
   }
 
