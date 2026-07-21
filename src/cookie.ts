@@ -229,8 +229,12 @@ export const createCookieLayer = (
         // otherwise silently fail and let the shared identity cookie resurface on the next read.
         return readCookie(doc, key) === null
       } catch (err) {
-        // Removal is best-effort, but surface why so a failed privacy teardown is diagnosable.
-        log.debug(`Cookie removal for "${key}" threw:`, err)
+        // Error, not debug: the comment always said this must be surfaced, but `log.debug` is off
+        // unless the integrator already set `debug: true` — so the reason was invisible to exactly
+        // the person diagnosing a failed opt-out. The whole teardown boolean chain (removeItem →
+        // clearProfile/clearSession → purgePersistedIdentity → setTrackingConsent) now rests on this
+        // return value, and a surviving identity cookie on the registrable domain is the outcome.
+        log.error(`Failed to remove the "${key}" cookie during teardown; the identity may resurface:`, err)
         return false
       }
     },

@@ -127,9 +127,12 @@ let cookielessIdentifyWarned = false
  * Compile-time exhaustiveness marker. Reaching it with a non-`never` argument is a type error at the
  * call site, so widening a union forces every dispatch over it to be revisited.
  *
- * Deliberately does NOT throw, unlike the usual `assertNever`: the call sites are inside `track()`,
- * which must never throw (it runs from monkey-patched `history.pushState`). The runtime guard is the
- * caller's own fail-closed branch; this only moves the diagnosis to compile time.
+ * Deliberately does NOT throw, unlike the usual `assertNever` — but not because a throw could
+ * escape: the only call site is inside `track()`'s outer try/catch, which would swallow and log it.
+ * The reason is diagnostic quality. The caller's own `else` branch already fails closed and logs the
+ * offending state by name; throwing here would replace that precise message with a generic
+ * "Unexpected error in track()" and lose the one detail worth having. This only moves the diagnosis
+ * to compile time.
  */
 const unreachable = (_state: never): void => {}
 
@@ -222,15 +225,31 @@ export const init = (projectId: string, options: InitOptions) => {
   // is therefore the user's own recorded choice. Without persistence the initial value is whatever
   // the caller passed on this load — for an async CMP typically a placeholder 'denied' corrected by
   // a later optInTracking() — and purging on that would mint a new identity on every page load.
-  if (!state.trackingConsent.isGranted() && state.trackingConsent.isAuthoritative()) {
-    // init() returns void, so this outcome has nowhere structured to go — but it must not be
-    // inferred from the individual per-key errors either. A purge that did not land means a later
-    // optInTracking() resolves the PRE-EXISTING identity, quietly falsifying the documented
-    // "granting later mints a fresh identity", while getTrackingConsent() reports the new state as
-    // though it fully applied. Name that consequence once, at the point it becomes true.
-    if (!purgePersistedIdentity()) {
-      log.error(
-        'Could not fully remove stored identity for a non-granted consent state. Identifiers may survive on this device, and granting consent later may resume the previous identity rather than minting a fresh one.',
+  if (!state.trackingConsent.isGranted()) {
+    // Unconditional, unlike the identity purge below: the queue is an outbound buffer of events
+    // already collected, not an identifier a later grant could resolve. Withholding it here left a
+    // prior consented visit's identified payloads on the device for every non-authoritative
+    // non-granted init — the bare-string form the README's CMP recipe produces — to be transmitted
+    // on the next pagehide while consent read 'denied', and re-persisted while it read 'cookieless'.
+    purgeQueuedEvents()
+
+    if (state.trackingConsent.isAuthoritative()) {
+      // init() returns void, so this outcome has nowhere structured to go — but it must not be
+      // inferred from the individual per-key errors either. A purge that did not land means a later
+      // optInTracking() resolves the PRE-EXISTING identity, quietly falsifying the documented
+      // "granting later mints a fresh identity", while getTrackingConsent() reports the new state as
+      // though it fully applied. Name that consequence once, at the point it becomes true.
+      if (!purgePersistedIdentity()) {
+        log.error(
+          'Could not fully remove stored identity for a non-granted consent state. Identifiers may survive on this device, and granting consent later may resume the previous identity rather than minting a fresh one.',
+        )
+      }
+    } else {
+      // Deliberately skipped — see isAuthoritative(). Say so, or an integrator passing a bare
+      // 'cookieless'/'denied' has no way to tell the documented purge did not run and that a prior
+      // visit's identifiers are still present (inert, but there).
+      log.debug(
+        'Consent is not granted but was not restored from storage, so it is a config seed rather than a recorded choice — stored identity was left in place. Use trackingConsent.persist to record the choice.',
       )
     }
   }
@@ -263,19 +282,43 @@ export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
  * Idempotent in end state but not side-effect-free: it issues removals (cookie deletions when
  * cross-subdomain) and may log an error on an unconfirmed removal even when nothing was stored.
  */
-const purgePersistedIdentity = (): boolean => {
-  let purged = true
-  // The batch queue is identity storage too — every queued event carries sessionId and distinctId,
-  // and after identify() the distinctId is the externalId. It sends what was already collected under
-  // valid consent, then drops both queues from the device. Runs first, while those events still exist.
+/**
+ * Drops the queued events: one best-effort send of what was collected under valid consent, then
+ * both queues off the device.
+ *
+ * Split out from the identity purge because the two answer to different gates. The queue is an
+ * **outbound buffer**, not an identifier anything reads back — purging it can never mint a new
+ * identity, so `isAuthoritative()`'s reasoning (don't destroy identity on the strength of a
+ * pre-banner seed) does not transfer to it. Folding the two together gave the queue that gate and
+ * left a prior consented visit's identified payloads on the device through any non-authoritative
+ * non-granted init, to be transmitted on the next pagehide and re-persisted while cookieless.
+ */
+const purgeQueuedEvents = (): boolean => {
+  // A null state means the transport was never built, so the queue was not purged. Report that
+  // rather than defaulting to success inside a privacy teardown.
+  if (!state) {
+    return false
+  }
   try {
-    if (state && !state.transport.purgeQueue()) {
-      purged = false
+    if (state.transport.purgeQueue()) {
+      return true
     }
+    // The only teardown leg that could fail with no diagnostic at all: the queue's own purge()
+    // returns false without logging when removeItem no-ops (a Storage shim, an extension proxy, a
+    // quota-locked store). Both sibling legs log internally; this one has to be logged here.
+    log.error(
+      'Failed to drop the persisted event queue — queued events carry sessionId and distinctId, and may be sent on a later visit.',
+    )
+    return false
   } catch (err) {
     log.error('Failed to purge queued events:', err)
-    purged = false
+    return false
   }
+}
+
+const purgePersistedIdentity = (): boolean => {
+  // Runs first, while those events still exist.
+  let purged = purgeQueuedEvents()
   try {
     purged = clearProfile() && purged
   } catch (err) {
@@ -301,11 +344,15 @@ const purgePersistedIdentity = (): boolean => {
  * Granting later mints a fresh identity lazily on the next event; pre-consent events
  * stay permanently anonymous (no retroactive linking).
  *
- * Returns **false** when the change did not fully take effect: the value was not a valid consent
- * state (consent then fails closed to `'denied'`, matching init()), the choice could not be
- * persisted (so it will not survive a reload), or a persisted identifier could not be removed.
- * Consent is always applied in memory, so `false` never means nothing happened — but a caller
- * acting on a withdrawal should surface it rather than assume the device is clean.
+ * Returns **false** when the change did not fully take effect: it was called before `init()` (in
+ * which case nothing happened at all), the value was not a valid consent state (consent then fails
+ * closed to `'denied'`, matching init()), the choice could not be persisted (so it will not survive
+ * a reload), or a persisted identifier could not be removed.
+ *
+ * Once `init()` has run, a valid state is always applied in memory, so `false` then means "applied,
+ * but not fully durable" rather than "ignored" — and a caller acting on a withdrawal should surface
+ * it rather than assume the device is clean. Before `init()` it does mean ignored, which is the case
+ * a consent banner racing initialization is most likely to hit.
  */
 export const setTrackingConsent = (consent: TrackingConsent): boolean => {
   if (!state) {
@@ -415,7 +462,10 @@ export const reset = (): boolean => {
   }
   let ok = true
   try {
-    resetIdentity()
+    // Aggregated, not merely called: resetIdentity()'s failure arms log and return rather than
+    // throwing, so a catch-only guard reported success while the previous user's session and device
+    // id were still on the device.
+    ok = resetIdentity() && ok
   } catch (err) {
     log.error('Failed to reset identity:', err)
     ok = false

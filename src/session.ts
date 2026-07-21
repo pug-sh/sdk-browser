@@ -63,9 +63,13 @@ const mayWriteToDevice = (): boolean => isGrantedFn?.() ?? true
 
 export const configureSession = (
   projectId: string,
-  sessionConfig?: SessionConfig,
-  persistentStore?: PersistentStore | null,
-  isGranted?: GrantedGate,
+  sessionConfig: SessionConfig | undefined,
+  persistentStore: PersistentStore | null | undefined,
+  // Required, not optional: `mayWriteToDevice()` defaults to *permitted* when the gate is absent,
+  // so an omitted argument writes identity to the device — and omission was invisible to types,
+  // which contributed nothing to the case that actually matters. Values may still be undefined;
+  // only the argument is mandatory, so a caller has to make the decision explicitly.
+  isGranted: GrantedGate,
 ): void => {
   store = resolveStore(persistentStore)
   if (!store) {
@@ -345,8 +349,15 @@ export const resolveSessionId = (): string => {
   }
 }
 
-// Resets both session and device ID — call on logout
-export const resetIdentity = (): void => {
+/**
+ * Resets both session and device ID — call on logout.
+ *
+ * Returns false when the reset could not be made durable, so `pug.reset()` can surface it. Both
+ * failure arms log and return rather than throwing, so reset()'s try/catch could not observe them:
+ * it returned true while the previous user's session and device id were still on the device, which
+ * is exactly the case a shared-device logout needs to know about.
+ */
+export const resetIdentity = (): boolean => {
   const now = Date.now()
   const next: StoredState = { sessionId: uuidv7(), startTime: now, lastActivityTime: now, deviceId: uuidv7() }
   state = next
@@ -354,18 +365,22 @@ export const resetIdentity = (): void => {
   // device id would plant a device identifier for a user who declined one. Clear instead of write:
   // reset() means "forget this user", and in those states there is nothing that should be stored.
   if (!mayWriteToDevice()) {
+    let cleared = true
     if (store && !store.removeItem(config.storageKey)) {
       log.error('Failed to clear the session during reset — the previous session may resurface on the next page load.')
+      cleared = false
     }
     state = null
     lastPersistMs = 0
-    return
+    return cleared
   }
   // Logout/privacy-critical: a failed persist means the previous session and device id could
   // resurface on the next page load, so this is an error rather than a warning.
   if (store && !write(next)) {
     log.error('Failed to persist the identity reset; the previous session may resurface on the next page load.')
+    return false
   }
+  return true
 }
 
 // Clears the persisted session and in-memory state while leaving the module configured (store,

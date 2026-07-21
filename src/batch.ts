@@ -279,6 +279,8 @@ export const createBatchedTransport = (
   const totalSize = () => storage.size + cookielessStorage.size
   let timer: ReturnType<typeof setTimeout> | null = null
   let state: TransportState = 'idle'
+  // Round-robin cursor, consulted only when maxSize leaves one indivisible slot. See flush().
+  let preferCookieless = false
 
   /**
    * Reports a failed `sendBeacon` at the level each queue's outcome actually warrants.
@@ -346,9 +348,27 @@ export const createBatchedTransport = (
     // failing transiently (offline user, endpoint down) starved cookieless collection outright:
     // measured at 204 send attempts, none carrying a cookieless event. Routing the two queues
     // separately narrowed the original bug; this closes it.
+    // Reserve part of the budget for the cookieless queue whenever it has anything waiting.
+    //
+    // The reserve is floored at 1 rather than derived as a remainder, and when the two floors cannot
+    // both fit — maxSize 1, where there is exactly one slot — the queues ALTERNATE instead of one
+    // owning it. The previous form floored only the *consented* budget at 1, which at maxSize 1 is
+    // the whole budget, so `cookielessStorage.lock(maxSize - consented.length)` was lock(0) on every
+    // flush forever. maxSize 1 is legal (validated with a minimum of 1) and is the natural setting
+    // for per-event delivery, so that was a live starvation, not a theoretical one. Any fixed split
+    // degenerates when the budget cannot be split; only alternation is correct at every maxSize.
     const cookielessPending = cookielessStorage.size
-    const consentedBudget =
-      cookielessPending > 0 ? Math.max(1, maxSize - Math.min(cookielessPending, Math.ceil(maxSize / 2))) : maxSize
+    let consentedBudget = maxSize
+    if (cookielessPending > 0) {
+      const cookielessReserve = Math.min(cookielessPending, Math.max(1, Math.floor(maxSize / 2)))
+      consentedBudget = maxSize - cookielessReserve
+      if (consentedBudget < 1) {
+        // No room for both. Take turns, so neither queue can be starved by a sustained stream in
+        // the other. The flag advances only here, so it cannot drift on flushes that never contend.
+        consentedBudget = preferCookieless ? 0 : 1
+        preferCookieless = !preferCookieless
+      }
+    }
     const consented = storage.lock(consentedBudget)
     const cookieless = cookielessStorage.lock(maxSize - consented.length)
     const batch = [...consented, ...cookieless]
@@ -381,7 +401,17 @@ export const createBatchedTransport = (
           log.error(`Permanent error, ${batch.length} events dropped (will NOT retry):`, err)
         } else {
           settle('rollback')
-          log.warn('Transient error sending batch, will retry:', err)
+          // "will retry" is only true if the events are still queued. A purgeQueue() that landed
+          // while this batch was in flight empties the buffer under it, so the rollback restores
+          // nothing and the retry never happens — reporting one would misdescribe the outcome.
+          if (totalSize() > 0) {
+            log.warn('Transient error sending batch, will retry:', err)
+          } else {
+            log.warn(
+              `Transient error sending batch; the queue was cleared while it was in flight, so ${batch.length} events were dropped:`,
+              err,
+            )
+          }
         }
       })
       .finally(() => {
@@ -499,15 +529,23 @@ export const createBatchedTransport = (
      * flush's later commit/rollback lands on an emptied buffer and is a harmless no-op.
      */
     purgeQueue: (): boolean => {
+      let delivered = true
       if (state !== 'destroyed') {
-        const pending = [...storage.peekUnlocked(), ...cookielessStorage.peekUnlocked()]
-        if (pending.length > 0) {
-          inner.beacon?.(pending)
+        const consentedTail = storage.peekUnlocked()
+        const cookielessTail = cookielessStorage.peekUnlocked()
+        const pending = [...consentedTail, ...cookielessTail]
+        // The third beacon call site, and the only one that discarded this result — so a blocked
+        // sendBeacon destroyed everything collected under valid consent, returned true, and said
+        // nothing. Both other sites (beaconFlush, destroy) already report through reportBeaconLoss.
+        // The counts are captured before the call because purge() empties the buffers below.
+        if (pending.length > 0 && !inner.beacon?.(pending)) {
+          reportBeaconLoss(consentedTail.length, cookielessTail.length, 'during consent withdrawal')
+          delivered = false
         }
       }
       const consentedPurged = storage.purge()
       const cookielessPurged = cookielessStorage.purge()
-      return consentedPurged && cookielessPurged
+      return consentedPurged && cookielessPurged && delivered
     },
     destroy: () => {
       state = 'destroyed'

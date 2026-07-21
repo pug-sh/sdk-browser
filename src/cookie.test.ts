@@ -178,10 +178,15 @@ describe('createCookieLayer', () => {
     expect(logSpies.debug).toHaveBeenCalledWith(expect.any(String), expect.any(Error))
   })
 
-  it('logs the cause when a cookie removal throws (privacy teardown must surface why)', () => {
+  // At error, not debug. The intent ("must surface why") was always stated, but log.debug is off
+  // unless the integrator already passed `debug: true` — invisible to exactly the person diagnosing
+  // a failed opt-out. The teardown boolean chain now rests on this return value, and the outcome is
+  // an identity cookie surviving on the registrable domain.
+  it('logs the cause at error level when a cookie removal throws (privacy teardown must surface why)', () => {
     const layer = createCookieLayer(true, docAt('https://app.example.com/'))
     expect(layer?.remove('\uD800')).toBe(false) // encodeURIComponent(key) throws inside remove
-    expect(logSpies.debug).toHaveBeenCalledWith(expect.any(String), expect.any(Error))
+    expect(logSpies.error).toHaveBeenCalledWith(expect.any(String), expect.any(Error))
+    expect(logSpies.debug).not.toHaveBeenCalledWith(expect.any(String), expect.any(Error))
   })
 
   it('skips a malformed same-name twin and returns the valid shared value', () => {

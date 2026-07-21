@@ -2,11 +2,30 @@ import { log } from './logger.js'
 import { type PersistentStore, resolveStore } from './persistence.js'
 import { makeStorageKey } from './utils.js'
 
-export type TrackingConsent = 'granted' | 'denied' | 'cookieless'
+/**
+ * The valid consent states, and the single source of `TrackingConsent`.
+ *
+ * The type is derived from this array rather than written alongside it: `isConsent` carries a
+ * `value is TrackingConsent` predicate, and when the two were maintained separately a widened union
+ * still compiled against the old three-way disjunction. The predicate then lied — it advertised
+ * narrowing to `TrackingConsent` while accepting a subset, so a newly added state would be
+ * un-settable and reported as invalid input, with `unreachable()` flagging only the `track()`
+ * dispatch. Derivation makes that drift unrepresentable.
+ */
+const CONSENT_STATES = ['granted', 'denied', 'cookieless'] as const
+
+export type TrackingConsent = (typeof CONSENT_STATES)[number]
 
 export interface TrackingConsentConfig {
-  /** First-run seed used when nothing is persisted yet. Defaults to 'granted'. */
-  readonly default?: TrackingConsent
+  /**
+   * First-run seed used when nothing is persisted yet. Defaults to `'granted'` — so `{ persist:
+   * true }` with no `initial` seeds FULL consent, the one place in this module whose posture is not
+   * fail-closed. Pass an explicit `'denied'` or `'cookieless'` for a consent-first flow.
+   *
+   * Named `initial` rather than `default`: the latter is a reserved word, so `const { default } =
+   * cfg` is a SyntaxError and consumers had to write `const { default: initial } = cfg`.
+   */
+  readonly initial?: TrackingConsent
   /** Persist opt in/out and restore any persisted value on construction (i.e. on the next init()). Defaults to false. */
   readonly persist?: boolean
 }
@@ -20,18 +39,27 @@ export interface TrackingConsentConfig {
  * `externalId` to the device in cookieless mode. The phantom member makes the two mutually
  * unassignable without changing anything at runtime.
  *
- * It is **optional** on purpose: a plain `() => boolean` (tests, non-`init()` callers) still
- * satisfies either gate, so the fence costs nothing at call sites that don't care.
+ * The member is **required**. It was optional so a plain `() => boolean` would satisfy either gate
+ * "for tests and non-`init()` callers" — but `src/*.test.ts` is excluded from `tsconfig.typecheck`
+ * and vitest transpiles without checking, so tests were never typechecked either way, and there are
+ * no non-`init()` production callers. Optionality bought nothing and let the brand be laundered:
+ * `const f: () => boolean = isTracking` and `() => isTracking()` both stripped it silently.
+ * Producers add it with the `as` casts below, which is where naming the question belongs.
  */
-export type ConsentGate<K extends string> = (() => boolean) & { readonly __gate?: K }
+export type ConsentGate<K extends string> = (() => boolean) & { readonly __gate: K }
 /** May we write identity to the device? Full consent only. */
 export type GrantedGate = ConsentGate<'granted'>
 /** Are events flowing at all? Granted **or** cookieless. */
 export type TrackingGate = ConsentGate<'tracking'>
 
+/**
+ * The recognized `TrackingConsentConfig` keys. Kept as a runtime set because the CDN one-tag
+ * install supplies this object as untyped JSON, where a typo is otherwise undetectable.
+ */
+const KNOWN_CONSENT_KEYS: ReadonlySet<string> = new Set(['initial', 'persist'])
+
 /** Narrows an untrusted value to a valid consent state. Everything else is out-of-domain. */
-const isConsent = (value: unknown): value is TrackingConsent =>
-  value === 'granted' || value === 'denied' || value === 'cookieless'
+const isConsent = (value: unknown): value is TrackingConsent => (CONSENT_STATES as readonly unknown[]).includes(value)
 
 export const createTrackingConsent = (
   projectId: string,
@@ -39,7 +67,7 @@ export const createTrackingConsent = (
   persistentStore?: PersistentStore | null,
 ) => {
   // The config is runtime-untrusted despite its type — the CDN one-tag install feeds it from
-  // data-options JSON — so validate its shape, not just its `default` value below. A shape that is
+  // data-options JSON — so validate its shape, not just its `initial` value below. A shape that is
   // neither a string nor a plain object (a primitive, an array) is out-of-domain and fails closed
   // to 'denied'. Missing config (undefined/null) is the legitimate "no preference" case.
   const raw: unknown = config
@@ -47,12 +75,27 @@ export const createTrackingConsent = (
   if (raw == null) {
     normalized = {}
   } else if (typeof raw === 'string') {
-    normalized = { default: raw as TrackingConsent }
+    normalized = { initial: raw as TrackingConsent }
   } else if (typeof raw === 'object' && !Array.isArray(raw)) {
     normalized = raw as TrackingConsentConfig
   } else {
     log.warn(`Invalid trackingConsent config ${JSON.stringify(raw)}; failing closed to 'denied'.`)
-    normalized = { default: 'denied' }
+    normalized = { initial: 'denied' }
+  }
+  // An unrecognized key was the one input here that failed OPEN: `normalized.initial` is undefined,
+  // `seed !== undefined` is false, and `status` keeps its 'granted' initialiser — so a typo'd or
+  // stale privacy config silently granted full tracking. TypeScript catches this for npm consumers
+  // (TS2561, with a did-you-mean), but the one-tag install feeds this from `data-options` JSON in
+  // customer HTML, which no compiler ever sees — and autoInitFromScript is documented to fail closed
+  // on exactly that input. Fail closed here too, matching every sibling branch.
+  const unknownKeys = Object.keys(normalized).filter(key => !KNOWN_CONSENT_KEYS.has(key))
+  if (unknownKeys.length > 0) {
+    log.warn(
+      `Unknown trackingConsent key(s) ${JSON.stringify(unknownKeys)}; expected ${[...KNOWN_CONSENT_KEYS]
+        .map(k => `'${k}'`)
+        .join(' and/or ')}. Failing closed to 'denied' rather than seeding the 'granted' fallback.`,
+    )
+    normalized = { ...normalized, initial: 'denied' }
   }
   // Non-boolean `persist` silently becomes false, and it fails quietly in every direction: consent
   // stays in memory, init()'s purge never fires (isAuthoritative() is false), and set() still
@@ -72,14 +115,14 @@ export const createTrackingConsent = (
     log.warn('Storage unavailable; tracking consent will not persist across page loads.')
   }
 
-  // First-run seed, then let any valid persisted value override it. A present-but-invalid `default`
+  // First-run seed, then let any valid persisted value override it. A present-but-invalid `initial`
   // (e.g. a typo'd 'Denied') fails closed to 'denied'; an absent one seeds the documented 'granted'.
-  const seed: unknown = normalized.default
+  const seed: unknown = normalized.initial
   let status: TrackingConsent = 'granted'
   if (isConsent(seed)) {
     status = seed
   } else if (seed !== undefined) {
-    log.warn(`Invalid trackingConsent default ${JSON.stringify(seed)}; failing closed to 'denied'.`)
+    log.warn(`Invalid trackingConsent initial ${JSON.stringify(seed)}; failing closed to 'denied'.`)
     status = 'denied'
   }
   // Whether `status` came from storage (a choice the user actually made and we recorded) rather
@@ -91,8 +134,16 @@ export const createTrackingConsent = (
     if (isConsent(stored)) {
       status = stored
       restoredFromStorage = true
-      // Re-write so a cookie-backed store refreshes its expiry.
-      store.setItem(storageKey, stored)
+      // Re-write so a cookie-backed store refreshes its expiry. The result is checked, not
+      // discarded: this is the 365-day refresh of the user's recorded *refusal*, and if it keeps
+      // failing the cookie eventually expires, the next init() falls back to the seed, and the seed
+      // defaults to 'granted'. An opt-out quietly becoming a re-consent is the exact failure the
+      // README's "handling a failed consent change" section exists to prevent.
+      if (!store.setItem(storageKey, stored)) {
+        log.error(
+          `Failed to refresh the stored tracking consent at "${storageKey}"; it may expire and fall back to the configured seed, turning a recorded opt-out into a re-consent.`,
+        )
+      }
     } else if (stored !== null) {
       log.warn(`Stored tracking consent at "${storageKey}" is invalid, ignoring.`)
     }
@@ -142,7 +193,7 @@ export const createTrackingConsent = (
      *
      * Requires BOTH that persistence is on and that the value actually came back from storage.
      * `persist` alone is not enough, and reading it that way is a data-loss bug: nothing is written
-     * until an explicit set(), so on a site that adds `{ default: 'denied', persist: true }` to an
+     * until an explicit set(), so on a site that adds `{ initial: 'denied', persist: true }` to an
      * existing deployment, every returning visitor's first load finds an empty consent key, falls
      * back to the seed, and would purge identity those users never asked to have deleted.
      *

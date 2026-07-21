@@ -12,8 +12,9 @@ let store: PersistentStore | null = null
 
 export const configureProfile = (
   projectId: string,
-  persistentStore?: PersistentStore | null,
-  isGranted?: GrantedGate,
+  persistentStore: PersistentStore | null | undefined,
+  // Required for the reason given on configureSession: an omitted gate reads as "permitted".
+  isGranted: GrantedGate,
 ): void => {
   store = resolveStore(persistentStore)
   if (!store) {
@@ -40,7 +41,15 @@ export const configureProfile = (
       log.warn(
         `Stored external ID uses the reserved "${RESERVED_DISTINCT_ID_PREFIX}" prefix, discarding it. The user will be treated as anonymous until identify() is called again.`,
       )
-      store?.removeItem(externalIdKey)
+      // Checked, not discarded: the message above asserts the device was healed. In cross-subdomain
+      // mode cookie.remove() reports failure from its read-back with no log of its own, so a
+      // poisoned value would survive and be re-read on every later init() while this claimed
+      // otherwise. In-memory state is still correct for this load — the harm is the false claim.
+      if (store && !store.removeItem(externalIdKey)) {
+        log.error(
+          `Failed to remove the reserved "${RESERVED_DISTINCT_ID_PREFIX}" external ID from storage; it will be re-read on the next page load.`,
+        )
+      }
     } else {
       externalId = stored
       if (isGranted?.() ?? true) {

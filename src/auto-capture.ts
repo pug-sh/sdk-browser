@@ -76,7 +76,7 @@ const resolveAutoCapture = (autoCapture: AutoCaptureConfig | undefined): AutoCap
  * Reports a misconfigured selection, once, when it is set.
  *
  * Deliberately called from `setDesired` rather than from `reconcile`: reconcile only consults the
- * selection when consent is granted, so validating there would say nothing at all for the
+ * selection while tracking is active (granted **or** cookieless), so validating there would say nothing at all for the
  * consent-first flows the README recommends — the integrator would get the diagnosis at
  * `optInTracking()` time, in a user's browser, long after they stopped watching the console — and
  * would then re-warn on every opt-in/opt-out cycle.

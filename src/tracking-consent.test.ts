@@ -38,7 +38,7 @@ describe('createTrackingConsent', () => {
 
   it('honors the default seed from the object form', async () => {
     const createTrackingConsent = await loadFactory()
-    expect(createTrackingConsent('proj', { default: 'denied' }).getConsent()).toBe('denied')
+    expect(createTrackingConsent('proj', { initial: 'denied' }).getConsent()).toBe('denied')
   })
 
   it('honors the default seed from the string shorthand', async () => {
@@ -49,8 +49,8 @@ describe('createTrackingConsent', () => {
   it('fails closed to denied on an out-of-domain default seed and warns', async () => {
     const createTrackingConsent = await loadFactory()
     // The seed is runtime-untrusted despite its type: the CDN one-tag install feeds it from
-    // data-options JSON, e.g. data-options='{"trackingConsent":{"default":"Denied"}}'.
-    const consent = createTrackingConsent('proj', { default: 'Denied' as unknown as 'denied' })
+    // data-options JSON, e.g. data-options='{"trackingConsent":{"initial":"Denied"}}'.
+    const consent = createTrackingConsent('proj', { initial: 'Denied' as unknown as 'denied' })
     expect(consent.getConsent()).toBe('denied')
     expect(consent.isGranted()).toBe(false)
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining("failing closed to 'denied'"))
@@ -90,7 +90,7 @@ describe('createTrackingConsent', () => {
 
   it('set() transitions between all three states and persists when enabled', async () => {
     const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', { default: 'granted', persist: true })
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     consent.set('cookieless')
     expect(consent.getConsent()).toBe('cookieless')
     expect(localStorage.getItem(KEY)).toBe('cookieless')
@@ -103,7 +103,7 @@ describe('createTrackingConsent', () => {
   it('restores a persisted cookieless choice over the default seed', async () => {
     const createTrackingConsent = await loadFactory()
     localStorage.setItem(KEY, 'cookieless')
-    const consent = createTrackingConsent('proj', { default: 'granted', persist: true })
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     expect(consent.getConsent()).toBe('cookieless')
   })
 
@@ -142,7 +142,7 @@ describe('createTrackingConsent', () => {
   it('reports failure when persistence was requested but is unavailable', async () => {
     const createTrackingConsent = await loadFactory()
     vi.mocked(isStorageAvailable).mockReturnValue(false)
-    const consent = createTrackingConsent('proj', { default: 'granted', persist: true })
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     expect(consent.optOut()).toBe(false)
     expect(consent.getConsent()).toBe('denied')
   })
@@ -150,27 +150,27 @@ describe('createTrackingConsent', () => {
   it('reports success when persistence was never requested', async () => {
     const createTrackingConsent = await loadFactory()
     vi.mocked(isStorageAvailable).mockReturnValue(false)
-    const consent = createTrackingConsent('proj', { default: 'granted' })
+    const consent = createTrackingConsent('proj', { initial: 'granted' })
     expect(consent.optOut()).toBe(true)
   })
 
   it('does not touch storage when persist is false', async () => {
     const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', { default: 'granted' })
+    const consent = createTrackingConsent('proj', { initial: 'granted' })
     consent.optOut()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
   it('writes granted to storage on optIn when persist is true', async () => {
     const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', { default: 'denied', persist: true })
+    const consent = createTrackingConsent('proj', { initial: 'denied', persist: true })
     consent.optIn()
     expect(localStorage.getItem(KEY)).toBe('granted')
   })
 
   it('writes denied to storage on optOut when persist is true', async () => {
     const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', { default: 'granted', persist: true })
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     consent.optOut()
     expect(localStorage.getItem(KEY)).toBe('denied')
   })
@@ -178,13 +178,13 @@ describe('createTrackingConsent', () => {
   it('restores a persisted value over the default seed', async () => {
     localStorage.setItem(KEY, 'denied')
     const createTrackingConsent = await loadFactory()
-    expect(createTrackingConsent('proj', { default: 'granted', persist: true }).getConsent()).toBe('denied')
+    expect(createTrackingConsent('proj', { initial: 'granted', persist: true }).getConsent()).toBe('denied')
   })
 
   it('ignores an invalid persisted value and warns', async () => {
     localStorage.setItem(KEY, 'maybe')
     const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', { default: 'granted', persist: true })
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     expect(consent.getConsent()).toBe('granted')
     expect(logSpies.warn).toHaveBeenCalledWith(`Stored tracking consent at "${KEY}" is invalid, ignoring.`)
   })
@@ -192,7 +192,7 @@ describe('createTrackingConsent', () => {
   it('falls back to in-memory and warns when storage is unavailable', async () => {
     vi.mocked(isStorageAvailable).mockReturnValue(false)
     const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', { default: 'denied', persist: true })
+    const consent = createTrackingConsent('proj', { initial: 'denied', persist: true })
     consent.optIn()
     expect(localStorage.getItem(KEY)).toBeNull()
     expect(consent.getConsent()).toBe('granted')
@@ -206,7 +206,7 @@ describe('createTrackingConsent', () => {
       throw new Error('read boom')
     })
     const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', { default: 'denied', persist: true })
+    const consent = createTrackingConsent('proj', { initial: 'denied', persist: true })
     expect(consent.getConsent()).toBe('denied')
     expect(logSpies.warn).toHaveBeenCalledWith(`Failed to read "${KEY}" from localStorage:`, expect.any(Error))
   })
@@ -216,7 +216,7 @@ describe('createTrackingConsent', () => {
       throw new Error('write boom')
     })
     const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', { default: 'granted', persist: true })
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     expect(() => consent.optOut()).not.toThrow()
     expect(consent.getConsent()).toBe('denied')
     expect(logSpies.error).toHaveBeenCalledWith(
@@ -272,7 +272,7 @@ describe('createTrackingConsent with a provided store', () => {
     const createTrackingConsent = await loadFactory()
     const store = createFakeStore()
     store.map.set(KEY, 'denied')
-    const consent = createTrackingConsent('proj', { default: 'granted', persist: true }, store)
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true }, store)
     expect(consent.getConsent()).toBe('denied')
     // Restore re-writes the value so a cookie-backed store refreshes its expiry.
     expect(store.writes).toContain('denied')
@@ -302,7 +302,7 @@ describe('createTrackingConsent with a provided store', () => {
 
   it('warns and stays in-memory when persist is true but the provided store is null', async () => {
     const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', { default: 'denied', persist: true }, null)
+    const consent = createTrackingConsent('proj', { initial: 'denied', persist: true }, null)
     expect(logSpies.warn).toHaveBeenCalledWith(
       'Storage unavailable; tracking consent will not persist across page loads.',
     )
@@ -354,16 +354,54 @@ describe('persist coercion', () => {
 
   it('warns when persist is present but not a boolean', async () => {
     const { createTrackingConsent } = await import('./tracking-consent.js')
-    createTrackingConsent('proj-persist-str', { default: 'denied', persist: 'true' as never })
+    createTrackingConsent('proj-persist-str', { initial: 'denied', persist: 'true' as never })
 
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('persist'))
   })
 
   it('stays silent when persist is a real boolean or absent', async () => {
     const { createTrackingConsent } = await import('./tracking-consent.js')
-    createTrackingConsent('proj-persist-ok', { default: 'denied', persist: false })
-    createTrackingConsent('proj-persist-absent', { default: 'denied' })
+    createTrackingConsent('proj-persist-ok', { initial: 'denied', persist: false })
+    createTrackingConsent('proj-persist-absent', { initial: 'denied' })
 
     expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('persist'))
+  })
+
+  // R2-I7: every other untrusted input here warns and fails closed — a bad shape, a bad `persist`
+  // type, a bad `default` value. An unrecognized *key* alone got nothing: `normalized.default` is
+  // undefined, `seed !== undefined` is false, and `status` keeps its 'granted' initialiser. So a
+  // typo'd privacy config fails OPEN. TypeScript catches this for npm consumers (TS2561), but the
+  // one-tag install feeds this from `data-options` JSON in customer HTML, which no compiler sees —
+  // and autoInitFromScript's own JSDoc promises "a mangled trackingConsent ... must not fall back
+  // to consent granted".
+  it('fails closed on an unrecognized config key instead of seeding granted', async () => {
+    const { createTrackingConsent } = await import('./tracking-consent.js')
+    const controller = createTrackingConsent('proj-typo', { defualt: 'denied', persist: true } as never)
+
+    expect(controller.getConsent()).toBe('denied')
+    expect(controller.isTracking()).toBe(false)
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('defualt'))
+  })
+
+  it('accepts the known keys without warning', async () => {
+    const { createTrackingConsent } = await import('./tracking-consent.js')
+    createTrackingConsent('proj-known', { initial: 'cookieless', persist: true })
+
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('Unknown'))
+  })
+
+  // `default` was renamed to `initial` (reserved word: `const { default } = cfg` is a SyntaxError).
+  // TypeScript catches the rename for npm consumers, but the one-tag install supplies this as
+  // untyped `data-options` JSON in customer HTML — so a deployment carrying the old key must fail
+  // CLOSED and say why, not silently seed 'granted'. This is the safety net that makes the rename
+  // safe rather than a silent privacy regression.
+  it('fails closed on the pre-rename `default` key and names it', async () => {
+    const { createTrackingConsent } = await import('./tracking-consent.js')
+    // Deliberately the OLD key — this is the migration safety net, so it must not be renamed with
+    // the rest of the suite. A stale one-tag deployment still sends `{"default":"denied"}`.
+    const controller = createTrackingConsent('proj-stale', { default: 'denied', persist: true } as never)
+
+    expect(controller.getConsent()).toBe('denied')
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('default'))
   })
 })

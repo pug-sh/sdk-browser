@@ -7,7 +7,7 @@ import {
   markIdentified,
   resolveDistinctId,
 } from './profile.js'
-import { clearSession, configureSession, resolveSessionId } from './session.js'
+import { clearSession, configureSession, onConsentGranted, resetIdentity, resolveSessionId } from './session.js'
 import { makeStorageKey } from './utils.js'
 
 const logSpies = {
@@ -82,11 +82,16 @@ vi.mock('./events/frustration.js', () => ({
   setupDeadClickTracking: trackerSpies.deadClick,
 }))
 
+// onConsentGranted was missing here while pug.ts imports and calls it. Vitest throws on access to an
+// undefined mock export, and that call sits inside a try/catch that only warns — so every
+// optInTracking() in this file threw, warned, and passed anyway. Ten tests were green while the
+// grant-time side effect failed on every run. Same trap CLAUDE.md documents for setDebugLogging.
 vi.mock('./session.js', () => ({
   clearSession: vi.fn(() => true),
   configureSession: vi.fn(),
   destroySession: vi.fn(),
-  resetIdentity: vi.fn(),
+  onConsentGranted: vi.fn(),
+  resetIdentity: vi.fn(() => true),
   resolveSessionId: vi.fn(() => '01234567-0123-7123-8123-012345678901'),
 }))
 
@@ -499,7 +504,7 @@ describe('tracking consent', () => {
 
     expect(getTrackingConsent()).toBeUndefined()
 
-    init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: { default: 'denied', persist: true } })
+    init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: { initial: 'denied', persist: true } })
 
     expect(getTrackingConsent()).toBe('granted')
   })
@@ -644,7 +649,7 @@ describe('tracking consent persistence', () => {
     init('project-id', {
       apiKey: 'api-key',
       autoCapture: false,
-      trackingConsent: { default: 'granted', persist: true },
+      trackingConsent: { initial: 'granted', persist: true },
     })
     optOutTracking()
     expect(localStorage.getItem(CONSENT_KEY)).toBe('denied')
@@ -654,7 +659,7 @@ describe('tracking consent persistence', () => {
     init('project-id', {
       apiKey: 'api-key',
       autoCapture: false,
-      trackingConsent: { default: 'granted', persist: true },
+      trackingConsent: { initial: 'granted', persist: true },
     })
     expect(getTrackingConsent()).toBe('denied')
   })
@@ -665,7 +670,7 @@ describe('tracking consent persistence', () => {
     init('project-id', {
       apiKey: 'api-key',
       autoCapture: false,
-      trackingConsent: { default: 'denied', persist: true },
+      trackingConsent: { initial: 'denied', persist: true },
     })
     optInTracking()
     expect(localStorage.getItem(CONSENT_KEY)).toBe('granted')
@@ -675,7 +680,7 @@ describe('tracking consent persistence', () => {
     init('project-id', {
       apiKey: 'api-key',
       autoCapture: false,
-      trackingConsent: { default: 'denied', persist: true },
+      trackingConsent: { initial: 'denied', persist: true },
     })
     expect(getTrackingConsent()).toBe('granted')
   })
@@ -695,7 +700,7 @@ describe('tracking consent persistence', () => {
     init('project-id', {
       apiKey: 'api-key',
       autoCapture: false,
-      trackingConsent: { default: 'granted', persist: true },
+      trackingConsent: { initial: 'granted', persist: true },
     })
     optOutTracking()
     expect(localStorage.getItem(CONSENT_KEY)).toBe('denied')
@@ -924,5 +929,72 @@ describe('consent teardown contract', () => {
     expect(optOutTracking()).toBe(true)
     expect(optOutTracking()).toBe(true)
     expect(trackerSpies.pageView).not.toHaveBeenCalled()
+  })
+
+  // The grant-time side effect itself, asserted rather than assumed: the mock omission above meant
+  // this call threw into a warn-only catch on every opt-in while ten tests stayed green.
+  it('re-arms the tab registry when consent is granted', async () => {
+    const { init, optInTracking } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    vi.mocked(onConsentGranted).mockClear()
+
+    expect(optInTracking()).toBe(true)
+    expect(onConsentGranted).toHaveBeenCalled()
+  })
+
+  it('does not re-arm the tab registry when entering a non-granted state', async () => {
+    const { init, setTrackingConsent } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+    vi.mocked(onConsentGranted).mockClear()
+
+    setTrackingConsent('cookieless')
+    expect(onConsentGranted).not.toHaveBeenCalled()
+  })
+})
+
+describe('teardown failures surface in the returned boolean', () => {
+  // These booleans exist so a withdrawal that did not fully land is detectable rather than
+  // console-only — but every teardown leg was mocked as vi.fn(() => true), so the failure arm was
+  // unreachable and forcing any of them to always-true left the suite green.
+  it('reports false when the profile could not be cleared', async () => {
+    const { init, optOutTracking } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+    vi.mocked(clearProfile).mockReturnValueOnce(false)
+
+    expect(optOutTracking()).toBe(false)
+  })
+
+  it('reports false when the session could not be cleared', async () => {
+    const { init, optOutTracking } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+    vi.mocked(clearSession).mockReturnValueOnce(false)
+
+    expect(optOutTracking()).toBe(false)
+  })
+
+  it('reports false when the queued events could not be purged', async () => {
+    const { init, optOutTracking } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+    transportSpies.purgeQueue.mockReturnValueOnce(false)
+
+    expect(optOutTracking()).toBe(false)
+  })
+
+  // resetIdentity() logs an error and returns on a failed persist — it never throws — so reset()'s
+  // try/catch could not see it and returned true while the previous user's session and device id
+  // were still on the device. That is verbatim the case README promises the boolean covers.
+  it('reset() reports false when the identity could not be reset', async () => {
+    const { init, reset } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+    vi.mocked(resetIdentity).mockReturnValueOnce(false)
+
+    expect(reset()).toBe(false)
+  })
+
+  it('reset() reports true when every leg succeeds', async () => {
+    const { init, reset } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+
+    expect(reset()).toBe(true)
   })
 })

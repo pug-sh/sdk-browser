@@ -45,7 +45,7 @@ Always call `pug.init()` first in the snippet — the SDK drops calls made befor
   src="https://cdn.pugs.dev/v0.0.4/pug.min.js"
   data-project-id="your-project-id"
   data-api-key="your-api-key"
-  data-options='{"trackingConsent":{"default":"denied","persist":true}}'
+  data-options='{"trackingConsent":{"initial":"denied","persist":true}}'
 ></script>
 ```
 
@@ -129,7 +129,7 @@ import { init, optInTracking, optOutTracking, setAutoCapture } from '@pug-sh/bro
 
 init('your-project-id', {
   apiKey: 'your-api-key',
-  trackingConsent: { default: 'denied', persist: true },
+  trackingConsent: { initial: 'denied', persist: true },
   autoCapture: { pageView: true, click: true },
 })
 
@@ -191,7 +191,7 @@ identity. With `persist: false` (the default) nothing at all is stored.
 // Privacy-first default: start cookieless until the banner answers.
 pug.init('<project-id>', {
   apiKey: '<public-api-key>',
-  trackingConsent: { default: 'cookieless', persist: true },
+  trackingConsent: { initial: 'cookieless', persist: true },
 })
 
 // Banner handlers:
@@ -207,15 +207,18 @@ cross-subdomain cookie). `identify()` is disabled in cookieless mode.
 #### Handling a failed consent change
 
 `setTrackingConsent()`, `optInTracking()` and `optOutTracking()` return a boolean. It is `true`
-when the change fully took effect, and `false` in three cases worth handling in a consent banner:
+when the change fully took effect, and `false` in four cases worth handling in a consent banner:
 
+- **It was called before `init()`.** Nothing is applied — this is the one case where `false` really
+  does mean "ignored", and a banner racing initialization is the likeliest way to hit it. On the
+  script-tag install use `ready()` (below); with `npm`, call it after `init()`.
 - **The state was not recognized.** CMPs speak their own vocabulary (`'reject'`, `'opt-out'`, a
   boolean, or `null` before the user answers). Rather than keep the previous state — which for a
   user clicking *Reject* would silently mean staying fully tracked — consent **fails closed to
   `'denied'`**, matching how `init()` already treats the same untrusted input. Map your CMP's values
   explicitly rather than relying on this.
 - **The choice could not be persisted** (`persist: true` with storage full or cookies blocked). The
-  state applies in memory, but the next page load falls back to the `default` seed — so an opt-out
+  state applies in memory, but the next page load falls back to the `initial` seed — so an opt-out
   can quietly become a re-consent.
 - **A stored identifier could not be removed.** With `crossSubdomainTracking` this means the identity
   cookie survived on the registrable domain and will resurface. This also covers the persisted event
@@ -243,7 +246,9 @@ if (!setTrackingConsent(choice)) {
 }
 ```
 
-The state is always applied in memory when valid, so `false` never means "nothing happened".
+Once `init()` has run, a valid state is always applied in memory — so `false` then means "applied,
+but not fully durable", not "ignored". Before `init()` it does mean ignored, which is why the
+script-tag form above wraps the call in `ready()`.
 
 ### Privacy controls
 
@@ -393,5 +398,7 @@ These are all **compile-time** breaks for TypeScript consumers. Runtime behavior
 | `autoCapture` values are `true`, not `boolean` | `{ scroll: false }` and any `boolean`-typed value | List only what you want enabled; for a runtime value write `scroll: flag \|\| undefined` |
 | `track()` is one signature, not two overloads | A wrong type on a well-known field now errors instead of silently compiling | Correct the property type — the error names it |
 | `getTrackingConsent()` returns `TrackingConsent \| undefined` | Code assuming a non-optional return under `strictNullChecks` | Handle `undefined`, which means "called before `init()`" |
+| `TrackingConsent` has a third member, `'cookieless'` | Exhaustive `switch`es and `Record<TrackingConsent, …>` maps stop compiling | Handle `'cookieless'` — events flow without identity |
+| `TrackingConsentConfig.default` renamed to `initial` | `init(p, { trackingConsent: { default: … } })` | Rename the key. `default` is a reserved word, so `const { default } = cfg` was a SyntaxError; `initial` destructures normally. A stale key now warns and **fails closed to `'denied'`** rather than silently seeding `'granted'` — including in `data-options` JSON, which no compiler checks |
 
 The `track()` change also surfaced an int64 issue that the old permissive overload had been hiding: `sizeBytes` on the file, export and chat-attachment events is a `bigint`, so pass `1024n` rather than `1024`. It never encoded correctly as a plain number — the overload just made it compile.
