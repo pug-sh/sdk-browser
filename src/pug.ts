@@ -40,6 +40,7 @@ import {
 } from './track.js'
 import {
   createTrackingConsent,
+  type RejectConsent,
   type TrackingConsent,
   type TrackingConsentConfig,
   type TrackingConsentController,
@@ -91,6 +92,7 @@ export interface InitOptions {
    *   an explicit `{ domain }` in that topology.
    * - `{ domain }` — pin an explicit cookie domain (falls back to a host-only cookie with a warning
    *   when the browser rejects it or it does not cover the current host).
+   * - `{ maxAgeDays }` — cookie lifetime in days, default 365. Omit `domain` to keep auto-discovery.
    *
    * With cross-subdomain sessions, the "rotate when all tabs closed" heuristic is disabled — sessions
    * end by idle/max timeout only, since tab liveness is unknowable across subdomains.
@@ -107,7 +109,14 @@ export interface InitOptions {
   readonly sanitizeUrl?: (url: string) => string
 }
 
-export type { AutoCaptureConfig, AutoCaptureSelection, CrossSubdomainConfig, TrackingConsent, TrackingConsentConfig }
+export type {
+  AutoCaptureConfig,
+  AutoCaptureSelection,
+  CrossSubdomainConfig,
+  RejectConsent,
+  TrackingConsent,
+  TrackingConsentConfig,
+}
 
 interface PugState {
   readonly config: PugConfig
@@ -381,12 +390,28 @@ export const setTrackingConsent = (consent: TrackingConsent): boolean => {
   return ok
 }
 
-export const optInTracking = (): boolean => setTrackingConsent('granted')
+export const optInTracking = (): boolean => {
+  if (!state) {
+    // Guarded so the warning names this function rather than setTrackingConsent, matching optOut.
+    log.warn('optInTracking() called before init().')
+    return false
+  }
+  return setTrackingConsent('granted')
+}
 
-// Opting out is a privacy action; setTrackingConsent('denied') tears down persisted
-// identity (see its JSDoc). Consent itself stays persisted (device-level) so the
-// opt-out survives reloads; a later optInTracking() starts a fresh identity.
-export const optOutTracking = (): boolean => setTrackingConsent('denied')
+/**
+ * Applies the rejection state: `'denied'`, or `trackingConsent.onReject` when configured — pass
+ * `onReject: 'cookieless'` and the banner's reject branch keeps identity-free traffic counts without
+ * naming the state itself. Either way persisted identity is torn down (see setTrackingConsent);
+ * consent stays persisted so the rejection survives reloads.
+ */
+export const optOutTracking = (): boolean => {
+  if (!state) {
+    log.warn('optOutTracking() called before init().')
+    return false
+  }
+  return setTrackingConsent(state.trackingConsent.getRejectState())
+}
 
 /**
  * Whether events are being tracked right now. Reflects tracking consent only — independent of
@@ -423,6 +448,23 @@ export const getTrackingConsent = (): TrackingConsent | undefined => {
     return undefined
   }
   return state.trackingConsent.getConsent()
+}
+
+/**
+ * Whether the user has yet to make a choice — the banner gate.
+ *
+ * `getTrackingConsent()` reports the state the SDK is *acting on*, which before any answer is the
+ * `trackingConsent.initial` seed, so a seeded `'granted'` and a chosen `'granted'` read identically
+ * and a banner keyed on it re-prompts users who already opted in.
+ *
+ * `true` before `init()`: nothing has been read from storage yet, so no choice is known.
+ */
+export const isConsentPending = (): boolean => {
+  if (!state) {
+    log.warn('isConsentPending() called before init(); returning true — a persisted choice is only read during init().')
+    return true
+  }
+  return state.trackingConsent.isPending()
 }
 
 export const destroy = () => {

@@ -53,7 +53,7 @@
         var q = [];
         var pug = (w.pug = { _q: q, _v: 1 });
         var methods = ('init track identify reset destroy setAutoCapture setTrackingConsent optInTracking ' +
-          'optOutTracking isTrackingEnabled getTrackingConsent rotate ready').split(' ');
+          'optOutTracking isTrackingEnabled getTrackingConsent isConsentPending rotate ready').split(' ');
         methods.forEach(function (m) {
           pug[m] = function () { if (q.length < 1000) q.push([m, [].slice.call(arguments)]); };
         });

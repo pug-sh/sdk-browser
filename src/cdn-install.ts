@@ -18,6 +18,7 @@ export const STUB_METHODS = [
   'optOutTracking',
   'isTrackingEnabled',
   'getTrackingConsent',
+  'isConsentPending',
   'rotate',
   'ready',
 ] as const

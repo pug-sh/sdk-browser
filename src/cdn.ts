@@ -9,6 +9,7 @@ import {
   getTrackingConsent,
   identify,
   init,
+  isConsentPending,
   isTrackingEnabled,
   optInTracking,
   optOutTracking,
@@ -36,6 +37,7 @@ const api = {
   optOutTracking,
   isTrackingEnabled,
   getTrackingConsent,
+  isConsentPending,
   rotate,
   /**
    * CDN-only helper: runs `cb` once the SDK is loaded — queued before load it fires during queue

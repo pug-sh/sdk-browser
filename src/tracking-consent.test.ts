@@ -225,6 +225,210 @@ describe('createTrackingConsent', () => {
   })
 })
 
+describe('pending vs decided', () => {
+  it('is pending until the user answers, whatever the seed says', async () => {
+    const createTrackingConsent = await loadFactory()
+    // The hole this closes: a seeded 'granted' and a chosen 'granted' are the same value, so a
+    // banner keyed on getConsent() re-prompts users who already opted in.
+    expect(createTrackingConsent('proj', { initial: 'granted' }).isPending()).toBe(true)
+    expect(createTrackingConsent('proj', { initial: 'cookieless' }).isPending()).toBe(true)
+    expect(createTrackingConsent('proj').isPending()).toBe(true)
+  })
+
+  it('is decided after an explicit set(), including the fail-closed path', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj')
+    consent.set('cookieless')
+    expect(consent.isPending()).toBe(false)
+
+    const failed = createTrackingConsent('proj')
+    expect(failed.set('reject' as never)).toBe(false)
+    expect(failed.getConsent()).toBe('denied')
+    expect(failed.isPending()).toBe(false)
+  })
+
+  it('is decided when a choice is restored from storage', async () => {
+    localStorage.setItem(KEY, 'cookieless')
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
+    expect(consent.getConsent()).toBe('cookieless')
+    expect(consent.isPending()).toBe(false)
+  })
+
+  it('stays pending when persist is on but nothing was ever stored', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'denied', persist: true })
+    expect(consent.isPending()).toBe(true)
+    expect(consent.isAuthoritative()).toBe(false)
+  })
+})
+
+describe('respectGpc', () => {
+  const withGpc = (value: unknown): void => {
+    Object.defineProperty(navigator, 'globalPrivacyControl', { value, configurable: true })
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'globalPrivacyControl')
+  })
+
+  it('is ignored unless opted into', async () => {
+    withGpc(true)
+    const createTrackingConsent = await loadFactory()
+    expect(createTrackingConsent('proj').getConsent()).toBe('granted')
+  })
+
+  it('resolves to the reject state when the signal is set', async () => {
+    withGpc(true)
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { respectGpc: true })
+    expect(consent.getConsent()).toBe('denied')
+    expect(consent.isTracking()).toBe(false)
+  })
+
+  it('follows onReject, so a cookieless site keeps identity-free counts', async () => {
+    withGpc(true)
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { respectGpc: true, onReject: 'cookieless' })
+    expect(consent.getConsent()).toBe('cookieless')
+    expect(consent.isTracking()).toBe(true)
+    expect(consent.isGranted()).toBe(false)
+  })
+
+  it('leaves the seed alone when the signal is absent or false', async () => {
+    const createTrackingConsent = await loadFactory()
+    expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('granted')
+    withGpc(false)
+    expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('granted')
+  })
+
+  it('counts as decided, so no banner re-prompts a user who already opted out globally', async () => {
+    withGpc(true)
+    const createTrackingConsent = await loadFactory()
+    expect(createTrackingConsent('proj', { respectGpc: true }).isPending()).toBe(false)
+  })
+
+  // Gates init()'s identity purge: a GPC user's identity from an earlier consented visit must go.
+  it('is authoritative, unlike a config seed', async () => {
+    withGpc(true)
+    const createTrackingConsent = await loadFactory()
+    expect(createTrackingConsent('proj', { respectGpc: true }).isAuthoritative()).toBe(true)
+    expect(createTrackingConsent('proj', { initial: 'denied' }).isAuthoritative()).toBe(false)
+  })
+
+  it('yields to a choice the user made on this site', async () => {
+    withGpc(true)
+    localStorage.setItem(KEY, 'granted')
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { respectGpc: true, persist: true })
+    expect(consent.getConsent()).toBe('granted')
+  })
+
+  it('yields to an explicit opt-in at runtime', async () => {
+    withGpc(true)
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { respectGpc: true })
+    expect(consent.optIn()).toBe(true)
+    expect(consent.getConsent()).toBe('granted')
+  })
+
+  // Without persistence that opt-in dies with the page and GPC re-resolves on the next load, so the
+  // banner never shows and the user has no way to accept durably.
+  it('warns when it resolves consent with no way to record a later opt-in', async () => {
+    withGpc(true)
+    const createTrackingConsent = await loadFactory()
+    createTrackingConsent('proj', { respectGpc: true })
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('persist'))
+  })
+
+  it('does not warn when the choice can be persisted', async () => {
+    withGpc(true)
+    const createTrackingConsent = await loadFactory()
+    createTrackingConsent('proj', { respectGpc: true, persist: true })
+    expect(logSpies.warn).not.toHaveBeenCalled()
+  })
+
+  it('does not warn when the signal is absent', async () => {
+    const createTrackingConsent = await loadFactory()
+    createTrackingConsent('proj', { respectGpc: true })
+    expect(logSpies.warn).not.toHaveBeenCalled()
+  })
+
+  it('accepts the header spellings a polyfill might use', async () => {
+    const createTrackingConsent = await loadFactory()
+    for (const value of [1, '1']) {
+      withGpc(value)
+      expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('denied')
+    }
+  })
+
+  it('ignores a truthy non-signal value', async () => {
+    withGpc('yes')
+    const createTrackingConsent = await loadFactory()
+    expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('granted')
+  })
+
+  it('warns and ignores a non-boolean respectGpc from data-options JSON', async () => {
+    withGpc(true)
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { respectGpc: 'true' as unknown as boolean })
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('respectGpc'))
+    expect(consent.getConsent()).toBe('granted')
+  })
+})
+
+describe('onReject', () => {
+  it('defaults to denied', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj')
+    expect(consent.getRejectState()).toBe('denied')
+    consent.optOut()
+    expect(consent.getConsent()).toBe('denied')
+  })
+
+  it('routes optOut to cookieless when configured', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'cookieless', onReject: 'cookieless' })
+    expect(consent.getRejectState()).toBe('cookieless')
+    consent.optOut()
+    expect(consent.getConsent()).toBe('cookieless')
+    expect(consent.isTracking()).toBe(true)
+    expect(consent.isGranted()).toBe(false)
+    expect(consent.isPending()).toBe(false)
+  })
+
+  it('leaves set(denied) meaning literally denied', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { onReject: 'cookieless' })
+    consent.set('denied')
+    expect(consent.getConsent()).toBe('denied')
+  })
+
+  it('refuses granted with an error and falls back to denied', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { onReject: 'granted' as never })
+    expect(consent.getRejectState()).toBe('denied')
+    expect(logSpies.error).toHaveBeenCalledWith(
+      "trackingConsent.onReject cannot be 'granted' — a rejection may not grant consent. Using 'denied'.",
+    )
+  })
+
+  it('warns and falls back to denied on an out-of-domain value', async () => {
+    const createTrackingConsent = await loadFactory()
+    expect(createTrackingConsent('proj', { onReject: 'nope' as never }).getRejectState()).toBe('denied')
+    expect(logSpies.warn).toHaveBeenCalledWith(
+      `Invalid trackingConsent.onReject "nope"; expected 'denied' or 'cookieless'. Using 'denied'.`,
+    )
+  })
+
+  it('is a recognized key rather than an unknown one that fails closed', async () => {
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'granted', onReject: 'cookieless' })
+    expect(consent.getConsent()).toBe('granted')
+    expect(logSpies.warn).not.toHaveBeenCalled()
+  })
+})
+
 describe('createTrackingConsent with a provided store', () => {
   const createFakeStore = () => {
     const map = new Map<string, string>()

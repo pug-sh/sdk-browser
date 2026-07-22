@@ -509,6 +509,78 @@ describe('tracking consent', () => {
     expect(getTrackingConsent()).toBe('granted')
   })
 
+  it('reports consent pending until the user answers, and not after', async () => {
+    const { init, isConsentPending, getTrackingConsent, optInTracking } = await importPug()
+
+    // Before init: true, because a persisted choice has not been read yet.
+    expect(isConsentPending()).toBe(true)
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('isConsentPending() called before init()'))
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false })
+    // Seeded 'granted' — the SDK is tracking, but the user has not chosen it.
+    expect(getTrackingConsent()).toBe('granted')
+    expect(isConsentPending()).toBe(true)
+
+    optInTracking()
+    expect(isConsentPending()).toBe(false)
+  })
+
+  it('reports consent decided when a persisted choice is restored', async () => {
+    localStorage.setItem(makeStorageKey('project-id', 'consent'), 'cookieless')
+    const { init, isConsentPending } = await importPug()
+
+    init('project-id', {
+      apiKey: 'api-key',
+      autoCapture: false,
+      trackingConsent: { initial: 'granted', persist: true },
+    })
+
+    expect(isConsentPending()).toBe(false)
+  })
+
+  it('optOutTracking applies onReject: cookieless instead of denied', async () => {
+    const { init, isTrackingEnabled, getTrackingConsent, optOutTracking } = await importPug()
+
+    init('project-id', {
+      apiKey: 'api-key',
+      autoCapture: false,
+      trackingConsent: { initial: 'cookieless', onReject: 'cookieless' },
+    })
+
+    expect(optOutTracking()).toBe(true)
+    expect(getTrackingConsent()).toBe('cookieless')
+    // The point of the mode: rejecting keeps identity-free traffic counts flowing.
+    expect(isTrackingEnabled()).toBe(true)
+    // And still tears identity down, exactly as a denied rejection would.
+    expect(clearProfile).toHaveBeenCalled()
+    expect(clearSession).toHaveBeenCalled()
+  })
+
+  it('optOutTracking still denies by default', async () => {
+    const { init, isTrackingEnabled, getTrackingConsent, optOutTracking } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false })
+    optOutTracking()
+
+    expect(getTrackingConsent()).toBe('denied')
+    expect(isTrackingEnabled()).toBe(false)
+  })
+
+  it('warns and reports failure when optOutTracking runs before init', async () => {
+    const { optOutTracking } = await importPug()
+
+    expect(optOutTracking()).toBe(false)
+    expect(logSpies.warn).toHaveBeenCalledWith('optOutTracking() called before init().')
+  })
+
+  // The accept half of the same banner: it delegated, so the warning named setTrackingConsent.
+  it('warns and reports failure when optInTracking runs before init', async () => {
+    const { optInTracking } = await importPug()
+
+    expect(optInTracking()).toBe(false)
+    expect(logSpies.warn).toHaveBeenCalledWith('optInTracking() called before init().')
+  })
+
   it('reports granted consent after opt in', async () => {
     const { getTrackingConsent, init, isTrackingEnabled, optInTracking } = await importPug()
 
@@ -878,6 +950,63 @@ describe('cookieless mode', () => {
     expect(trackerSpies.pageView).not.toHaveBeenCalled()
     setTrackingConsent('cookieless')
     expect(trackerSpies.pageView).toHaveBeenCalled()
+  })
+})
+
+describe('respectGpc wiring', () => {
+  const withGpc = (value: unknown): void => {
+    Object.defineProperty(navigator, 'globalPrivacyControl', { value, configurable: true })
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'globalPrivacyControl')
+  })
+
+  it('starts denied with no listeners attached and drops track()', async () => {
+    withGpc(true)
+    const { init, track, getTrackingConsent, isTrackingEnabled } = await importPug()
+
+    init('proj', { apiKey: 'k', autoCapture: true, trackingConsent: { respectGpc: true } })
+
+    expect(getTrackingConsent()).toBe('denied')
+    expect(isTrackingEnabled()).toBe(false)
+    expect(trackerSpies.pageView).not.toHaveBeenCalled()
+    track('click')
+    expect(transportSpies.send).not.toHaveBeenCalled()
+  })
+
+  // isAuthoritative() is what gates this, so a GPC user does not keep a prior consented visit's ids.
+  it('purges identity left over from an earlier consented visit', async () => {
+    withGpc(true)
+    const { init } = await importPug()
+
+    init('proj', { apiKey: 'k', autoCapture: false, trackingConsent: { respectGpc: true } })
+
+    expect(clearProfile).toHaveBeenCalled()
+    expect(clearSession).toHaveBeenCalled()
+    expect(transportSpies.purgeQueue).toHaveBeenCalled()
+  })
+
+  it('keeps events flowing identity-free when onReject is cookieless', async () => {
+    withGpc(true)
+    const { init, track, getTrackingConsent } = await importPug()
+
+    init('proj', { apiKey: 'k', autoCapture: false, trackingConsent: { respectGpc: true, onReject: 'cookieless' } })
+
+    expect(getTrackingConsent()).toBe('cookieless')
+    track('click')
+    expect(transportSpies.send).toHaveBeenCalled()
+    expect(resolveSessionId).not.toHaveBeenCalled()
+  })
+
+  it('does not override a stored opt-in from this site', async () => {
+    withGpc(true)
+    localStorage.setItem(makeStorageKey('proj', 'consent'), 'granted')
+    const { init, getTrackingConsent } = await importPug()
+
+    init('proj', { apiKey: 'k', autoCapture: false, trackingConsent: { respectGpc: true, persist: true } })
+
+    expect(getTrackingConsent()).toBe('granted')
   })
 })
 
