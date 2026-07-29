@@ -1,5 +1,6 @@
 import { CookieJar, JSDOM } from 'jsdom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { persisted, storedValue } from './storage-envelope.test-utils.js'
 import { makeStorageKey } from './utils.js'
 
 const logSpies = { warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
@@ -26,6 +27,8 @@ const pageLoad = async (url: string, jar: CookieJar) => {
   profile.configureProfile(PROJECT_ID, store)
   return { profile, store }
 }
+
+// Persisted values carry an absolute expiry: `<epoch ms>|<value>`.
 
 // Real origins have separate localStorage; jsdom gives us one. Snapshot/restore lets a test model
 // per-origin localStorage explicitly (what `app` holds vs. what `www` holds).
@@ -54,14 +57,14 @@ describe('cross-subdomain identity', () => {
     const first = await pageLoad('https://app.example.com/', jar)
     const anonId = first.profile.getAnonymousId()
     expect(anonId.startsWith('anon-')).toBe(true)
-    expect(localStorage.getItem(PROFILE_KEY)).toBe(anonId)
+    expect(storedValue(localStorage.getItem(PROFILE_KEY))).toBe(anonId)
 
     // New origin: empty localStorage, but the shared cookie survives.
     localStorage.clear()
     const second = await pageLoad('https://www.example.com/', jar)
     expect(second.profile.getAnonymousId()).toBe(anonId)
     // Restore also backfills the new origin's localStorage (and refreshes the cookie's expiry).
-    expect(localStorage.getItem(PROFILE_KEY)).toBe(anonId)
+    expect(storedValue(localStorage.getItem(PROFILE_KEY))).toBe(anonId)
   })
 
   it('keeps the identified external ID when the user moves to a sibling subdomain', async () => {
@@ -74,7 +77,7 @@ describe('cross-subdomain identity', () => {
     const second = await pageLoad('https://www.example.com/', jar)
     expect(second.profile.isIdentified()).toBe(true)
     expect(second.profile.resolveDistinctId()).toBe('user-42')
-    expect(localStorage.getItem(EXTERNAL_ID_KEY)).toBe('user-42')
+    expect(storedValue(localStorage.getItem(EXTERNAL_ID_KEY))).toBe('user-42')
   })
 
   it('prefers the shared cookie over a conflicting localStorage value', async () => {
@@ -221,7 +224,7 @@ describe('cross-subdomain identity', () => {
     const www1 = await pageLoad('https://www.example.com/', jar)
     expect(www1.profile.resolveDistinctId()).toBe('user-42')
     const wwwLocal = snapshotLocal()
-    expect(wwwLocal[EXTERNAL_ID_KEY]).toBe('user-42')
+    expect(storedValue(wwwLocal[EXTERNAL_ID_KEY])).toBe('user-42')
 
     // 3. Back on app, the user logs out — reset() clears the shared cookie and app's localStorage.
     restoreLocal(appLocal)
@@ -275,7 +278,7 @@ describe('poisoned externalId restore', () => {
   })
 
   it('discards a restored externalId carrying the reserved cookieless- prefix', async () => {
-    localStorage.setItem(EXTERNAL_ID_KEY, 'cookieless-20260721-abc')
+    localStorage.setItem(EXTERNAL_ID_KEY, persisted('cookieless-20260721-abc'))
     vi.resetModules()
     const profile = await import('./profile.js')
     profile.configureProfile(PROJECT_ID)
@@ -289,7 +292,7 @@ describe('poisoned externalId restore', () => {
   })
 
   it('still restores a legitimate externalId', async () => {
-    localStorage.setItem(EXTERNAL_ID_KEY, 'user@example.com')
+    localStorage.setItem(EXTERNAL_ID_KEY, persisted('user@example.com'))
     vi.resetModules()
     const profile = await import('./profile.js')
     profile.configureProfile(PROJECT_ID)

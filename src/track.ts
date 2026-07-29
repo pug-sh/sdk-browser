@@ -5,6 +5,7 @@ import { type PropertyValue, PropertyValueSchema } from './gen/common/v1/propert
 import { type Event, EventSchema } from './gen/sdk/events/v1/events_pb.js'
 import { log } from './logger.js'
 import { parseUserAgentData, parseUtmParams } from './parsers.js'
+import { scrubUrl } from './utils.js'
 import { SDK_VERSION } from './version.js'
 import type { PropValue, TrackOptions, WellKnownEventName } from './well-known-events.js'
 
@@ -116,10 +117,8 @@ const applyBeforeSend = (
   return { autoProperties: finalAuto, customProperties: shaped.customProperties }
 }
 
-// Truncate by UTF-8 byte length to stay under the proto's `string.max_len = 1024`, which
-// the server enforces as a code-point count, so byte truncation is strictly more
-// conservative — a string ≤ 1024 bytes is always ≤ 1024 codepoints (one codepoint is
-// 1–4 UTF-8 bytes).
+// The proto's `string.max_len = 1024` is enforced server-side as a *code-point* count, so
+// truncating by UTF-8 bytes is strictly more conservative.
 const MAX_STRING_BYTES = 1024
 
 const utf8ByteLength = (s: string): number => new TextEncoder().encode(s).byteLength
@@ -139,9 +138,7 @@ const truncateToBytes = (s: string, max: number): string => {
 
 const makeStringValue = (raw: string): PropertyValue => {
   let value = raw
-  // Each UTF-16 code unit is at most 3 UTF-8 bytes (BMP) or shares a 4-byte sequence
-  // with another unit (supplementary). length * 3 is therefore a strict upper bound,
-  // letting most strings skip the TextEncoder allocation.
+  // length * 3 is a strict upper bound on UTF-8 bytes, so most strings skip the TextEncoder.
   if (raw.length * 3 > MAX_STRING_BYTES && utf8ByteLength(raw) > MAX_STRING_BYTES) {
     log.warn(`Property string exceeds ${MAX_STRING_BYTES} bytes, truncating`)
     value = truncateToBytes(raw, MAX_STRING_BYTES)
@@ -150,12 +147,9 @@ const makeStringValue = (raw: string): PropertyValue => {
 }
 
 /**
- * Maps an untyped JS value to a PropertyValue oneof. Every property on every event —
- * well-known or custom — flows through here; there is no runtime schema, so well-known
- * names carry no special serialization (the well-known typing is compile-time only).
- *
- * Returns null when the value cannot be represented; the caller is responsible for
- * omitting the property from the map.
+ * Maps an untyped JS value to a PropertyValue oneof. Every property on every event flows through
+ * here — there is no runtime schema, so well-known names get no special serialization. Returns null
+ * when the value cannot be represented; the caller omits the property.
  *
  * Mapping:
  *   - string         → stringValue (truncated to 1024 UTF-8 bytes if needed)
@@ -232,17 +226,13 @@ const mapPropsViaHeuristic = (
 export const eventPageView = 'page_view' satisfies WellKnownEventName
 
 /**
- * Event identity is a closed choice: either the server derives it (cookieless
- * mode — the event carries the flag and NO ids, which the backend requires:
- * a cookieless event that sends identity is rejected at validation), or the
- * caller supplies both ids. The union makes "cookieless with ids" and
- * "consented without ids" unrepresentable at compile time.
+ * A closed choice: either the server derives identity (cookieless — the flag and NO ids, which the
+ * backend enforces at validation) or the caller supplies both ids.
  *
- * The `?: never` members are what actually close it. Without them the two arms share no property,
- * so TypeScript has no discriminant to narrow on, and excess-property checking against a union
- * treats a property as known if it exists in *any* constituent — every spelling of a cookieless
- * event carrying identity compiled, including the spread and variable forms that an explicit
- * literal tag (`{ kind: 'cookieless' } | …`) would still admit. Pinned by event-identity.test-d.ts.
+ * The `?: never` members are what close it. Without them the arms share no property, so there is no
+ * discriminant, and excess-property checking against a union accepts anything present in *any*
+ * constituent — so every spelling of "cookieless with ids" compiled, including the spread and
+ * variable forms an explicit literal tag would still admit. Pinned by event-identity.test-d.ts.
  */
 export type EventIdentity =
   | { readonly cookieless: true; readonly sessionId?: never; readonly distinctId?: never }
@@ -261,8 +251,10 @@ export const toEvent = (
     // Not derivable server-side from the UA header (unlike $browser/$os/$device), so every SDK
     // sends it. Value set is web | ios | android, matching devices.proto's `platform` constraint.
     $platform: 'web',
-    $url: window.location.href,
-    $referrer: document.referrer,
+    // Scrubbed before beforeSend sees them, so the hook adds masking rather than being the only
+    // thing standing between a reset token in the URL and the backend.
+    $url: scrubUrl(window.location.href),
+    $referrer: scrubUrl(document.referrer),
     $locale: navigator.language,
     $screenWidth: String(window.screen.width),
     $screenHeight: String(window.screen.height),

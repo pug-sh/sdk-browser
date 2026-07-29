@@ -33,7 +33,7 @@ describe('setupFormTracking', () => {
     expect(track).toHaveBeenCalledWith('form_start', { formId: 'signup', formName: 'signup-form' })
   })
 
-  it("sends the form action as-is (redaction is beforeSend's job)", () => {
+  it('sends an action with nothing to redact unchanged', () => {
     const track = vi.fn()
     cleanup = setupFormTracking(track)
     const { form } = buildForm()
@@ -45,5 +45,21 @@ describe('setupFormTracking', () => {
       'form_submit',
       expect.objectContaining({ action: expect.stringContaining('/plain/path'), formId: 'signup' }),
     )
+  })
+
+  it('redacts sensitive params out of the action', () => {
+    // A GET password-reset or login form puts them straight in the action URL, and this is the only
+    // pass that sees it before beforeSend — which a one-tag install cannot supply at all.
+    const track = vi.fn()
+    cleanup = setupFormTracking(track)
+    const { form } = buildForm()
+    form.setAttribute('action', '/reset?token=s3cr3t&plan=pro')
+
+    form.dispatchEvent(new Event('submit', { bubbles: true }))
+
+    const action = track.mock.calls[0]?.[1]?.action as string
+    expect(action).toContain('token=redacted')
+    expect(action).toContain('plan=pro')
+    expect(action).not.toContain('s3cr3t')
   })
 })

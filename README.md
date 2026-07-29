@@ -45,9 +45,13 @@ Always call `pug.init()` first in the snippet — the SDK drops calls made befor
   src="https://cdn.pugs.dev/v0.0.4/pug.min.js"
   data-project-id="your-project-id"
   data-api-key="your-api-key"
-  data-options='{"trackingConsent":{"initial":"denied","persist":true}}'
+  data-options='{"trackingConsent":{"initial":"cookieless","persist":true},"maxAgeDays":390}'
 ></script>
 ```
+
+`data-options` is JSON, so it carries any init option that is JSON-expressible — including the privacy ones: `trackingConsent`, `maxAgeDays`, `redactUrlParams`, `autoCapture`, `session`, `batch`, `debug`. That matters here more than elsewhere, because `beforeSend` is a function and therefore **not** available on this install: [`redactUrlParams`](#sensitive-url-params-are-redacted) is the only URL masking a one-tag page gets, and it is on by default. If you need to mask paths or whole URLs, use the [loader snippet](#script-tag-cdn) with a queued `init` call, or the npm package.
+
+The whole object is untrusted input that no compiler ever checks, so every field is validated at runtime and **fails closed**: an unknown `trackingConsent` key, an unparseable `data-options`, or a missing `data-project-id`/`data-api-key` aborts the auto-init or falls back to the most restrictive setting rather than the most permissive one.
 
 #### `ready(cb)` — read state after the bundle loads
 
@@ -120,7 +124,7 @@ autoCapture: { pageView: true, scroll: enableScroll || undefined }
 
 Plain JS and the one-tag install aren't type-checked, so the SDK also warns at runtime whenever a selection ends up enabling nothing — whether from an explicit `false`, a non-`true` value like `"true"` or `1` from a template or config store, or a misspelled key — and names what it actually enabled.
 
-For consent-first flows, start with tracking consent `'denied'` (nothing is captured or sent) or `'cookieless'` (events flow with no identity — see [Cookieless mode](#cookieless-mode)). While denied, automatic listeners are not attached, and manual `track()` and `identify()` are dropped (events are not queued for later replay). Set `persist: true` to remember the user's choice across reloads — it is persisted like identity (through the cross-subdomain cookie when active, so an opt-out on one subdomain applies on siblings, plus `localStorage`); otherwise consent is in-memory and you pass the initial value yourself on each `init()`.
+Tracking consent starts at `'cookieless'` by default: events flow, but the SDK writes **nothing** to the device until the user actually chooses — so an install that never mentions consent still does not store an identifier before it has a basis to (see [Cookieless mode](#cookieless-mode)). Pass `'granted'` to opt into full identity from the first event, or `'denied'` to capture nothing at all. While denied, automatic listeners are not attached, and manual `track()` and `identify()` are dropped (events are not queued for later replay). Set `persist: true` to remember the user's choice across reloads — it is persisted like identity (through the cross-subdomain cookie when active, so an opt-out on one subdomain applies on siblings, plus `localStorage`); otherwise consent is in-memory and you pass the initial value yourself on each `init()`.
 
 `persist: true` is recommended for consent-first flows. Once a visitor has actually made a choice, that recorded choice is what `init()` resolves — so if it is no longer `'granted'`, `init()` clears identity left over from an earlier consented visit. It clears nothing when the state came from your `initial` seed rather than from a stored choice, in either direction: adding a `'denied'` default to an existing site does not delete your existing visitors' identities, and a placeholder `'denied'` corrected by a later `optInTracking()` does not mint a new identity on every page load.
 
@@ -129,7 +133,7 @@ import { init, optInTracking, optOutTracking, setAutoCapture } from '@pug-sh/bro
 
 init('your-project-id', {
   apiKey: 'your-api-key',
-  trackingConsent: { initial: 'denied', persist: true },
+  trackingConsent: { initial: 'cookieless', persist: true },
   autoCapture: { pageView: true, click: true },
 })
 
@@ -153,32 +157,44 @@ optOutTracking()
 | `debug` | `boolean` | `false` | Logs internal activity (each event tracked, plus the consent-denied and `dryRun` drops) to `console.debug`. Turn it on when events aren't arriving. Warnings and errors are always logged regardless, so this can only widen what you see. See [Debugging](#debugging). |
 | `dryRun` | `boolean` | `false` | Builds events as normal but never sends them. Does not change consent, or what `isTrackingEnabled()` reports. |
 | `autoCapture` | `boolean \| AutoCaptureSelection` | `true` | Controls SDK-owned automatic listeners. `false` disables all automatic capture; an object is an **allowlist** enabling only the keys set to `true`, with every omitted key off. |
-| `trackingConsent` | `'granted' \| 'cookieless' \| 'denied' \| TrackingConsentConfig` | `'granted'` | Initial consent. While denied, automatic listeners stay off and `track()` / `identify()` are ignored; `'cookieless'` keeps events flowing without identity. Object form: `initial` seeds the state used until the user answers, `onReject` sets what `optOutTracking()` applies (`'denied'` by default, or `'cookieless'`), `persist: true` remembers the choice across reloads, `respectGpc: true` honors the browser's [Global Privacy Control](#global-privacy-control) signal. |
-| `crossSubdomainTracking` | `boolean \| { domain?: string, maxAgeDays?: number }` | `false` | **Off by default** — sharing identity across subdomains weakens browser isolation from same-origin to same-site, so it is an explicit opt-in. `false` keeps persistence origin-scoped in `localStorage`; `true` shares identity (anonymous ID, external ID, session, consent) across subdomains via a first-party cookie on the auto-discovered registrable domain, `{ domain }` pins that cookie domain explicitly, and `{ maxAgeDays }` sets the cookie lifetime (default 365). See [Cross-subdomain tracking](#cross-subdomain-tracking) for fallback behavior and the multi-tenant caveat. |
+| `trackingConsent` | `'granted' \| 'cookieless' \| 'denied' \| TrackingConsentConfig` | `'cookieless'` | Initial consent. **Defaults to `'cookieless'`** — events flow, no identifier is written to the device — so the out-of-the-box install stores nothing before the user answers. While denied, automatic listeners stay off and `track()` / `identify()` are ignored; `'cookieless'` keeps events flowing without identity. Object form: `initial` seeds the state used until the user answers, `onReject` sets what `optOutTracking()` applies (`'denied'` by default, or `'cookieless'`), `persist: true` remembers the choice across reloads, `respectGpc: true` honors the browser's [Global Privacy Control](#global-privacy-control) signal. |
+| `crossSubdomainTracking` | `boolean \| { domain: string }` | `false` | **Off by default** — sharing identity across subdomains weakens browser isolation from same-origin to same-site, so it is an explicit opt-in. `false` keeps persistence origin-scoped in `localStorage`; `true` shares identity (anonymous ID, external ID, session, consent) across subdomains via a first-party cookie on the auto-discovered registrable domain, and `{ domain }` pins that cookie domain explicitly. See [Cross-subdomain tracking](#cross-subdomain-tracking) for fallback behavior and the multi-tenant caveat. |
+| `maxAgeDays` | `number` | `365` | How long the SDK's stored identifiers are kept. The deadline is **absolute** — stamped at first write, never extended by later visits. See [Retention](#retention). |
+| `redactUrlParams` | `readonly string[] \| false` | built-in list | Query and fragment params whose values are replaced with `redacted` in `$url`, `$referrer` and a form's `action`. See [Privacy controls](#privacy-controls). |
 | `beforeSend` | `(event) => event \| null \| void` | — | Redact, rewrite or drop any event before it's sent — mask URLs, strip PII from properties. See [Privacy controls](#privacy-controls). |
 
 #### Cross-subdomain tracking
 
 With `crossSubdomainTracking: true`, identity is written to a first-party cookie on the registrable domain (e.g. `.example.com`), auto-discovered with a write-probe. It degrades to a host-only cookie on localhost and IP hosts, and to `localStorage` when cookies are blocked; cookies set from HTTPS carry `Secure`, so identity is shared only among HTTPS subdomains. Sessions end by idle/max timeout only — the "rotate when all tabs closed" heuristic is origin-scoped and is disabled in this mode.
 
-The cookie lives 365 days by default. Pass `maxAgeDays` to hold a shorter retention ceiling — `{ maxAgeDays: 390 }` for CNIL's 13 months, `{ maxAgeDays: 180 }` to re-solicit twice a year — omitting `domain` alongside it to keep auto-discovery:
+**Warning:** on a custom multi-tenant domain not on the [Public Suffix List](https://publicsuffix.org/) (e.g. `a.myplatform.com` and `b.myplatform.com` as separate tenants), the write-probe returns the shared `myplatform.com`, letting sibling tenants read each other's identity — pin an explicit `{ domain }` there.
+
+#### Retention
+
+`maxAgeDays` (default 365) bounds the identifiers the SDK stores on the device: the anonymous ID, an `identify()`ed external ID, session state, and the persisted consent choice. It applies in both storage modes — plain `localStorage` has no expiry of its own, so without this the default install kept identity indefinitely.
+
+Lowering it applies to existing visitors, not just new devices: a stored deadline is clamped to the current window on the next write, so tightening retention reaches the population that already has identifiers.
+
+Two things it does not bound: the outbound event queue and the tab-liveness registry, which stay on raw `localStorage`. Both are cleared by `reset()` and by any consent teardown, so neither is a way for identity to survive a withdrawal — but a queue that cannot reach your endpoint is bounded by `batch.maxQueueSize`, not by this deadline.
 
 ```ts
 init('your-project-id', {
   apiKey: 'your-api-key',
-  crossSubdomainTracking: { maxAgeDays: 180 },
+  maxAgeDays: 390, // CNIL's 13 months
 })
 ```
 
-Two limits: the expiry is refreshed on every write, so it runs from the visitor's **last visit** rather than from when they consented, and it bounds the cookie only — `localStorage` has no expiry, so identity there persists until `reset()`, `optOutTracking()`, or the user clears site data. Chromium caps any cookie at 400 days regardless; Safari's ITP caps script-written cookies far lower.
+The deadline is **absolute**: it is stamped when a value is first written and carried through every later write, so a returning visitor refreshes the value but not the retention window. (CNIL's 13-month rule is explicit that a tracker's lifetime must not be extended automatically on new visits.) A value past its deadline is deleted, not merely ignored, on the first read after it lapses — including the cross-subdomain cookie, whose `max-age` is set to the value's *remaining* lifetime so the two expire together.
 
-**Warning:** on a custom multi-tenant domain not on the [Public Suffix List](https://publicsuffix.org/) (e.g. `a.myplatform.com` and `b.myplatform.com` as separate tenants), the write-probe returns the shared `myplatform.com`, letting sibling tenants read each other's identity — pin an explicit `{ domain }` there.
+When the consent record lapses, `isConsentPending()` is `true` again and your banner is shown afresh — which is what makes a stored choice a preference with a shelf life rather than a permanent one.
+
+Two caveats. Chromium caps any cookie at 400 days regardless, and Safari's ITP caps script-written cookies far lower — a longer `maxAgeDays` cannot outlive those. And the device-local record is a preference cache, not proof of consent: if you need to *demonstrate* consent under Art. 7(1), that record belongs in your CMP or on your server, with a timestamp and the policy version.
 
 ### Tracking consent API
 
 | Function | Description |
 |---|---|
-| `setTrackingConsent(state)` | Sets the consent state: `'granted'`, `'cookieless'`, or `'denied'`. Leaving `'granted'` deletes the stored identity (profile + session + tab registry + any queued events, including the cross-subdomain cookie); events already collected under valid consent get one final send attempt on the way out, so a withdrawal drops them from the device without discarding data the user had agreed to. Granting later starts a fresh identity on the next event — pre-consent events are never linked to it. **Returns `false`** if the change did not fully take effect: an unrecognized state (consent then fails closed to `'denied'`), a choice that could not be persisted, or an identifier that could not be removed. See [Handling a failed consent change](#handling-a-failed-consent-change). |
+| `setTrackingConsent(state)` | Sets the consent state: `'granted'`, `'cookieless'`, or `'denied'`. Leaving `'granted'` deletes the stored identity (profile + session + tab registry + any queued events, including the cross-subdomain cookie). Queued events are **dropped unsent**: transmitting them after the user chose Reject would be a fresh act of processing on the data they just refused. (`reset()` — a logout, where consent is unchanged — still sends them first.) Granting later starts a fresh identity on the next event — pre-consent events are never linked to it. **Returns `false`** if the change did not fully take effect: an unrecognized state (consent then fails closed to `'denied'`), a choice that could not be persisted, or an identifier that could not be removed. See [Handling a failed consent change](#handling-a-failed-consent-change). |
 | `optInTracking()` | Shorthand for `setTrackingConsent('granted')`: applies the stored `autoCapture` selection and allows `track()` / `identify()` to send with a persistent identity. Returns the same boolean. |
 | `optOutTracking()` | Applies the rejection state — `'denied'` by default, or whatever `trackingConsent.onReject` is set to. With the default it tears down automatic listeners and drops future `track()` / `identify()` calls entirely. Returns the same boolean. |
 | `isTrackingEnabled()` | Whether events are flowing right now — `true` for both `'granted'` and `'cookieless'` (use `getTrackingConsent()` to distinguish). Independent of `dryRun`, which suppresses delivery without changing consent. Warns and returns `false` before `init()`, which is accurate: nothing is being tracked yet. |
@@ -188,11 +204,16 @@ Two limits: the expiry is refreshed on every write, so it runs from the visitor'
 
 #### Cookieless mode
 
-`'cookieless'` is the middle consent state: events keep flowing, but the SDK writes **no
-identifiers** to the device — no session, no profile, no cross-subdomain cookie, not even
-the queued event payloads — and sends no identity. The server derives a daily-rotating
+`'cookieless'` is the middle consent state, **and the default**: events keep flowing, but the SDK
+writes **no identifiers** to the device — no session, no profile, no cross-subdomain cookie, not
+even the queued event payloads — and sends no identity. The server derives a daily-rotating
 anonymous id instead, so consent-rejecting visitors still appear in traffic metrics while
 staying anonymous and excluded from user counts by default.
+
+It is the default because the alternative is worse: an install that has not configured consent yet
+would otherwise write a 365-day identifier on the first page view, before the banner it is about to
+show has been answered. Starting here means the only thing an unconfigured install can get wrong is
+collecting too little.
 
 The one thing still written is the consent choice itself, and only when you opt into
 `persist: true`: a record of the user's refusal, so it survives a reload and applies across
@@ -316,7 +337,28 @@ script-tag form above wraps the call in `ready()`.
 
 ### Privacy controls
 
-Three device-side controls keep PII out of captured events. All run in the browser before anything is sent, so raw values never leave the device.
+Four device-side controls keep PII out of captured events. All run in the browser before anything is sent, so raw values never leave the device.
+
+#### Sensitive URL params are redacted
+
+`$url`, `$referrer` and a form's `action` have known-sensitive query and fragment params replaced with `redacted` before anything else sees them — including `beforeSend`. The default list covers credentials and direct identifiers that ride reset links, magic links and OAuth callbacks:
+
+`access_token`, `api_key`, `apikey`, `auth`, `authorization`, `code`, `email`, `id_token`, `otp`, `passwd`, `password`, `phone`, `pwd`, `refresh_token`, `secret`, `sig`, `signature`, `ssn`, `token`
+
+```
+https://app.example.com/reset?token=s3cr3t&plan=pro
+                          →  https://app.example.com/reset?token=redacted&plan=pro
+```
+
+Matching is case-insensitive, and the fragment is covered too — an OAuth implicit-flow `#access_token=…` never reaches a server *except* through analytics. URLs with nothing to redact are passed through byte for byte.
+
+Pass `redactUrlParams` an array to replace the list, or `false` to capture URLs verbatim:
+
+```ts
+init('your-project-id', { apiKey: 'your-api-key', redactUrlParams: ['token', 'orderId'] })
+```
+
+This is a floor, not a full masking solution — it cannot know that `/orders/8817` is an order ID. Use `beforeSend` for anything structural.
 
 #### Element text is the element's own text
 
@@ -376,9 +418,9 @@ init('your-project-id', {
 - `sessionId` and `distinctId` are not exposed. They're top-level fields on the event, already gated by [tracking consent](#tracking-consent-api); use `cookieless` mode or `optOutTracking()` to suppress them.
 - Runs synchronously on every event — keep it cheap and side-effect-free.
 - **Fails closed:** if it throws or returns something malformed, the whole event is dropped rather than sent unredacted, and the SDK warns once per failure kind. When it throws, only the error's type is logged, never its message, so a hook that interpolates the value it was redacting can't re-surface it in the console.
-- Not available on the one-tag install: `data-options` is JSON, which can't carry a function. Passing a non-function `beforeSend` there drops **every** event. Use the [loader snippet](#script-tag-cdn) with a queued `init` call, or the npm package.
+- Not available on the one-tag install: `data-options` is JSON, which can't carry a function. Passing a non-function `beforeSend` there drops **every** event. Use the [loader snippet](#script-tag-cdn) with a queued `init` call, or the npm package. One-tag pages still get the default param redaction above, which *is* JSON-configurable via `redactUrlParams`.
 
-Masking URLs is the common case. `$url` and `$referrer` are auto-properties, and a form's `action` is a custom property on `form_submit`:
+Masking URLs is the common case — `redactUrlParams` has already stripped known-sensitive params, so what is left is structural (IDs in paths, whole URLs). `$url` and `$referrer` are auto-properties, and a form's `action` is a custom property on `form_submit`:
 
 ```ts
 const maskUrl = (url: string) => {
@@ -503,11 +545,18 @@ See **[WELL_KNOWN_EVENTS.md](./WELL_KNOWN_EVENTS.md)** for the full list — eac
 
 ### Unreleased — breaking changes
 
-Three **runtime** changes affect every install, including JavaScript and one-tag:
+Several **runtime** changes affect every install, including JavaScript and one-tag:
+
+- **Tracking consent now defaults to `'cookieless'`, not `'granted'`.** An install that does not configure `trackingConsent` keeps sending events, but no longer writes a session, anonymous ID or cross-subdomain cookie, and `identify()` is a no-op. To keep the previous behavior, pass `trackingConsent: 'granted'` explicitly — and satisfy yourself that you have a basis for it, since it stores identifiers before any banner is answered.
+- **Stored identifiers now expire** after `maxAgeDays` (default 365, absolute rather than sliding). Identity that used to live in `localStorage` forever now ages out, and the stored format changed — values written by an earlier version are unreadable, so they are treated as absent **and deleted** on first read — existing visitors get a fresh anonymous ID once, on upgrade, and any `identify()`ed external ID left by the old build leaves the device rather than sitting there under no deadline. On the CDN install, where each page pins its own `cdn.pugs.dev/vX.Y.Z` URL, roll the version out across all your pages together: with `crossSubdomainTracking` on, pages still pinned to the old version and pages on the new one do not understand each other's stored format and will each keep re-minting identity for the other.
+- **Sensitive URL params are redacted by default** in `$url`, `$referrer` and a form's `action` (`token`, `access_token`, `code`, `email`, `password`, …; [full list](#sensitive-url-params-are-redacted)). Pass `redactUrlParams: false` for the old verbatim behavior.
+- **Queued events are dropped, not sent, on consent withdrawal.** `optOutTracking()` / `setTrackingConsent()` leaving `'granted'` no longer beacons the queue out first. `reset()` still does.
+- `crossSubdomainTracking.maxAgeDays` moved to the top-level `maxAgeDays`, which bounds `localStorage` too. `{ maxAgeDays }` as a cross-subdomain value no longer typechecks.
+- `init()` warns when `endpoint` is not `https` (and is not localhost).
 
 - The `click` and `dead_click` `text` property is now the clicked element's own text rather than its whole subtree (see [Privacy controls](#privacy-controls)). Text captured from wrapper elements gets shorter and stops carrying nested content; nothing else about the events changes.
 - `$pageTitle` is sent on `page_view` only, not on every event. It used to ride every click, scroll, form and frustration event; titles routinely carry names and order numbers, and the title is still joinable to later events through `sessionId`.
-- **`sanitizeUrl` is removed**, replaced by [`beforeSend`](#privacy-controls), which reaches every property rather than URL fields only. TypeScript consumers get a compile error. **JavaScript and one-tag installs do not** — the option is accepted, ignored, and `$url` / `$referrer` / `form.action` start going out unmasked, so `init()` logs a warning when it sees the stale key. Migrate:
+- **`sanitizeUrl` is removed**, replaced by [`beforeSend`](#privacy-controls), which reaches every property rather than URL fields only. TypeScript consumers get a compile error. **JavaScript and one-tag installs do not** — the option is accepted and ignored, so `init()` logs a warning when it sees the stale key. `$url` / `$referrer` / `form.action` still get the default [`redactUrlParams`](#sensitive-url-params-are-redacted) pass, so what is lost is whatever structural masking your `sanitizeUrl` added on top. Migrate:
 
 ```ts
 // Before
@@ -539,7 +588,9 @@ The rest are **compile-time** breaks for TypeScript consumers only.
 | `getTrackingConsent()` returns `TrackingConsent \| undefined` | Code assuming a non-optional return under `strictNullChecks` | Handle `undefined`, which means "called before `init()`" |
 | `TrackingConsent` has a third member, `'cookieless'` | Exhaustive `switch`es and `Record<TrackingConsent, …>` maps stop compiling | Handle `'cookieless'` — events flow without identity |
 | `optOutTracking()` applies `trackingConsent.onReject` | Nothing by default (`onReject` defaults to `'denied'`) | Opt in with `onReject: 'cookieless'` to keep identity-free counts after a rejection; `setTrackingConsent('denied')` is unaffected |
-| `sanitizeUrl` removed | `init(p, { sanitizeUrl })` no longer typechecks. JS/one-tag installs get no error — just a warning and raw URLs | Use `beforeSend` — see the migration above |
+| `crossSubdomainTracking: { maxAgeDays }` | The object arm is now `{ domain: string }` only | Move it to the top-level `maxAgeDays`, which also bounds `localStorage`. **On a one-tag install this changes behavior at runtime:** an object with no `domain` used to auto-discover the registrable domain, and now resolves to *off* with a warning — pass `true` to keep cross-subdomain identity |
+| `crossSubdomainTracking` is only enabled by `true` or `{ domain }` | A `data-options` JSON value of `{}`, `"true"`, `"false"` or a number no longer enables it (all four used to; `"false"` **enabled** it) | State the opt-in: `true` to discover the registrable domain, `{ domain: 'example.com' }` to pin one. TypeScript already rejected these |
+| `sanitizeUrl` removed | `init(p, { sanitizeUrl })` no longer typechecks. JS/one-tag installs get no error — just a warning, and only the default param redaction rather than your own masking | Use `beforeSend` — see the migration above |
 | `TrackingConsentConfig.default` renamed to `initial` | `init(p, { trackingConsent: { default: … } })` | Rename the key. `default` is a reserved word, so `const { default } = cfg` was a SyntaxError; `initial` destructures normally. A stale key now warns and **fails closed to `'denied'`** rather than silently seeding `'granted'` — including in `data-options` JSON, which no compiler checks |
 
 The `track()` change also surfaced an int64 issue that the old permissive overload had been hiding: `sizeBytes` on the file, export and chat-attachment events is a `bigint`, so pass `1024n` rather than `1024`. It never encoded correctly as a plain number — the overload just made it compile.

@@ -1,4 +1,5 @@
 import type { TrackFn, WellKnownEventName } from '../track.js'
+import { scrubUrl } from '../utils.js'
 
 export const eventFormStart = 'form_start' satisfies WellKnownEventName
 export const eventFormSubmit = 'form_submit' satisfies WellKnownEventName
@@ -25,7 +26,7 @@ export const setupFormTracking = (track: TrackFn) => {
     }
     const form = event.target as HTMLFormElement
     track(eventFormSubmit, {
-      action: form.action,
+      action: scrubUrl(form.action),
       formId: form.id || '(anonymous)',
       formName: form.name,
     })

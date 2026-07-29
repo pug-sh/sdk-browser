@@ -315,10 +315,21 @@ describe('cookieless loss reporting and flush fairness', () => {
     await t.send(cookielessEvt('ck'))
     beacon.mockReturnValue(false)
 
-    expect(t.purgeQueue()).toBe(false)
+    expect(t.purgeQueue({ send: true })).toBe(false)
     // The cookieless queue is memory-only, so its loss is permanent — error, not warn.
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('cookieless'))
     errSpy.mockRestore()
+  })
+
+  it('does not transmit the queue when purging without send', async () => {
+    // Consent teardown: beaconing after the user withdrew consent would be a fresh transmission of
+    // exactly the data they refused.
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('consented'))
+    await t.send(cookielessEvt('ck'))
+
+    expect(t.purgeQueue({ send: false })).toBe(true)
+    expect(beacon).not.toHaveBeenCalled()
   })
 
   // R2-S18: the !isStorageAvailable() arm of reportBeaconLoss was dead to the suite — making it
@@ -361,7 +372,7 @@ describe('rollback messaging after a concurrent purge', () => {
     await t.send(evt('a')) // hits maxSize -> flush() -> in flight
     await vi.advanceTimersByTimeAsync(0)
 
-    t.purgeQueue() // empties the buffer under the in-flight batch
+    t.purgeQueue({ send: false }) // empties the buffer under the in-flight batch
     rejectSend(new RpcError('down', GrpcCode.Unavailable))
     await vi.advanceTimersByTimeAsync(10)
 

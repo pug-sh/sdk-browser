@@ -8,22 +8,13 @@ import type { TrackFn } from './track.js'
 import type { TrackingGate } from './tracking-consent.js'
 
 /**
- * Per-listener allowlist for automatic capture.
+ * Per-listener allowlist: a listener runs only when its key is explicitly `true`, and every omitted
+ * key is off — so `{}` disables everything, like passing `false`. List what you want enabled
+ * (`{ pageView: true }`); for a value known only at runtime write `scroll: flag || undefined`.
  *
- * Allowlist semantics: a listener is enabled only when its key is explicitly `true`, and every
- * omitted key is disabled — so `{}` disables everything, equivalent to passing `false` as the whole
- * `AutoCaptureConfig`.
- *
- * The values are typed `true` rather than `boolean` to make that shape unwritable: `{ scroll: false }`
- * reads like "everything except scroll" but under an allowlist means "nothing at all", so it is a
- * compile error instead of a silent loss of all automatic capture. List what you want enabled
- * (`{ pageView: true }`), or pass `false` to turn everything off. For a value known only at runtime,
- * write `scroll: flag || undefined`.
- *
- * The `| undefined` is what keeps that last idiom compiling for consumers who enable
- * `exactOptionalPropertyTypes` (it ships in `@tsconfig/strictest`), where an optional key does not
- * otherwise admit an explicit `undefined`. It is a no-op without that flag, and it does not weaken
- * anything: `false` and a `boolean`-typed value are still rejected.
+ * Values are `true`, not `boolean`, so `{ scroll: false }` — which reads as "everything except
+ * scroll" but under an allowlist means "nothing at all" — is a compile error. The `| undefined`
+ * keeps the runtime-flag idiom compiling under `exactOptionalPropertyTypes` without weakening that.
  */
 export interface AutoCaptureSelection {
   readonly pageView?: true | undefined
@@ -51,12 +42,9 @@ const trackers = {
 const trackerKeys = Object.keys(trackers) as AutoCaptureKey[]
 
 /**
- * Resolves a selection to the trackers it enables. Pure: every diagnostic lives in
- * `validateAutoCapture`, because this runs on each reconcile while warnings must fire exactly once,
- * at config time.
- *
- * A wrong top-level type defaults to all trackers (most likely a mistake, and capture is the
- * default); a mostly-valid object keeps its good keys and ignores the rest.
+ * Resolves a selection to the trackers it enables. Pure — diagnostics live in `validateAutoCapture`,
+ * since this runs on every reconcile while warnings must fire once, at config time. A wrong
+ * top-level type defaults to all trackers; a mostly-valid object keeps its good keys.
  */
 const resolveAutoCapture = (autoCapture: AutoCaptureConfig | undefined): AutoCaptureKey[] => {
   if (autoCapture === undefined || autoCapture === true) {
@@ -73,13 +61,9 @@ const resolveAutoCapture = (autoCapture: AutoCaptureConfig | undefined): AutoCap
 }
 
 /**
- * Reports a misconfigured selection, once, when it is set.
- *
- * Deliberately called from `setDesired` rather than from `reconcile`: reconcile only consults the
- * selection while tracking is active (granted **or** cookieless), so validating there would say nothing at all for the
- * consent-first flows the README recommends — the integrator would get the diagnosis at
- * `optInTracking()` time, in a user's browser, long after they stopped watching the console — and
- * would then re-warn on every opt-in/opt-out cycle.
+ * Reports a misconfigured selection, once, when it is set. Called from `setDesired` rather than
+ * `reconcile`, which only consults the selection while tracking is active — validating there said
+ * nothing for the consent-first flows the README recommends, then re-warned on every consent cycle.
  */
 const validateAutoCapture = (autoCapture: AutoCaptureConfig | undefined): void => {
   if (autoCapture === undefined || typeof autoCapture === 'boolean') {
@@ -104,22 +88,12 @@ const validateAutoCapture = (autoCapture: AutoCaptureConfig | undefined): void =
     log.warn(`autoCapture values must be \`true\` for keys: ${invalidKeys.join(', ')}. Ignoring invalid values.`)
   }
 
-  // Two spellings of one mistake — the allowlist misread as a denylist — and both must be audible,
-  // because each silently loses capture the integrator believes they kept.
-  //
-  //   1. An explicit `false` (`{ deadClick: false }` for "everything except dead clicks"). This is
-  //      reported even when the selection still enables something: `{ pageView: true, scroll: false }`
-  //      keeps page views, so a check keyed only on a zero enabled count stays silent while click,
-  //      form, rageClick and deadClick are all lost.
-  //   2. A selection that names trackers but enables none — an unknown key (`{ pageview: true }`) or
-  //      a non-`true` value (`{ scroll: 'true' }` from a template, `{ scroll: 1 }` from a config
-  //      store). The `invalidKeys` warning above names the offending key but reads as "we ignored
-  //      that one", which understates a total loss of capture.
-  //
-  // Keyed on a written-out value rather than on key count, so the documented runtime-flag idiom
-  // `scroll: flag || undefined` stays silent when the flag is false — it embeds no misconception,
-  // exactly like `{}`. TS callers cannot write either mistake without a cast (AutoCaptureSelection's
-  // values are typed `true`), but JS and CDN callers can.
+  // Two spellings of one mistake — the allowlist misread as a denylist — each silently losing
+  // capture the integrator believes they kept: an explicit `false` anywhere (reported even when the
+  // selection still enables something, since `{ pageView: true, scroll: false }` still loses four
+  // trackers), or a selection that names trackers but enables none. Keyed on a written-out value
+  // rather than key count, so `{}` and `scroll: flag || undefined` stay silent — they embed no
+  // misconception.
   const enabled = trackerKeys.filter(key => selection[key] === true)
   const disabledKeys = trackerKeys.filter(key => selection[key] === false)
   const namesSomething = Object.keys(selection).some(key => selection[key] !== undefined)
@@ -139,11 +113,9 @@ const validateAutoCapture = (autoCapture: AutoCaptureConfig | undefined): void =
 }
 
 /**
- * Owns the auto-capture lifecycle. Holds the desired selection and reconciles the live SDK
- * listeners against it, gated by tracking being active (read via `isTrackingActive` — true for
- * granted AND cookieless consent, not just full consent): while tracking is off no listener runs,
- * regardless of the desired selection. Cleanup is tracked per tracker so the selection can be
- * changed at runtime without tearing down listeners that stay enabled.
+ * Owns the auto-capture lifecycle: holds the desired selection and reconciles live listeners against
+ * it, gated on `isTrackingActive` (granted **or** cookieless). Cleanup is tracked per tracker, so
+ * the selection can change at runtime without tearing down listeners that stay enabled.
  */
 export const createAutoCaptureController = (track: TrackFn, isTrackingActive: TrackingGate) => {
   const cleanups = new Map<AutoCaptureKey, () => void>()
@@ -203,11 +175,8 @@ export const createAutoCaptureController = (track: TrackFn, isTrackingActive: Tr
   }
 
   return {
-    /**
-     * Store the desired selection and reconcile the live listeners against current consent.
-     * Validation happens here, not in `reconcile`, so a bad selection is reported when it is set
-     * even if consent is currently denied.
-     */
+    /** Store the selection and reconcile against current consent. Validates here so a bad selection
+     * is reported when set, even while consent is denied. */
     setDesired: (autoCapture: AutoCaptureConfig | undefined): void => {
       validateAutoCapture(autoCapture)
       desired = autoCapture

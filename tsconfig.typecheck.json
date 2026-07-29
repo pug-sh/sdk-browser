@@ -10,5 +10,7 @@
     "exactOptionalPropertyTypes": true
   },
   "include": ["src/**/*"],
+  // *.test-utils.ts is excluded from the build (never emitted) but checked here — it is imported by
+  // suites that vitest transpiles without typechecking, so this is the only thing that checks it.
   "exclude": ["src/**/*.test.ts"]
 }

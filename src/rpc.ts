@@ -4,20 +4,15 @@ import { log } from './logger.js'
 const DEFAULT_TIMEOUT_MS = 5000
 
 /**
- * Timeout for one-shot RPCs (`identify`, push `subscribe`) that — unlike batched events — are
- * NOT retried on failure. The 5s default is tuned for the batch path (a miss just retries next
- * flush); aborting a cold-started backend at 5s would permanently lose a one-shot, so give them
- * a more generous ceiling while staying bounded so an awaited call can't hang indefinitely.
+ * Timeout for one-shot RPCs (`identify`, push `subscribe`), which unlike batched events are never
+ * retried — aborting a cold-started backend at the 5s batch default would lose them permanently.
  */
 export const ONE_SHOT_TIMEOUT_MS = 15000
 
 /**
- * The canonical gRPC status codes as a compile-time-enforced union. The producer (`rpc.ts`) and
- * the consumer (`batch.ts`'s permanent-vs-transient set) share this single source of truth, so
- * `new RpcError('x', 999)` is a type error and the two tables cannot silently drift apart. It
- * ships as a small frozen object: a `const enum` would be zero-runtime but can't be inlined
- * across files under the esbuild-based (per-file) test transform, so `batch.ts` would fail to
- * resolve its members. The object costs a few dozen bytes — negligible next to the removed deps.
+ * The gRPC status codes, shared by the producer here and `batch.ts`'s permanent-vs-transient set so
+ * the two tables cannot drift. A frozen object rather than a `const enum` because the esbuild-based
+ * (per-file) test transform cannot inline enum members across files.
  */
 export const GrpcCode = {
   Canceled: 1,
@@ -39,8 +34,7 @@ export const GrpcCode = {
 } as const
 export type GrpcCode = (typeof GrpcCode)[keyof typeof GrpcCode]
 
-// Connect encodes errors as JSON with a *string* `code`; map it back to the numeric gRPC code
-// so the batch layer can classify permanent vs. transient failures.
+// Connect encodes errors as JSON with a *string* code; map it back to the numeric one.
 const CONNECT_CODE_TO_NUMBER: Record<string, GrpcCode> = {
   canceled: GrpcCode.Canceled,
   unknown: GrpcCode.Unknown,
@@ -61,16 +55,12 @@ const CONNECT_CODE_TO_NUMBER: Record<string, GrpcCode> = {
 }
 
 /**
- * Error thrown by {@link unaryCall} for *server* rejections and network/timeout failures,
- * carrying a numeric gRPC status code the batch layer classifies as permanent or transient.
- * Network drops and timeouts surface as transient codes (`Unavailable` / `DeadlineExceeded`)
- * with the underlying error attached as `cause`; server rejections carry the code from the
- * Connect JSON error body. Replaces `@connectrpc/connect`'s `ConnectError`.
+ * Server rejections and network/timeout failures, carrying a numeric gRPC code the batch layer
+ * classifies. Network drops and timeouts surface as transient codes with the original error as
+ * `cause`. Replaces `@connectrpc/connect`'s `ConnectError`.
  *
- * Not every failure is an `RpcError`: a 2xx response whose body isn't valid protobuf (a
- * proxy/captive-portal/CDN page) and a `toBinary` serialization bug are *permanent* failures
- * surfaced as their raw error, so `batch.ts`'s `isPermanentError` (non-`RpcError` → permanent)
- * drops them instead of retrying the same bad request/response forever.
+ * Deliberately not every failure: a 2xx body that isn't protobuf and a `toBinary` bug surface raw,
+ * so `batch.ts` (non-`RpcError` → permanent) drops them instead of retrying the same bad call.
  */
 export class RpcError extends Error {
   readonly code: GrpcCode
@@ -86,39 +76,29 @@ export class RpcError extends Error {
   }
 }
 
-// Fallback classification when an error body isn't a Connect JSON error — a proxy/CDN/WAF page
-// (HTML, or non-Connect JSON) such as a Cloudflare 403 bot-block or a 429. Classifies by HTTP
-// status *class* instead of collapsing an unmapped status to unknown(2)/transient, which batch.ts
-// would retry on every flush forever: 4xx client/proxy errors the identical request can't fix are
-// permanent (batch.ts drops them); 429 and 5xx stay transient (retryable).
+// Fallback when the error body isn't Connect JSON — a proxy/CDN/WAF page. Classifying by status
+// *class* keeps 4xx permanent; collapsing them to unknown(2) made batch.ts retry forever.
 const codeFromHttpStatus = (status: number): GrpcCode => {
   switch (status) {
     case 401:
-      return GrpcCode.Unauthenticated // permanent
+      return GrpcCode.Unauthenticated
     case 403:
-      return GrpcCode.PermissionDenied // permanent — e.g. a Cloudflare WAF/bot block
+      return GrpcCode.PermissionDenied // e.g. a Cloudflare WAF/bot block
     case 404:
-      return GrpcCode.Unimplemented // permanent
-    case 408: // request timeout — transient
-    case 429: // rate limited — transient
+      return GrpcCode.Unimplemented
+    case 408: // request timeout
+    case 429: // rate limited
       return GrpcCode.Unavailable
   }
-  // 4xx (400, 405, 413, 415, 431, 451, …): a client/proxy rejection retrying can't fix —
-  // permanent, so batch.ts drops it instead of re-sending the identical request every flush
-  // until the queue fills and sheds its oldest events.
-  if (status >= 400 && status < 500) {
-    return GrpcCode.InvalidArgument
-  }
-  // 5xx and anything else: a server/gateway hiccup that may recover on retry — transient.
-  return GrpcCode.Unavailable
+  // Any other 4xx is a client/proxy rejection a retry cannot fix.
+  return status >= 400 && status < 500 ? GrpcCode.InvalidArgument : GrpcCode.Unavailable
 }
 
 const errorFromResponse = async (res: Response, methodName: string): Promise<RpcError> => {
-  // Connect unary errors are JSON: { "code": "<string>", "message": "<text>" }.
   try {
+    // Connect unary errors are JSON: { code: "<string>", message: "<text>" }. A non-Connect JSON
+    // body (proxy/CDN) has no known string code and falls back to the HTTP status.
     const body = (await res.json()) as { code?: unknown; message?: unknown }
-    // A genuine Connect error carries a known string `code`; a non-Connect JSON body (proxy/CDN)
-    // falls back to the HTTP status, same as a non-JSON body below.
     const code =
       typeof body.code === 'string'
         ? (CONNECT_CODE_TO_NUMBER[body.code] ?? codeFromHttpStatus(res.status))
@@ -126,25 +106,18 @@ const errorFromResponse = async (res: Response, methodName: string): Promise<Rpc
     const message = typeof body.message === 'string' ? body.message : `HTTP ${res.status}`
     return new RpcError(message, code)
   } catch (err) {
-    // Non-JSON error body (a proxy/gateway/CDN page). Classify by HTTP status so an unretryable
-    // 4xx block (e.g. a Cloudflare WAF/bot 403) is dropped, not retried forever. Log why the parse
-    // failed at debug so a truncated real Connect error is distinguishable from a proxy HTML page.
+    // Logged at debug so a truncated real Connect error stays distinguishable from a proxy page.
     log.debug(`RPC ${methodName}: error body was not Connect JSON:`, err)
     return new RpcError(`HTTP ${res.status}`, codeFromHttpStatus(res.status))
   }
 }
 
 /**
- * Invokes a unary RPC over the Connect protocol with the binary (protobuf) codec — a
- * hand-rolled `fetch` replacing `@connectrpc/connect-web` to shrink the bundle. The
- * request message is serialized straight into the POST body and the response is parsed
- * from the binary body; the API key rides the `x-api-key` header. This is the same wire
- * format `transport.beacon` already uses.
+ * A unary RPC over the Connect protocol with the binary codec — hand-rolled `fetch` replacing
+ * `@connectrpc/connect-web` to shrink the bundle, on the same wire format `transport.beacon` uses.
  *
- * On failure it throws either an {@link RpcError} (server rejection, network drop, or timeout —
- * carrying a numeric gRPC code and, for network/timeout, a `cause`) or, for a permanent local
- * failure the batch layer must not retry (a 2xx body that isn't protobuf, or a `toBinary` bug),
- * the raw underlying error. Both are classified correctly by `batch.ts`'s `isPermanentError`.
+ * Throws an {@link RpcError} for server rejections, network drops and timeouts, or the raw error for
+ * a permanent local failure the batch layer must not retry.
  */
 export const unaryCall = async <I extends DescMessage, O extends DescMessage>(
   endpoint: string,
@@ -154,8 +127,8 @@ export const unaryCall = async <I extends DescMessage, O extends DescMessage>(
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<MessageShape<O>> => {
   const url = `${endpoint.replace(/\/+$/, '')}/${method.parent.typeName}/${method.name}`
-  // Serialize up front, outside the try: a toBinary failure is a permanent programming/data error,
-  // so it must surface raw (permanent) rather than be caught below and mislabeled a network drop.
+  // Serialized outside the try: a toBinary failure is permanent, and catching it below would
+  // mislabel it a network drop.
   const body = toBinary(method.input, message)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -173,9 +146,8 @@ export const unaryCall = async <I extends DescMessage, O extends DescMessage>(
     if (!res.ok) {
       throw await errorFromResponse(res, method.name)
     }
-    // A 2xx whose body isn't protobuf (a misconfigured proxy / captive portal / CDN health page)
-    // makes fromBinary throw. Check the content-type first so the failure carries a clear message
-    // instead of a cryptic wire-format error; either way it's a non-RpcError → permanent (see catch).
+    // A 2xx whose body isn't protobuf (a captive portal, a CDN health page) makes fromBinary throw a
+    // cryptic wire-format error; check the content-type first so the message names the real cause.
     const contentType = res.headers.get('content-type') ?? ''
     if (contentType && !contentType.includes('proto')) {
       throw new Error(`RPC ${method.name}: expected a protobuf response but got content-type "${contentType}"`)
@@ -185,19 +157,17 @@ export const unaryCall = async <I extends DescMessage, O extends DescMessage>(
     if (err instanceof RpcError) {
       throw err
     }
-    // A timeout fires the AbortController; a network-level fetch rejection throws a TypeError. Both
-    // are transient, so the batch layer keeps the events queued and retries on the next flush. The
-    // original error rides along as `cause` so CORS/DNS/mixed-content drops aren't all logged alike.
+    // A timeout aborts the controller; a network-level rejection throws TypeError. Both are
+    // transient, so the batch layer keeps the events queued. The original rides as `cause` so
+    // CORS/DNS/mixed-content drops are not all logged alike.
     if (controller.signal.aborted) {
       throw new RpcError('RPC timed out', GrpcCode.DeadlineExceeded, err)
     }
     if (err instanceof TypeError) {
       throw new RpcError('network request failed', GrpcCode.Unavailable, err)
     }
-    // Anything else — fromBinary on a non-proto 2xx body, the content-type guard, or a toBinary
-    // bug — is PERMANENT: the identical request/response repeats on every retry. Surface it raw so
-    // batch.ts's isPermanentError (non-RpcError → permanent) drops the poison instead of looping
-    // every ~5s forever. This is the edge @connectrpc/connect-web used to classify for us.
+    // Anything else repeats identically on every retry, so surface it raw and let batch.ts drop it
+    // rather than loop every ~5s forever. This is the edge @connectrpc/connect-web classified for us.
     throw err
   } finally {
     clearTimeout(timer)

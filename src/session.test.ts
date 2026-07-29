@@ -2,6 +2,7 @@ import { CookieJar, JSDOM } from 'jsdom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PersistentStore } from './persistence.js'
 import { clearSession, configureSession, destroySession, resetIdentity, resolveSessionId, rotate } from './session.js'
+import { persisted, storedValue } from './storage-envelope.test-utils.js'
 import { makeStorageKey } from './utils.js'
 
 const PROJECT_ID = 'test-project'
@@ -33,6 +34,8 @@ const createMockStorage = (): Storage => {
 
 let mockStorage: Storage
 
+// Persisted values carry an absolute expiry: `<epoch ms>|<value>`.
+
 beforeEach(() => {
   mockStorage = createMockStorage()
   Object.defineProperty(globalThis, 'localStorage', { value: mockStorage, writable: true, configurable: true })
@@ -47,7 +50,7 @@ afterEach(() => {
 describe('configureSession', () => {
   it('sets storage key', () => {
     const id = resolveSessionId()
-    const stored = JSON.parse(mockStorage.getItem(SESSION_KEY)!)
+    const stored = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!)
     expect(stored.sessionId).toBe(id)
   })
 
@@ -90,7 +93,7 @@ describe('resolveSessionId', () => {
 
   it('persists session to localStorage', () => {
     const id = resolveSessionId()
-    const stored = JSON.parse(mockStorage.getItem(SESSION_KEY)!)
+    const stored = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!)
     expect(stored.sessionId).toBe(id)
     expect(stored.deviceId).toBeTruthy()
     expect(typeof stored.startTime).toBe('number')
@@ -113,10 +116,10 @@ describe('resolveSessionId', () => {
 
   it('preserves deviceId across session rotations', () => {
     resolveSessionId()
-    const device1 = JSON.parse(mockStorage.getItem(SESSION_KEY)!).deviceId
+    const device1 = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!).deviceId
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31 * 60 * 1000)
     resolveSessionId()
-    const device2 = JSON.parse(mockStorage.getItem(SESSION_KEY)!).deviceId
+    const device2 = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!).deviceId
     expect(device2).toBe(device1)
   })
 
@@ -125,7 +128,7 @@ describe('resolveSessionId', () => {
     const future = Date.now() + 5000
     vi.spyOn(Date, 'now').mockReturnValue(future)
     resolveSessionId()
-    const t2 = JSON.parse(mockStorage.getItem(SESSION_KEY)!).lastActivityTime
+    const t2 = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!).lastActivityTime
     expect(t2).toBe(future)
   })
 
@@ -169,7 +172,7 @@ describe('rotate', () => {
 
   it('preserves deviceId from storage on cold call', () => {
     resolveSessionId()
-    const device = JSON.parse(mockStorage.getItem(SESSION_KEY)!).deviceId
+    const device = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!).deviceId
     // Simulate cold state: clear in-memory but keep session in localStorage.
     // destroySession removes the session key, so we save and restore it.
     const savedSession = mockStorage.getItem(SESSION_KEY)!
@@ -177,7 +180,7 @@ describe('rotate', () => {
     mockStorage.setItem(SESSION_KEY, savedSession)
     configureSession(PROJECT_ID)
     rotate()
-    const newDevice = JSON.parse(mockStorage.getItem(SESSION_KEY)!).deviceId
+    const newDevice = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!).deviceId
     expect(newDevice).toBe(device)
   })
 
@@ -208,9 +211,9 @@ describe('rotate', () => {
 describe('resetIdentity', () => {
   it('generates new sessionId and deviceId', () => {
     resolveSessionId()
-    const before = JSON.parse(mockStorage.getItem(SESSION_KEY)!)
+    const before = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!)
     resetIdentity()
-    const after = JSON.parse(mockStorage.getItem(SESSION_KEY)!)
+    const after = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!)
     expect(after.sessionId).not.toBe(before.sessionId)
     expect(after.deviceId).not.toBe(before.deviceId)
   })
@@ -334,7 +337,7 @@ describe('tab detection', () => {
     const now = Date.now()
     mockStorage.setItem(
       SESSION_KEY,
-      JSON.stringify({ sessionId: 'old-session', deviceId: 'dev-1', startTime: now, lastActivityTime: now }),
+      persisted(JSON.stringify({ sessionId: 'old-session', deviceId: 'dev-1', startTime: now, lastActivityTime: now })),
     )
     mockStorage.setItem(TABS_KEY, JSON.stringify({ 'stale-tab': now - 31 * 60 * 1000 }))
     destroySession()
@@ -364,12 +367,14 @@ describe('cross-tab sync', () => {
     const now = Date.now()
     mockStorage.setItem(
       SESSION_KEY,
-      JSON.stringify({
-        sessionId: 'from-other-tab',
-        deviceId: 'shared-device',
-        startTime: now,
-        lastActivityTime: now,
-      }),
+      persisted(
+        JSON.stringify({
+          sessionId: 'from-other-tab',
+          deviceId: 'shared-device',
+          startTime: now,
+          lastActivityTime: now,
+        }),
+      ),
     )
     const id = resolveSessionId()
     expect(id).toBe('from-other-tab')
@@ -590,7 +595,7 @@ describe('read validation', () => {
   it('rejects stored state with non-string sessionId', () => {
     mockStorage.setItem(
       SESSION_KEY,
-      JSON.stringify({ sessionId: 123, deviceId: 'dev', startTime: 1, lastActivityTime: 1 }),
+      persisted(JSON.stringify({ sessionId: 123, deviceId: 'dev', startTime: 1, lastActivityTime: 1 })),
     )
     destroySession()
     configureSession(PROJECT_ID)
@@ -601,7 +606,7 @@ describe('read validation', () => {
   it('rejects stored state with non-number timestamps', () => {
     mockStorage.setItem(
       SESSION_KEY,
-      JSON.stringify({ sessionId: 'sid', deviceId: 'dev', startTime: 'bad', lastActivityTime: 1 }),
+      persisted(JSON.stringify({ sessionId: 'sid', deviceId: 'dev', startTime: 'bad', lastActivityTime: 1 })),
     )
     destroySession()
     configureSession(PROJECT_ID)
@@ -610,7 +615,7 @@ describe('read validation', () => {
   })
 
   it('rejects corrupt JSON', () => {
-    mockStorage.setItem(SESSION_KEY, '{not valid json')
+    mockStorage.setItem(SESSION_KEY, persisted('{not valid json'))
     destroySession()
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     configureSession(PROJECT_ID)
