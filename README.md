@@ -345,7 +345,7 @@ Four device-side controls keep PII out of captured events. All run in the browse
 
 `access_token`, `api_key`, `apikey`, `auth`, `authorization`, `code`, `email`, `id_token`, `otp`, `passwd`, `password`, `phone`, `pwd`, `refresh_token`, `secret`, `sig`, `signature`, `ssn`, `token`
 
-```
+```text
 https://app.example.com/reset?token=s3cr3t&plan=pro
                           →  https://app.example.com/reset?token=redacted&plan=pro
 ```

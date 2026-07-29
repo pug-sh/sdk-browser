@@ -189,6 +189,43 @@ describe('createPersistentStore', () => {
     expect(storedValue(localStorage.getItem('k'))).toBe('v')
   })
 
+  it('drops a stale host-only cookie when its write fails, so reads see the new value', () => {
+    // Reads prefer the cookie, so a survivor of the failed write would shadow the localStorage value
+    // with the previous one while setItem reported success.
+    const { layer, jar } = createFakeCookieLayer(false)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'first')
+    layer.set = () => false
+    expect(store?.setItem('k', 'second')).toBe(true)
+    expect(jar.has('k')).toBe(false)
+    expect(store?.getItem('k')).toBe('second')
+  })
+
+  it('reports failure when a shadowing host-only cookie cannot be cleared', () => {
+    const { layer } = createFakeCookieLayer(false)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'first')
+    layer.set = () => false
+    layer.remove = () => false
+    expect(store?.setItem('k', 'second')).toBe(false)
+    expect(store?.getItem('k')).toBe('first')
+    expect(logSpies.warn).toHaveBeenCalledWith(
+      'Stale cookie for "k" could not be cleared and shadows the stored value; reads will return the previous one.',
+    )
+  })
+
+  it('keeps the shared cookie when a cross-subdomain write fails', () => {
+    // Reads have no localStorage fallback here, so clearing the shadow (as host-only mode does)
+    // would end identity on every sibling subdomain over one page's failed write.
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'first')
+    layer.set = () => false
+    expect(store?.setItem('k', 'second')).toBe(false)
+    expect(jar.has('k')).toBe(true)
+    expect(store?.getItem('k')).toBe('first')
+  })
+
   it('reports failure in cross-subdomain mode when the cookie write fails, even if localStorage lands', () => {
     // getItem never falls back to localStorage in this mode, so a localStorage-only success is
     // unreadable on the next load and must not be reported as persisted.

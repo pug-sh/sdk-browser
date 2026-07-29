@@ -105,17 +105,25 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
     return null
   }
 
-  const removeItem = (key: string): boolean => {
-    // Absent layers can't hold a stale value, so they default to "removed".
-    let cookieRemoved = true
-    if (cookies) {
-      try {
-        cookieRemoved = cookies.remove(key)
-      } catch (err) {
-        cookieRemoved = false
-        log.warn(`Failed to remove "${key}" from cookies:`, err)
-      }
+  /**
+   * Drops `key`'s cookie without throwing; true when it is verifiably gone — including when there
+   * is no cookie layer to hold one. `what` is the verb phrase the failure log reads with.
+   */
+  const dropCookie = (key: string, what: string): boolean => {
+    if (!cookies) {
+      return true
     }
+    try {
+      return cookies.remove(key)
+    } catch (err) {
+      log.warn(`Failed to ${what} "${key}" cookie:`, err)
+      return false
+    }
+  }
+
+  const removeItem = (key: string): boolean => {
+    const cookieRemoved = dropCookie(key, 'remove the')
+    // An absent layer can't hold a stale value, so it defaults to "removed".
     let localRemoved = true
     if (local) {
       try {
@@ -192,6 +200,9 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
           log.warn(`Failed to write "${key}" to cookies:`, err)
         }
       }
+      // A cookie surviving a failed write shadows the value below on reads — clear it in host-only
+      // mode, where reads fall back to localStorage; a shared one has no fallback and must stay.
+      const shadowCleared = cookiePersisted || crossSubdomain || dropCookie(key, 'clear the stale')
       let localPersisted = false
       if (local) {
         try {
@@ -202,17 +213,19 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
         }
       }
       // In cross-subdomain mode reads never fall back to localStorage, so a localStorage-only
-      // success is not persistence.
-      const persisted = crossSubdomain ? cookiePersisted : cookiePersisted || localPersisted
+      // success is not persistence; nor is one a stale cookie we could not clear still shadows.
+      const persisted = crossSubdomain ? cookiePersisted : cookiePersisted || (localPersisted && shadowCleared)
       // The init-time probe does not guarantee later writes land (cookies disabled mid-session,
       // quota filling), so say so once per key whenever the value will not survive a page load.
       if (!persisted && !warnedKeys.has(key)) {
         warnedKeys.add(key)
-        log.warn(
-          crossSubdomain
-            ? `Cross-subdomain cookie for "${key}" did not persist; this value will not survive a page load.`
-            : `Persisting "${key}" failed on every available storage layer; this value will not survive a page load.`,
-        )
+        let reason = `Persisting "${key}" failed on every available storage layer; this value will not survive a page load.`
+        if (crossSubdomain) {
+          reason = `Cross-subdomain cookie for "${key}" did not persist; this value will not survive a page load.`
+        } else if (!shadowCleared) {
+          reason = `Stale cookie for "${key}" could not be cleared and shadows the stored value; reads will return the previous one.`
+        }
+        log.warn(reason)
       }
       return persisted
     },
