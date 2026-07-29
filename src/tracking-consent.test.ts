@@ -210,6 +210,68 @@ describe('createTrackingConsent', () => {
     expect(expiryOf(localStorage.getItem(KEY)) ?? 0).toBeLessThan(Date.now() + 60_000)
   })
 
+  it('keeps the previously recorded choice when persisting a change fails', async () => {
+    // The old order deleted the record first: a removeItem that landed followed by a setItem that
+    // failed left the device empty, so the next init() fell back to the config seed — a recorded
+    // 'denied' effectively becoming the integrator's more permissive placeholder. The one write in
+    // the SDK that must not fail open.
+    localStorage.setItem(KEY, persisted('denied'))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
+    expect(consent.getConsent()).toBe('denied')
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('quota')
+    })
+    expect(consent.set('cookieless')).toBe(false)
+    expect(storedValue(localStorage.getItem(KEY))).toBe('denied')
+  })
+
+  it('warns when the retention-window restart cannot clear the old record', async () => {
+    // The remove is what restarts the window; when it silently no-ops, the new value carries the
+    // old deadline forward — early lapse, the safe direction — but nothing said the restart was
+    // skipped, so the early re-prompt read as a bug with no trail.
+    localStorage.setItem(KEY, persisted('denied', 5_000))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { persist: true })
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    expect(consent.set('granted')).toBe(true)
+    expect(storedValue(localStorage.getItem(KEY))).toBe('granted')
+    expect(expiryOf(localStorage.getItem(KEY)) ?? 0).toBeLessThan(Date.now() + 60_000)
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('retention window'))
+  })
+
+  it('reports losing the record when the restart rewrite fails after the old one was cleared', async () => {
+    // The narrow sequence the write-first order cannot save: the remove landed and the layer died
+    // before the rewrite. Nothing is on the device now, and that must be an error, not a silence.
+    localStorage.setItem(KEY, persisted('denied', 5_000))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { persist: true })
+    const realSet = localStorage.setItem.bind(localStorage)
+    let writes = 0
+    vi.spyOn(localStorage, 'setItem').mockImplementation((k: string, v: string) => {
+      writes += 1
+      if (writes >= 2) {
+        throw new Error('quota')
+      }
+      realSet(k, v)
+    })
+    expect(consent.set('granted')).toBe(false)
+    expect(logSpies.error).toHaveBeenCalled()
+  })
+
+  it('treats a lapsed consent record as unanswered, so the banner shows afresh', async () => {
+    // The maxAgeDays JSDoc promises exactly this compound: the record is deleted on read, the state
+    // falls back to the seed, isPending() is true again — and the lapsed record is not
+    // authoritative, so init() must not purge identity on its strength.
+    localStorage.setItem(KEY, persisted('denied', -1_000))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
+    expect(consent.getConsent()).toBe('granted')
+    expect(consent.isPending()).toBe(true)
+    expect(consent.isAuthoritative()).toBe(false)
+    expect(localStorage.getItem(KEY)).toBeNull()
+  })
+
   it('ignores an invalid persisted value and warns', async () => {
     localStorage.setItem(KEY, persisted('maybe'))
     const createTrackingConsent = await loadFactory()
@@ -473,7 +535,10 @@ describe('createTrackingConsent with a provided store', () => {
         return true
       },
       removeItem: (key: string) => {
+        // Conforms to PersistentStore: true when a subsequent read would miss. write() now consults
+        // this (the retention restart), so a void-returning fake reads as a failed removal.
         map.delete(key)
+        return true
       },
     }
   }

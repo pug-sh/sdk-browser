@@ -179,6 +179,18 @@ describe('createCookieLayer', () => {
       expect(createCookieLayer({ maxAgeDays: 30 } as never, docAt('https://app.example.com/'))).toBeNull()
     })
 
+    it('warns when a pinned domain still carries the removed maxAgeDays key, and pins anyway', () => {
+      // The other half of that upgrade path: JSON pinning a domain AND keeping the old lifetime
+      // key. The domain is stated, so the opt-in stands — but the deliberately shortened lifetime
+      // was silently replaced by the 365-day default, the harmful direction for a privacy setting.
+      const layer = createCookieLayer(
+        { domain: 'example.com', maxAgeDays: 30 } as never,
+        docAt('https://app.example.com/'),
+      )
+      expect(layer?.crossSubdomain).toBe(true)
+      expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('maxAgeDays'))
+    })
+
     it('treats a non-string or empty domain as disabled', () => {
       expect(createCookieLayer({ domain: '' } as never, docAt('https://app.example.com/'))).toBeNull()
       expect(createCookieLayer({ domain: 123 } as never, docAt('https://app.example.com/'))).toBeNull()
@@ -381,6 +393,58 @@ describe('createCookieLayer', () => {
     const layer = createCookieLayer(true, doc)
     expect(layer?.crossSubdomain).toBe(true)
     expect(layer?.get(KEY)).toBe(stored)
+  })
+
+  it('restores the twin with its original attributes, not a bare write', () => {
+    // The raw fallback dropped SameSite and secure, handing a previously-Secure identity cookie to
+    // plain http on the same host.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    const writes: string[] = []
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        writes.push(value)
+        if (value.includes(KEY) && value.includes('domain=.example.com')) return
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    const stored = persisted('anon-legacy')
+    doc.cookie = `${KEY}=${encodeURIComponent(stored)}; path=/`
+    createCookieLayer(true, doc)?.get(KEY)
+    // Not the promotion attempt (domain-scoped, dropped above), not the expiry (max-age=0), not the
+    // seed (no max-age) — the host-only restore is what is left.
+    const restore = writes.find(
+      w => w.startsWith(`${KEY}=`) && !w.includes('domain=') && w.includes('max-age=') && !w.includes('max-age=0'),
+    )
+    expect(restore).toBeDefined()
+    expect(restore).toContain('SameSite=Lax')
+    expect(restore).toContain('; secure')
+  })
+
+  it('warns when neither the promotion nor the restore lands, losing the twin', () => {
+    // The restore is the last copy anywhere — cross-subdomain reads have no localStorage fallback —
+    // so a restore that also fails must not be silent.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        // Allow the expiry (so the twin actually goes away), drop the promotion and the restore.
+        if (value.startsWith(`${KEY}=`) && !value.includes('max-age=0')) return
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    // Seeded through the real document — the dropping setter above must only affect SDK writes.
+    real.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
+    expect(createCookieLayer(true, doc)?.get(KEY)).toBeNull()
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('restore'))
   })
 })
 

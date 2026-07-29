@@ -94,6 +94,14 @@ export const configureUrlRedaction = (params?: readonly string[] | false): void 
         : new Set(params.map(p => String(p).toLowerCase()))
 }
 
+// The `_token` suffix rides the default list only: a replacement list is the integrator's exact
+// statement, and widening it behind their back would redact params they deliberately kept. The
+// suffix catches the framework-generated reset-link names (reset_password_token,
+// confirmation_token, invite_token, …) no finite list keeps up with.
+const isRedactedKey = (lowerKey: string): boolean =>
+  redactedParams !== null &&
+  (redactedParams.has(lowerKey) || (redactedParams === DEFAULT_REDACTED_SET && lowerKey.endsWith('_token')))
+
 /** Redacts matching params in a query string; null when nothing matched (leave the original alone). */
 const redactQuery = (query: string): string | null => {
   const params = new URLSearchParams(query)
@@ -102,7 +110,7 @@ const redactQuery = (query: string): string | null => {
   // away *later* duplicates of the same name, so no distinct key is skipped (fuzzed over 50k
   // query strings against a copying implementation, 0 divergences).
   for (const key of params.keys()) {
-    if (redactedParams?.has(key.toLowerCase())) {
+    if (isRedactedKey(key.toLowerCase())) {
       params.set(key, REDACTED)
       changed = true
     }
@@ -134,7 +142,9 @@ const redactFragment = (fragment: string): string | null => {
  * unchanged when nothing matched, so URLs are not re-encoded for no reason.
  */
 export const scrubUrl = (raw: string): string => {
-  if (!redactedParams || !raw || (!raw.includes('?') && !raw.includes('#'))) {
+  // `typeof` first: DOM-derived input is not reliably a string — a form control named "action"
+  // shadows `form.action` with the element itself — and the `includes` probes sit outside the try.
+  if (typeof raw !== 'string' || !redactedParams || !raw || (!raw.includes('?') && !raw.includes('#'))) {
     return raw
   }
   try {

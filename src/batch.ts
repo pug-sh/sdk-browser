@@ -44,6 +44,8 @@ const createMemoryQueueStorage = (maxQueueSize: number) => {
     peekUnlocked: () => buffer.slice(locked),
     rollback: () => (locked = 0),
     dispose: () => {},
+    // Shares the shape with the localStorage queue; there is no disk to sync to.
+    sync: () => {},
     // Consent teardown. Nothing to confirm — this queue never reaches the device — but it shares the
     // shape so callers can purge both without asking which is which.
     purge: () => {
@@ -156,6 +158,19 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
       persist()
     },
     /**
+     * Flushes the buffer to disk now, ahead of the 1s debounce. For the beacon-failure paths on
+     * page hide: events younger than the debounce exist only in memory, and the pending timer dies
+     * with the page — so "remain in the persisted queue" was false for exactly the tail (the click
+     * that triggered the navigation) most worth saving.
+     */
+    sync: () => {
+      if (persistTimer !== null) {
+        clearTimeout(persistTimer)
+        persistTimer = null
+      }
+      persist()
+    },
+    /**
      * Consent teardown: drop every queued event and remove the key from the device.
      *
      * Cancels the pending debounce first — otherwise a persist scheduled before the withdrawal
@@ -175,14 +190,19 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
           return true
         }
         // A Storage shim, an extension proxy or a quota-locked store no-ops the removal without
-        // throwing. Reported here because callers see one boolean covering both this and a dropped
-        // beacon, so only this site knows the cause.
+        // throwing. Reported here because pug.ts deliberately adds no message of its own when
+        // purgeQueue() is false — this site is the only diagnostic anywhere.
         log.error(
           'Failed to drop the persisted event queue — queued events carry sessionId and distinctId, and may be sent on a later visit.',
         )
         return false
       } catch (err) {
-        log.warn('Failed to remove the persisted event queue:', err)
+        // Same outcome as the no-op above — the key survives on the device — so the same level and
+        // the same consequence sentence; the mechanism of failure does not pick the severity.
+        log.error(
+          'Failed to drop the persisted event queue — queued events carry sessionId and distinctId, and may be sent on a later visit.',
+          err,
+        )
         return false
       }
     },
@@ -192,8 +212,8 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
   }
 }
 
-const createDefaultQueueStorage = (key: string, maxQueueSize: number) => {
-  if (isStorageAvailable()) {
+const createDefaultQueueStorage = (key: string, maxQueueSize: number, persistent: boolean) => {
+  if (persistent) {
     return createLocalStorageQueueStorage(key, maxQueueSize)
   }
   log.warn('localStorage not available, using in-memory queue (events will not persist across page loads)')
@@ -271,7 +291,12 @@ export const createBatchedTransport = (
   const storageKey = makeStorageKey(projectId, 'queue')
 
   const inner = createTransport(endpoint, apiKey)
-  const storage = createDefaultQueueStorage(storageKey, maxQueueSize)
+  // Decided once, here: recoverability is a property of the queue actually in use, not of a probe
+  // at report time — a probe that healed after creation promised "will retry on next init()" about
+  // a memory queue that dies with the page, and one that broke later condemned a disk-backed queue
+  // whose earlier persists survive.
+  const consentedQueuePersists = isStorageAvailable()
+  const storage = createDefaultQueueStorage(storageKey, maxQueueSize, consentedQueuePersists)
   // Cookieless events must never touch the device, so they get a memory-only twin of the queue. A
   // hard-killed tab loses whatever it holds (the beacon covers ordinary navigation); the alternative
   // is persisting event payloads, which is the thing cookieless mode promises not to do.
@@ -295,15 +320,15 @@ export const createBatchedTransport = (
    */
   const reportBeaconLoss = (consentedCount: number, cookielessCount: number, phase: string): void => {
     if (consentedCount > 0) {
-      // Only recoverable if there is somewhere to recover from: createDefaultQueueStorage falls back
-      // to an in-memory queue when localStorage is unavailable, where this loss is permanent too.
-      if (isStorageAvailable()) {
+      // Only recoverable if there is somewhere to recover from: the consented queue fell back to
+      // in-memory when localStorage was unavailable at creation, and that loss is permanent too.
+      if (consentedQueuePersists) {
         log.warn(
           `sendBeacon failed ${phase}; ${consentedCount} events remain in the persisted queue and will retry on next init().`,
         )
       } else {
         log.error(
-          `sendBeacon failed ${phase}; ${consentedCount} events were dropped — localStorage is unavailable, so the queue cannot be recovered.`,
+          `sendBeacon failed ${phase}; ${consentedCount} events were dropped — the queue is memory-only, so it cannot be recovered.`,
         )
       }
     }
@@ -431,6 +456,8 @@ export const createBatchedTransport = (
       // The return value was discarded here, so a blocked sendBeacon lost the cookieless tail with
       // no diagnostic at all — the one branch that said nothing about the one loss that is permanent.
       if (unlocked.length > 0 && !inner.beacon?.(unlocked)) {
+        // To disk before the report, so "remain in the persisted queue" is true when printed.
+        storage.sync()
         reportBeaconLoss(consentedTail.length, cookielessTail.length, 'on page hide')
       }
       return
@@ -461,6 +488,9 @@ export const createBatchedTransport = (
       if (b.length > 0) {
         cookielessStorage.rollback()
       }
+      // rollback() restores the buffer but not the disk: events younger than the persist debounce
+      // would die with the page while the report below promised they were queued.
+      storage.sync()
       reportBeaconLoss(a.length, b.length, 'on page hide')
     }
   }
@@ -503,7 +533,12 @@ export const createBatchedTransport = (
 
     /**
      * Empties both queues from the device. Returns false when a persisted key survived the removal
-     * or, with `send`, when the farewell beacon was dropped.
+     * — the boolean answers exactly one question, "did the queues leave the device", so it can feed
+     * the teardown chain whose meaning is device state. A dropped farewell beacon reports through
+     * reportBeaconLoss but does not flip the return: beacons fail routinely under analytics
+     * blockers, so folding delivery in made reset() "fail" on blocker-equipped browsers whose
+     * devices were verifiably clean — shown to users by the README's recipe as "your data may
+     * remain".
      *
      * `send` is true only for `reset()` — a logout, where consent is unchanged and those events were
      * agreed to at collection time. Every consent teardown passes false: transmitting after the user
@@ -519,7 +554,6 @@ export const createBatchedTransport = (
      * batch, whose later commit/rollback lands on an emptied buffer and is a harmless no-op.
      */
     purgeQueue: ({ send }: { send: boolean }): boolean => {
-      let delivered = true
       if (send && state !== 'destroyed') {
         const consentedTail = storage.peekUnlocked()
         const cookielessTail = cookielessStorage.peekUnlocked()
@@ -530,12 +564,11 @@ export const createBatchedTransport = (
         // The counts are captured before the call because purge() empties the buffers below.
         if (pending.length > 0 && !inner.beacon?.(pending)) {
           reportBeaconLoss(consentedTail.length, cookielessTail.length, 'during reset')
-          delivered = false
         }
       }
       const consentedPurged = storage.purge()
       const cookielessPurged = cookielessStorage.purge()
-      return consentedPurged && cookielessPurged && delivered
+      return consentedPurged && cookielessPurged
     },
     destroy: () => {
       state = 'destroyed'

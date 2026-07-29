@@ -227,15 +227,31 @@ export const createTrackingConsent = (
     if (!persist) {
       return true
     }
+    // The new value first, the window restart second: this is the one write that must not fail
+    // open. Removing first meant a remove that landed plus a set that failed left *no* record, and
+    // the next init() fell back to the config seed — a recorded 'denied' becoming a more permissive
+    // placeholder. Written first, the common failure (a dead layer fails every op) keeps the old
+    // record intact.
+    if (!store || !store.setItem(storageKey, value)) {
+      log.error('Failed to persist tracking consent to storage — opt in/out will not survive page reload.')
+      return false
+    }
     // A *changed* decision starts a fresh retention window: the store carries a deadline forward
     // across writes, so opting out on day 1 and back in on day 360 would leave a record lapsing in
     // five days. Guarded on the value differing, or a CMP re-asserting its state slides the clock.
     if (value !== persistedValue) {
-      store?.removeItem(storageKey)
-    }
-    if (!store || !store.setItem(storageKey, value)) {
-      log.error('Failed to persist tracking consent to storage — opt in/out will not survive page reload.')
-      return false
+      if (!store.removeItem(storageKey)) {
+        // The value above landed under the old deadline — early lapse, the safe direction — but the
+        // restart was skipped; say so, or the early re-prompt reads as a bug with no trail.
+        log.warn(
+          'Could not clear the previous consent record, so the retention window was not restarted; the new choice keeps the old deadline.',
+        )
+      } else if (!store.setItem(storageKey, value)) {
+        // The remove landed and the layer died before the rewrite — the one sequence write-first
+        // cannot save. Nothing is on the device now.
+        log.error('Failed to persist tracking consent to storage — opt in/out will not survive page reload.')
+        return false
+      }
     }
     persistedValue = value
     return true

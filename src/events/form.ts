@@ -25,8 +25,11 @@ export const setupFormTracking = (track: TrackFn) => {
       return
     }
     const form = event.target as HTMLFormElement
+    // Not necessarily a string despite the DOM types: a control named "action" shadows the IDL
+    // attribute with the element itself. '' rather than the element — serialized, it reads as data.
+    const action = form.action
     track(eventFormSubmit, {
-      action: scrubUrl(form.action),
+      action: typeof action === 'string' ? scrubUrl(action) : '',
       formId: form.id || '(anonymous)',
       formName: form.name,
     })

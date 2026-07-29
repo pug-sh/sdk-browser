@@ -62,4 +62,25 @@ describe('setupFormTracking', () => {
     expect(action).toContain('plan=pro')
     expect(action).not.toContain('s3cr3t')
   })
+
+  it('sends an empty action when a control named "action" shadows the form attribute', () => {
+    // In browsers a control named "action" shadows the IDL attribute (HTMLFormElement is
+    // [LegacyOverrideBuiltIns]) — the standard WordPress admin-ajax shape — so form.action is the
+    // input element, not a URL. jsdom does not implement the shadowing, so it is emulated here.
+    // Calling string methods on the element threw out of this capture-phase listener into the host
+    // page, and the submit was never tracked.
+    const track = vi.fn()
+    cleanup = setupFormTracking(track)
+    const { form } = buildForm()
+    const shadow = document.createElement('input')
+    shadow.type = 'hidden'
+    shadow.name = 'action'
+    shadow.value = 'do_thing'
+    form.appendChild(shadow)
+    Object.defineProperty(form, 'action', { value: shadow, configurable: true })
+
+    form.dispatchEvent(new Event('submit', { bubbles: true }))
+
+    expect(track).toHaveBeenCalledWith('form_submit', expect.objectContaining({ action: '', formId: 'signup' }))
+  })
 })

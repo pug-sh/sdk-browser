@@ -1095,6 +1095,28 @@ describe('cookieless mode', () => {
     setTrackingConsent('cookieless')
     expect(trackerSpies.pageView).toHaveBeenCalled()
   })
+
+  it('purges before reconciling capture, so the transition page_view survives', async () => {
+    // The real page-view tracker fires its initial page_view synchronously inside setup, and the
+    // transport enqueues synchronously — so with the purge running after apply(), the first event
+    // of every mid-page cookieless session landed in the queue and was destroyed unsent ~20 lines
+    // later. init() orders these correctly; the transition must match it.
+    const { init, setTrackingConsent } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied', autoCapture: true })
+    trackerSpies.pageView.mockImplementationOnce(track => {
+      ;(track as (kind: string) => void)('page_view')
+      return cleanupSpies.pageView
+    })
+    transportSpies.purgeQueue.mockClear()
+    transportSpies.send.mockClear()
+
+    setTrackingConsent('cookieless')
+
+    expect(transportSpies.send).toHaveBeenCalled()
+    const purgeOrder = transportSpies.purgeQueue.mock.invocationCallOrder.at(-1) ?? Number.POSITIVE_INFINITY
+    const sendOrder = transportSpies.send.mock.invocationCallOrder[0] ?? Number.NEGATIVE_INFINITY
+    expect(purgeOrder).toBeLessThan(sendOrder)
+  })
 })
 
 describe('respectGpc wiring', () => {
@@ -1129,6 +1151,20 @@ describe('respectGpc wiring', () => {
     expect(clearProfile).toHaveBeenCalled()
     expect(clearSession).toHaveBeenCalled()
     expect(transportSpies.purgeQueue).toHaveBeenCalled()
+  })
+
+  it('reports at error level when the init-time identity purge does not land', async () => {
+    // init() returns void, so this log is the only signal anywhere that an authoritative purge
+    // failed — a later optInTracking() would resume the pre-existing identity while
+    // getTrackingConsent() reports the new state as though it fully applied. A refactor calling
+    // purgePersistedIdentity() bare (dropping the `if (!…)`) leaves every other test green.
+    withGpc(true)
+    vi.mocked(clearProfile).mockReturnValueOnce(false)
+    const { init } = await importPug()
+
+    init('proj', { apiKey: 'k', autoCapture: false, trackingConsent: { respectGpc: true } })
+
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('Could not fully remove stored identity'))
   })
 
   it('keeps events flowing identity-free when onReject is cookieless', async () => {
@@ -1174,6 +1210,16 @@ describe('consent teardown contract', () => {
     // Consent is unchanged, so events collected while signed in were agreed to — the asymmetry the
     // flag exists for.
     expect(transportSpies.purgeQueue).toHaveBeenCalledWith({ send: true })
+  })
+
+  it('mentions the routine queue drop at debug on a non-authoritative non-granted init', async () => {
+    // The drop itself is deliberate policy (identified payloads must not sit on a device whose
+    // consent is not granted), but an integrator on the README's placeholder-denied CMP flow
+    // wondering where a hard-killed granted session's events went had nothing to find, even with
+    // debug on.
+    const { init } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    expect(logSpies.debug).toHaveBeenCalledWith(expect.stringContaining('queued events'))
   })
 
   // The boolean exists so a withdrawal that did not fully land is detectable rather than

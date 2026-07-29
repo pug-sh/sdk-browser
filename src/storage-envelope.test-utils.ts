@@ -1,8 +1,8 @@
 // Test-only wrappers around the retention envelope (encodeStored/decodeStored in utils.ts).
 //
-// Six suites assert against raw storage and each has to spell the `<expiry>|<value>` format. The
+// The suites that assert against raw storage each have to spell the `<expiry>|<value>` format. The
 // codec was centralized to stop those hand-rolled copies drifting; these wrappers are the same
-// argument one level up — the 60s default TTL and the `?? null` convention were stated six times.
+// argument one level up — the default TTL and the `?? null` convention were restated per suite.
 //
 // Excluded from tsconfig (so it never reaches dist/) but checked by tsconfig.typecheck, and outside
 // vitest's `*.test.ts` pattern (so it is not collected as a suite).

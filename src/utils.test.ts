@@ -47,6 +47,16 @@ describe('scrubUrl', () => {
     expect(scrubUrl('https://x.com/?Access_Token=abc')).toBe('https://x.com/?Access_Token=redacted')
   })
 
+  it('redacts every distinct key when a sensitive param appears more than once', () => {
+    // Pins the live params.keys() iteration: set() replaces the pair at the cursor and splices away
+    // later duplicates of the same name, so no *distinct* key may be skipped. A "tidy" rewrite to
+    // copied or index-based iteration can get this wrong silently — the fuzz run that validated it
+    // does not survive into the suite, this does.
+    expect(scrubUrl('https://x.com/?token=a&token=b&email=c&keep=1')).toBe(
+      'https://x.com/?token=redacted&email=redacted&keep=1',
+    )
+  })
+
   it('redacts an OAuth implicit-flow fragment, which never reaches a server except through us', () => {
     expect(scrubUrl('https://x.com/cb#access_token=abc&token_type=bearer')).toBe(
       'https://x.com/cb#access_token=redacted&token_type=bearer',
@@ -82,6 +92,14 @@ describe('scrubUrl', () => {
     expect(scrubUrl('not a url ?token=abc')).toBe('not a url ?token=abc')
   })
 
+  it('passes a non-string value through instead of throwing', () => {
+    // form.action is element-typed in browsers when a control is named "action" (HTMLFormElement is
+    // [LegacyOverrideBuiltIns], so named properties shadow IDL attributes), and this function's own
+    // JSDoc promises it never throws.
+    const shadowed = document.createElement('input')
+    expect(scrubUrl(shadowed as never)).toBe(shadowed)
+  })
+
   // The list is the feature. Named individually because dropping one — a rebase, or a "dedupe
   // apikey/api_key" tidy — otherwise reopens exactly the leak it was added for, silently.
   it.each([
@@ -106,6 +124,22 @@ describe('scrubUrl', () => {
     'token',
   ])('redacts %s by default', param => {
     expect(scrubUrl(`https://x.com/?${param}=s3cr3t`)).toBe(`https://x.com/?${param}=redacted`)
+  })
+
+  it('redacts any *_token param by default, covering framework reset-link names', () => {
+    // Rails/Devise ship reset_password_token, confirmation_token, invite_token — the single most
+    // common shape a reset link takes — and exact matching missed every one of them.
+    expect(scrubUrl('https://x.com/reset?reset_password_token=abc')).toBe(
+      'https://x.com/reset?reset_password_token=redacted',
+    )
+    expect(scrubUrl('https://x.com/?CONFIRMATION_TOKEN=abc')).toBe('https://x.com/?CONFIRMATION_TOKEN=redacted')
+  })
+
+  it('applies the *_token suffix rule only to the default list', () => {
+    // A replacement list is the integrator's exact statement; widening it behind their back would
+    // redact params they deliberately kept.
+    configureUrlRedaction(['email'])
+    expect(scrubUrl('https://x.com/?reset_password_token=abc')).toBe('https://x.com/?reset_password_token=abc')
   })
 
   it('honors a replacement list', () => {

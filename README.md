@@ -153,7 +153,7 @@ optOutTracking()
 |---|---|---|---|
 | `apiKey` | `string` | — | **Required.** API key. |
 | `endpoint` | `string` | `https://api.pugs.dev` | Backend base URL. |
-| `batch` | `Partial<BatchConfig>` | — | Batching overrides (size, wait, storage key). |
+| `batch` | `Partial<BatchConfig>` | — | Batching overrides (`maxSize`, `maxWaitMs`, `maxQueueSize`). |
 | `debug` | `boolean` | `false` | Logs internal activity (each event tracked, plus the consent-denied and `dryRun` drops) to `console.debug`. Turn it on when events aren't arriving. Warnings and errors are always logged regardless, so this can only widen what you see. See [Debugging](#debugging). |
 | `dryRun` | `boolean` | `false` | Builds events as normal but never sends them. Does not change consent, or what `isTrackingEnabled()` reports. |
 | `autoCapture` | `boolean \| AutoCaptureSelection` | `true` | Controls SDK-owned automatic listeners. `false` disables all automatic capture; an object is an **allowlist** enabling only the keys set to `true`, with every omitted key off. |
@@ -175,7 +175,7 @@ With `crossSubdomainTracking: true`, identity is written to a first-party cookie
 
 Lowering it applies to existing visitors, not just new devices: a stored deadline is clamped to the current window on the next write, so tightening retention reaches the population that already has identifiers.
 
-Two things it does not bound: the outbound event queue and the tab-liveness registry, which stay on raw `localStorage`. Both are cleared by `reset()` and by any consent teardown, so neither is a way for identity to survive a withdrawal — but a queue that cannot reach your endpoint is bounded by `batch.maxQueueSize`, not by this deadline.
+Two things it does not bound: the outbound event queue and the tab-liveness registry, which stay on raw `localStorage`. Both are cleared by every consent teardown, so neither is a way for identity to survive a withdrawal; `reset()` additionally sends-and-drops the queue, while the registry — per-tab timestamps, no identifiers — is left for the still-open tab and prunes its own stale entries. A queue that cannot reach your endpoint is bounded by `batch.maxQueueSize`, not by this deadline.
 
 ```ts
 init('your-project-id', {
@@ -343,7 +343,7 @@ Four device-side controls keep PII out of captured events. All run in the browse
 
 `$url`, `$referrer` and a form's `action` have known-sensitive query and fragment params replaced with `redacted` before anything else sees them — including `beforeSend`. The default list covers credentials and direct identifiers that ride reset links, magic links and OAuth callbacks:
 
-`access_token`, `api_key`, `apikey`, `auth`, `authorization`, `code`, `email`, `id_token`, `otp`, `passwd`, `password`, `phone`, `pwd`, `refresh_token`, `secret`, `sig`, `signature`, `ssn`, `token`
+`access_token`, `api_key`, `apikey`, `auth`, `authorization`, `code`, `email`, `id_token`, `otp`, `passwd`, `password`, `phone`, `pwd`, `refresh_token`, `secret`, `sig`, `signature`, `ssn`, `token` — plus any param ending in `_token`, which covers framework reset-link names like `reset_password_token`, `confirmation_token` and `invite_token`
 
 ```text
 https://app.example.com/reset?token=s3cr3t&plan=pro
@@ -352,7 +352,7 @@ https://app.example.com/reset?token=s3cr3t&plan=pro
 
 Matching is case-insensitive, and the fragment is covered too — an OAuth implicit-flow `#access_token=…` never reaches a server *except* through analytics. URLs with nothing to redact are passed through byte for byte.
 
-Pass `redactUrlParams` an array to replace the list, or `false` to capture URLs verbatim:
+Pass `redactUrlParams` an array to replace the list (exact match only — the `_token` suffix rule rides the default list, never a replacement), or `false` to capture URLs verbatim:
 
 ```ts
 init('your-project-id', { apiKey: 'your-api-key', redactUrlParams: ['token', 'orderId'] })
@@ -547,7 +547,7 @@ See **[WELL_KNOWN_EVENTS.md](./WELL_KNOWN_EVENTS.md)** for the full list — eac
 
 Several **runtime** changes affect every install, including JavaScript and one-tag:
 
-- **Tracking consent now defaults to `'cookieless'`, not `'granted'`.** An install that does not configure `trackingConsent` keeps sending events, but no longer writes a session, anonymous ID or cross-subdomain cookie, and `identify()` is a no-op. To keep the previous behavior, pass `trackingConsent: 'granted'` explicitly — and satisfy yourself that you have a basis for it, since it stores identifiers before any banner is answered.
+- **Tracking consent now defaults to `'cookieless'`, not `'granted'`.** An install that does not configure `trackingConsent` keeps sending events, but no longer writes a session, anonymous ID or cross-subdomain cookie, and `identify()` is a no-op. To keep the previous behavior, pass `trackingConsent: 'granted'` explicitly — and satisfy yourself that you have a basis for it, since it stores identifiers before any banner is answered. One upgrade-day side effect: any events the previous build left in the persisted queue (a hard-killed tab, an offline session) are dropped unsent on the first non-granted load, since a device whose consent is not `'granted'` must not hold or transmit identified payloads.
 - **Stored identifiers now expire** after `maxAgeDays` (default 365, absolute rather than sliding). Identity that used to live in `localStorage` forever now ages out, and the stored format changed — values written by an earlier version are unreadable, so they are treated as absent **and deleted** on first read — existing visitors get a fresh anonymous ID once, on upgrade, and any `identify()`ed external ID left by the old build leaves the device rather than sitting there under no deadline. On the CDN install, where each page pins its own `cdn.pugs.dev/vX.Y.Z` URL, roll the version out across all your pages together: with `crossSubdomainTracking` on, pages still pinned to the old version and pages on the new one do not understand each other's stored format and will each keep re-minting identity for the other.
 - **Sensitive URL params are redacted by default** in `$url`, `$referrer` and a form's `action` (`token`, `access_token`, `code`, `email`, `password`, …; [full list](#sensitive-url-params-are-redacted)). Pass `redactUrlParams: false` for the old verbatim behavior.
 - **Queued events are dropped, not sent, on consent withdrawal.** `optOutTracking()` / `setTrackingConsent()` leaving `'granted'` no longer beacons the queue out first. `reset()` still does.
@@ -591,6 +591,6 @@ The rest are **compile-time** breaks for TypeScript consumers only.
 | `crossSubdomainTracking: { maxAgeDays }` | The object arm is now `{ domain: string }` only | Move it to the top-level `maxAgeDays`, which also bounds `localStorage`. **On a one-tag install this changes behavior at runtime:** an object with no `domain` used to auto-discover the registrable domain, and now resolves to *off* with a warning — pass `true` to keep cross-subdomain identity |
 | `crossSubdomainTracking` is only enabled by `true` or `{ domain }` | A `data-options` JSON value of `{}`, `"true"`, `"false"` or a number no longer enables it (all four used to; `"false"` **enabled** it) | State the opt-in: `true` to discover the registrable domain, `{ domain: 'example.com' }` to pin one. TypeScript already rejected these |
 | `sanitizeUrl` removed | `init(p, { sanitizeUrl })` no longer typechecks. JS/one-tag installs get no error — just a warning, and only the default param redaction rather than your own masking | Use `beforeSend` — see the migration above |
-| `TrackingConsentConfig.default` renamed to `initial` | `init(p, { trackingConsent: { default: … } })` | Rename the key. `default` is a reserved word, so `const { default } = cfg` was a SyntaxError; `initial` destructures normally. A stale key now warns and **fails closed to `'denied'`** rather than silently seeding `'granted'` — including in `data-options` JSON, which no compiler checks |
+| `TrackingConsentConfig.default` renamed to `initial` | `init(p, { trackingConsent: { default: … } })` | Rename the key. `default` is a reserved word, so `const { default } = cfg` was a SyntaxError; `initial` destructures normally. A stale key now warns and **fails closed to `'denied'`** rather than silently falling back to the `'cookieless'` default seed — including in `data-options` JSON, which no compiler checks |
 
 The `track()` change also surfaced an int64 issue that the old permissive overload had been hiding: `sizeBytes` on the file, export and chat-attachment events is a `bigint`, so pass `1024n` rather than `1024`. It never encoded correctly as a plain number — the overload just made it compile.

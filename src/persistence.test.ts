@@ -90,6 +90,45 @@ describe('createPersistentStore', () => {
     expect(store?.getItem('k')).toBe('local-only')
   })
 
+  it('sweeps the localStorage mirror when the shared cookie is gone', () => {
+    // setItem mirrors every value into localStorage, but cross-subdomain reads never consult it — so
+    // once the shared cookie lapsed, the mirror (an identify()ed email, for a visitor the app never
+    // re-identifies) outlived every retention deadline and became readable again the moment the
+    // integrator turned cross-subdomain off. A genuine miss now deletes it.
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'jane@example.com')
+    jar.clear() // the cookie expired, or a sibling subdomain's opt-out deleted it
+    expect(store?.getItem('k')).toBeNull()
+    expect(localStorage.getItem('k')).toBeNull()
+  })
+
+  it('leaves the mirror alone when the cookie read throws', () => {
+    // A throwing jar (sandboxed frame, a blocking extension) is not evidence the cookie is gone;
+    // sweeping on it would destroy the only surviving copy over a transient failure.
+    const { layer } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    localStorage.setItem('k', persisted('v'))
+    layer.get = () => {
+      throw new Error('blocked')
+    }
+    expect(store?.getItem('k')).toBeNull()
+    expect(storedValue(localStorage.getItem('k'))).toBe('v')
+  })
+
+  it('warns when localStorage still holds a value after removal', () => {
+    // The exact adversary the read-back exists for — a shimmed store that no-ops without throwing.
+    // The cross-subdomain return value deliberately excludes this layer, so without a log the
+    // residue is invisible everywhere.
+    const { layer } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'v')
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    expect(store?.removeItem('k')).toBe(true)
+    store?.removeItem('k')
+    expect(logSpies.warn.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
+  })
+
   it('warns once when a cross-subdomain cookie write is silently dropped', () => {
     const { layer } = createFakeCookieLayer(true)
     layer.set = () => false
@@ -365,6 +404,23 @@ describe('retention', () => {
     expect(expiry - Date.now()).toBeGreaterThan(364 * 24 * 60 * 60 * 1000)
   })
 
+  it.each([0, -1])('warns and falls back on the boundary value %d', boundary => {
+    createPersistentStore(null, boundary)
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('must be a number greater than 0'))
+  })
+
+  it('warns and falls back when maxAgeDays is too large to make a deadline', () => {
+    // 1e308 is "a number greater than 0", but its product with a day in ms is Infinity — stamped,
+    // that is an envelope decodeStored rejects, so every value would be written and then deleted on
+    // its next read.
+    const store = createPersistentStore(null, 1e308)
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('too large'))
+    store?.setItem('k', 'v')
+    expect(store?.getItem('k')).toBe('v')
+    const expiry = expiryOf(localStorage.getItem('k')) ?? 0
+    expect(expiry - Date.now()).toBeLessThanOrEqual(365 * 24 * 60 * 60 * 1000)
+  })
+
   it('warns but honors a lifetime past the browser cookie cap when a cookie layer is in use', () => {
     createPersistentStore(createFakeCookieLayer().layer, 500)
     expect(logSpies.warn).toHaveBeenCalledWith(
@@ -409,6 +465,17 @@ describe('retention', () => {
     localStorage.setItem('k', persisted('v'))
     vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
     expect(store?.removeItem('k')).toBe(false)
+  })
+
+  it('reports a stale value that cannot be removed once per key, not once per read', () => {
+    // The session read runs getItem on every tracked event; against a store whose removeItem no-ops,
+    // an unthrottled report here logged an error per event for the life of the page.
+    const store = createPersistentStore(null)
+    localStorage.setItem('k', 'pre-envelope')
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    store?.getItem('k')
+    store?.getItem('k')
+    expect(logSpies.error).toHaveBeenCalledTimes(1)
   })
 })
 

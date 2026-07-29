@@ -17,7 +17,7 @@
  * Each `@ts-expect-error` is the guard and fails in the right direction: if the expected error stops
  * happening, tsc reports the unused directive itself (TS2578).
  */
-import type { CrossSubdomainConfig } from './cookie.js'
+import type { CookieLayer, CrossSubdomainConfig } from './cookie.js'
 
 // ── The legal shapes must compile ────────────────────────────────────────────────────────────────
 const off: CrossSubdomainConfig = false
@@ -39,5 +39,27 @@ const inferred: CrossSubdomainConfig = {}
 // @ts-expect-error cookie lifetime is the top-level `maxAgeDays` init option, not a cookie setting
 const lifetimeHere: CrossSubdomainConfig = { domain: 'acme.com', maxAgeDays: 180 }
 
+// Excess-property checking guards only fresh literals, so the literal case above closed nothing for
+// a config builder holding the old documented shape in a variable or spreading it — both compiled,
+// and resolveIntent then silently replaced the deliberately shortened lifetime with the 365-day
+// default. Closed by `maxAgeDays?: never` on the object arm, the EventIdentity pattern.
+const held = { domain: 'acme.com', maxAgeDays: 180 }
+
+// @ts-expect-error the stale lifetime arm must not compile from a variable either
+const heldConfig: CrossSubdomainConfig = held
+
+// @ts-expect-error nor via spread into a fresh literal
+const spreadConfig: CrossSubdomainConfig = { ...held }
+
+// `maxAgeSeconds` is required: a defaulted lifetime would silently give a cookie a duration nobody
+// chose, and this is the one load-bearing signature a quiet `?:`-plus-internal-default revert would
+// not trip anywhere else.
+declare const layer: CookieLayer
+
+// @ts-expect-error every cookie write must state the value's remaining lifetime
+layer.set('key', 'value')
+
 void inferred
 void lifetimeHere
+void heldConfig
+void spreadConfig
