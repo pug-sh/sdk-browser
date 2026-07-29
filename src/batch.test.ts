@@ -37,6 +37,11 @@ const okResponse = (accepted: number) => create(BatchCreateResponseSchema, { acc
 // A fresh project id per transport keeps each test's localStorage queue isolated.
 const freshProject = () => `proj-${projectCounter++}`
 
+// `Event` in this module is the protobuf message type (type-only import, erased at runtime), so a
+// bare `new Event('pagehide')` calls a shadowed identifier with no runtime value — it works only via
+// that erasure, and CodeQL reads it as invoking undefined. `window.Event` names the DOM constructor.
+const firePagehide = () => window.dispatchEvent(new window.Event('pagehide'))
+
 beforeEach(() => {
   vi.useFakeTimers()
   localStorage.clear()
@@ -165,7 +170,7 @@ describe('cookieless queue routing', () => {
     const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 10, maxWaitMs: 60_000 })
     await t.send(consentedEvt('a'))
     await t.send(cookielessEvt('c'))
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
     // Content-addressed rather than positional: find the call that carries our events instead of
     // assuming ours is last, so the assertion does not depend on listener registration order.
     const ourCall = (beacon.mock.calls as Array<[Event[]]>).find(([events]) =>
@@ -252,7 +257,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     // unless restored, so an unscoped one also sees other transports' teardown output.
     errSpy.mockClear()
     warnSpy.mockClear()
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
 
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('2 cookieless events'))
     // The consented queue contributed nothing, so nothing should claim to be recoverable.
@@ -270,7 +275,7 @@ describe('cookieless loss reporting and flush fairness', () => {
 
     errSpy.mockClear()
     warnSpy.mockClear()
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 events'))
     expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining('cookieless'))
@@ -336,7 +341,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     expect(beacon).toHaveBeenCalledTimes(1)
     expect((beacon.mock.calls[0] as unknown as [Event[]])[0].map(e => e.kind)).toEqual(['a', 'b'])
     // Nothing left to send: a later page hide carries nothing.
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
     expect(beacon).toHaveBeenCalledTimes(1)
   })
 
@@ -356,7 +361,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     expect(localStorage.getItem(queueKey) ?? '').not.toContain('"b"')
 
     beacon.mockReturnValue(false)
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
 
     expect(localStorage.getItem(queueKey) ?? '').toContain('"b"') // on disk before the debounce fired
     resolveFlush(okResponse(1))
@@ -425,7 +430,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     await t.send(evt('consented'))
     beacon.mockReturnValue(false)
 
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
 
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('cannot be recovered'))
     beacon.mockReturnValue(true) // afterEach destroy() delivers the leftover queue silently
@@ -443,7 +448,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     await t.send(evt('fresh'))
     beacon.mockReturnValue(false)
 
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
 
     expect(localStorage.getItem(`__pug_${project}_queue__`)).toContain('fresh')
     beacon.mockReturnValue(true) // afterEach destroy() delivers the leftover queue silently
@@ -464,7 +469,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     await t.send(evt('consented'))
     beacon.mockReturnValue(false)
 
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
 
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('cannot be recovered'))
     beacon.mockReturnValue(true) // afterEach destroy() delivers the leftover queue silently

@@ -57,8 +57,13 @@ const spreadConfig: CrossSubdomainConfig = { ...held }
 // not trip anywhere else.
 declare const layer: CookieLayer
 
+// Enveloped, so the missing lifetime is this call's only defect: with a bare `'value'` the directive
+// stayed used on the wrong error (not a StoredEnvelope) after exactly that `?:` revert — the same
+// overlapping-error trap `lifetimeHere` documents above.
+const enveloped = encodeStored('value', Date.now() + 60_000)
+
 // @ts-expect-error every cookie write must state the value's remaining lifetime
-layer.set('key', 'value')
+layer.set('key', enveloped)
 
 // The value must be enveloped (`StoredEnvelope`, minted by encodeStored): reads prefer the cookie
 // layer, and a bare value written through set() reads as undecodable and is deleted by the store's
@@ -68,7 +73,7 @@ layer.set('key', 'value')
 layer.set('key', 'value', 60)
 
 // …while the enveloped spelling compiles.
-layer.set('key', encodeStored('value', Date.now() + 60_000), 60)
+layer.set('key', enveloped, 60)
 
 void inferred
 void lifetimeHere
