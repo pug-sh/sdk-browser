@@ -83,4 +83,23 @@ describe('setupFormTracking', () => {
 
     expect(track).toHaveBeenCalledWith('form_submit', expect.objectContaining({ action: '', formId: 'signup' }))
   })
+
+  it('sends empty formName and the anonymous formId when controls named "name"/"id" shadow the attributes', () => {
+    // The same [LegacyOverrideBuiltIns] shadowing the "action" guard exists for, on far more common
+    // markup: <input name="name"> on any signup or contact form, <input name="id"> on any CRUD
+    // form. Unguarded, form.name shipped the element itself — serialized to "{}", or dropped with a
+    // warning on every form_start/submit when a framework's own enumerable props made
+    // JSON.stringify throw — and the truthy element defeated the '(anonymous)' fallback for formId.
+    const track = vi.fn()
+    cleanup = setupFormTracking(track)
+    const { form, input } = buildForm()
+    Object.defineProperty(form, 'name', { value: input, configurable: true })
+    Object.defineProperty(form, 'id', { value: input, configurable: true })
+
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    form.dispatchEvent(new Event('submit', { bubbles: true }))
+
+    expect(track).toHaveBeenCalledWith('form_start', { formId: '(anonymous)', formName: '' })
+    expect(track).toHaveBeenCalledWith('form_submit', expect.objectContaining({ formId: '(anonymous)', formName: '' }))
+  })
 })

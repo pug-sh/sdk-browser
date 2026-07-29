@@ -1,6 +1,13 @@
 import type { CookieLayer } from './cookie.js'
 import { log } from './logger.js'
-import { DEFAULT_MAX_AGE_DAYS, decodeStored, encodeStored, isStorageAvailable, SECONDS_PER_DAY } from './utils.js'
+import {
+  DEFAULT_MAX_AGE_DAYS,
+  decodeStored,
+  encodeStored,
+  isStorageAvailable,
+  SECONDS_PER_DAY,
+  safeStringify,
+} from './utils.js'
 
 /**
  * Layered key-value persistence: an optional cross-subdomain cookie layer over localStorage.
@@ -14,12 +21,18 @@ export interface PersistentStore {
   /**
    * A read can delete: an expired or undecodable stored value is removed on sight rather than
    * ignored (see Retention in CLAUDE.md), logging an error when that removal cannot be confirmed.
+   *
+   * `legacy: 'adopt'` returns a pre-envelope (undecodable) value instead of null — it is still
+   * removed from the device either way, so retention cannot be evaded; the caller re-persists
+   * anything it validates through setItem, which stamps a fresh envelope. For the consent record
+   * only: identifiers deliberately stay on the default, where a bare value reads as absent.
    */
-  getItem(key: string): string | null
+  getItem(key: string, opts?: { readonly legacy?: 'drop' | 'adopt' }): string | null
   /**
    * Returns true when the value will be readable on the next page load. In cross-subdomain mode
    * that requires the cookie write to land (reads trust only the cookie); otherwise any layer
-   * suffices.
+   * suffices — provided a stale cookie left by a failed cookie write was cleared, since reads
+   * prefer the cookie and an uncleared one shadows the localStorage value with the previous one.
    */
   setItem(key: string, value: string): boolean
   /**
@@ -45,8 +58,11 @@ const resolveMaxAgeMs = (maxAgeDays: unknown, hasCookies: boolean): number => {
     return DEFAULT_MAX_AGE_DAYS * MS_PER_DAY
   }
   if (typeof maxAgeDays !== 'number' || !Number.isFinite(maxAgeDays) || maxAgeDays <= 0) {
+    // safeStringify: the value being rejected is exactly the kind (bigint, circular) that makes
+    // JSON.stringify throw, which downgraded the whole SDK to memory-only persistence via init()'s
+    // generic catch instead of warning about one option.
     log.warn(
-      `maxAgeDays ${JSON.stringify(maxAgeDays)} must be a number greater than 0; using the ${DEFAULT_MAX_AGE_DAYS}-day default.`,
+      `maxAgeDays ${safeStringify(maxAgeDays)} must be a number greater than 0; using the ${DEFAULT_MAX_AGE_DAYS}-day default.`,
     )
     return DEFAULT_MAX_AGE_DAYS * MS_PER_DAY
   }
@@ -225,7 +241,7 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
 
   return {
     crossSubdomain,
-    getItem: key => {
+    getItem: (key, opts) => {
       const raw = readRaw(key)
       const record = decodeStored(raw)
       if (!record) {
@@ -233,6 +249,12 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
         // an identifier retention can never reach.
         if (raw !== null) {
           dropStale(key, 'is not in the retention format')
+          // 'adopt' hands the bare value back after the removal above, instead of reading it as
+          // absent — the migration path for the consent record, whose silent loss reverted a
+          // recorded 'denied' to the config seed. The caller validates and re-persists it.
+          if (opts?.legacy === 'adopt') {
+            return raw
+          }
         }
         return null
       }
@@ -302,10 +324,11 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
 }
 
 /**
- * Resolves the optional store argument shared by configureSession / configureProfile /
- * createTrackingConsent. `undefined` (the caller omitted it — non-init internal callers and tests)
- * builds a localStorage-only store; an explicit `null` (init() found no usable layer) means no
- * persistence; a provided store is used as-is.
+ * Resolves the store argument shared by configureSession / configureProfile / createTrackingConsent
+ * — a genuinely optional trailing parameter on the last, a required positional (typed
+ * `| undefined`) on the other two. `undefined` (non-init internal callers and tests) builds a
+ * localStorage-only store; an explicit `null` (init() found no usable layer) means no persistence;
+ * a provided store is used as-is.
  */
 export const resolveStore = (provided?: PersistentStore | null): PersistentStore | null =>
   provided === undefined ? createPersistentStore(null) : provided

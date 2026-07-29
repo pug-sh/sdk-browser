@@ -144,6 +144,37 @@ describe('createTrackingConsent', () => {
     expect(consent.optIn()).toBe(true)
   })
 
+  it('rejects an unstringifiable seed without throwing out of the factory', async () => {
+    // The validators interpolate the very value they reject, and a circular object (or a bigint)
+    // made JSON.stringify itself throw — out of the one factory init() calls unguarded, so init()
+    // died mid-setup on exactly the input the validation existed to reject.
+    const circular: Record<string, unknown> = {}
+    circular.self = circular
+    const createTrackingConsent = await loadFactory()
+    let consent: ReturnType<typeof createTrackingConsent> | undefined
+    expect(() => {
+      consent = createTrackingConsent('proj', { initial: circular } as never)
+    }).not.toThrow()
+    expect(consent?.getConsent()).toBe('denied')
+    expect(logSpies.warn).toHaveBeenCalled()
+  })
+
+  it('fails closed without throwing when set() receives an unstringifiable value', async () => {
+    // Same throw, worse funnel: set() is reached through the public setTrackingConsent, so a CMP
+    // handing over a malformed object took down the caller instead of returning false.
+    const circular: Record<string, unknown> = {}
+    circular.self = circular
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', 'granted')
+    let result: boolean | undefined
+    expect(() => {
+      result = consent.set(circular as never)
+    }).not.toThrow()
+    expect(result).toBe(false)
+    expect(consent.getConsent()).toBe('denied')
+    expect(logSpies.error).toHaveBeenCalled()
+  })
+
   // I8: a persist that does not land leaves the opt-out in memory only, so the next page load falls
   // back to the seed and silently re-consents the user. The caller has to be able to see that.
   it('reports failure when persistence was requested but is unavailable', async () => {
@@ -186,6 +217,35 @@ describe('createTrackingConsent', () => {
     localStorage.setItem(KEY, persisted('denied'))
     const createTrackingConsent = await loadFactory()
     expect(createTrackingConsent('proj', { initial: 'granted', persist: true }).getConsent()).toBe('denied')
+  })
+
+  it('adopts a legacy pre-envelope consent record as the user’s recorded choice', async () => {
+    // The retention envelope made every pre-envelope value unreadable, and getItem deletes what it
+    // cannot decode — sound for identifiers, which self-heal, but this key records a *refusal*:
+    // deleted unread, a user who clicked Reject on the previous build came back on the config seed
+    // (the README's own migration advice is `initial: 'granted'`), fully tracked until they
+    // re-answered a banner they had already answered.
+    localStorage.setItem(KEY, 'denied') // what a pre-envelope build persisted
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
+    expect(consent.getConsent()).toBe('denied')
+    expect(consent.isPending()).toBe(false) // an answer, not a seed — no re-prompt
+    expect(consent.isAuthoritative()).toBe(true) // init()'s identity purge honors it
+    // Re-persisted through the store, so it now carries a deadline like any other record.
+    expect(storedValue(localStorage.getItem(KEY))).toBe('denied')
+    expect(expiryOf(localStorage.getItem(KEY)) ?? 0).toBeGreaterThan(Date.now())
+  })
+
+  it('drops a legacy record that is not a valid consent state and falls back to the seed', async () => {
+    // Adoption is gated on isConsent(): corruption is not a choice. The store already removed the
+    // value (adopt never skips the removal), so nothing is stranded outside retention either.
+    localStorage.setItem(KEY, 'yes-please')
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'cookieless', persist: true })
+    expect(consent.getConsent()).toBe('cookieless')
+    expect(consent.isPending()).toBe(true)
+    expect(localStorage.getItem(KEY)).toBeNull()
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('invalid'))
   })
 
   it('restarts the retention window when the user changes their mind', async () => {
@@ -257,6 +317,20 @@ describe('createTrackingConsent', () => {
     })
     expect(consent.set('granted')).toBe(false)
     expect(logSpies.error).toHaveBeenCalled()
+  })
+
+  it('does not run the window-restart cycle on the first-ever persist', async () => {
+    // persistedValue starts null, so the first set() after { persist: true } on a fresh device took
+    // the value-changed branch and issued a needless remove+rewrite — two extra cookie operations
+    // in cross-subdomain mode, a spurious "could not clear the previous consent record" warning
+    // when the remove failed with no previous record to clear, and a pointless walk through the
+    // one remove-landed-rewrite-failed sequence write-first cannot save.
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { persist: true })
+    const removals = vi.spyOn(localStorage, 'removeItem')
+    expect(consent.set('granted')).toBe(true)
+    expect(storedValue(localStorage.getItem(KEY))).toBe('granted')
+    expect(removals).not.toHaveBeenCalledWith(KEY)
   })
 
   it('treats a lapsed consent record as unanswered, so the banner shows afresh', async () => {
@@ -391,6 +465,23 @@ describe('respectGpc', () => {
     expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('cookieless')
     withGpc(false)
     expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('cookieless')
+  })
+
+  it('warns when the signal cannot be read, instead of hiding it at debug', async () => {
+    // isGpcEnabled's own comment states the requirement — a throwing getter (a privacy extension)
+    // must not silently disable an opt-in signal — but log.debug is off in every default install,
+    // so the user's standing opt-out fell back to the integrator's seed with nothing visible
+    // saying why. Only respectGpc integrators reach this, once per init(); a warn cannot spam.
+    Object.defineProperty(navigator, 'globalPrivacyControl', {
+      get() {
+        throw new Error('extension says no')
+      },
+      configurable: true,
+    })
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { respectGpc: true })
+    expect(consent.getConsent()).toBe('cookieless') // treated as absent
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Global Privacy Control'), expect.anything())
   })
 
   it('counts as decided, so no banner re-prompts a user who already opted out globally', async () => {

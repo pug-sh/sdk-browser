@@ -362,17 +362,18 @@ describe('retention', () => {
   })
 
   it('starts a fresh window when the cached deadline has lapsed', () => {
-    const store = createPersistentStore(null, 10)
-    localStorage.setItem('k', `${Date.now() + 40}|v`)
-    store?.getItem('k') // caches the near deadline
-    return new Promise<void>(resolve => {
-      setTimeout(() => {
-        store?.setItem('k', 'v2')
-        const expiry = expiryOf(localStorage.getItem('k')) ?? 0
-        expect(expiry - Date.now()).toBeGreaterThan(9 * 24 * 60 * 60 * 1000)
-        resolve()
-      }, 60)
-    })
+    vi.useFakeTimers()
+    try {
+      const store = createPersistentStore(null, 10)
+      localStorage.setItem('k', `${Date.now() + 40}|v`)
+      store?.getItem('k') // caches the near deadline
+      vi.advanceTimersByTime(60)
+      store?.setItem('k', 'v2')
+      const expiry = expiryOf(localStorage.getItem('k')) ?? 0
+      expect(expiry - Date.now()).toBeGreaterThan(9 * 24 * 60 * 60 * 1000)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('stamps maxAgeDays on a first write', () => {
@@ -446,6 +447,44 @@ describe('retention', () => {
     localStorage.setItem('k', 'bare-legacy-value')
     expect(store?.getItem('k')).toBeNull()
     expect(localStorage.getItem('k')).toBeNull()
+  })
+
+  it('hands a pre-envelope value to a caller that asked to adopt it, still removing it from the device', () => {
+    // The migration hook the consent record needs: a legacy bare value is perfectly legible — it
+    // fails decodeStored only for carrying no deadline — and for the one key whose loss is a
+    // consent regression rather than a metrics blip, deleting it unread turned a recorded 'denied'
+    // into the config seed. Device state matches the drop path (removed either way, so retention
+    // cannot be evaded); only the return differs, and a caller that validates the value
+    // re-persists it through setItem, which stamps a fresh envelope.
+    const store = createPersistentStore(null)
+    localStorage.setItem('k', 'denied')
+    expect(store?.getItem('k', { legacy: 'adopt' })).toBe('denied')
+    expect(localStorage.getItem('k')).toBeNull()
+  })
+
+  it('does not resurrect an expired enveloped value under adopt', () => {
+    // Expiry is not legacy: a decodable record past its deadline stays null under either option —
+    // adopt widens only the undecodable arm.
+    const store = createPersistentStore(null)
+    localStorage.setItem('k', persisted('v', -60_000))
+    expect(store?.getItem('k', { legacy: 'adopt' })).toBeNull()
+    expect(localStorage.getItem('k')).toBeNull()
+  })
+
+  it('reads a live enveloped value under adopt exactly like a plain read', () => {
+    const store = createPersistentStore(null)
+    localStorage.setItem('k', persisted('v'))
+    expect(store?.getItem('k', { legacy: 'adopt' })).toBe('v')
+    expect(storedValue(localStorage.getItem('k'))).toBe('v')
+  })
+
+  it('rejects an unstringifiable maxAgeDays with a warning instead of throwing', () => {
+    // The warning interpolates the very value being rejected, and a bigint (or a circular object
+    // out of data-options JSON… less so, but the one-tag path is untyped) made JSON.stringify
+    // throw — so init()'s wrapper caught it and silently downgraded the whole SDK to memory-only
+    // persistence behind a generic message that never named the offending option.
+    expect(() => createPersistentStore(null, 5n as never)).not.toThrow()
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('maxAgeDays'))
   })
 
   it('shortens an existing deadline when maxAgeDays is lowered', () => {

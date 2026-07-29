@@ -87,9 +87,27 @@ describe('scrubUrl', () => {
     )
   })
 
-  it('passes through empty and unparseable input', () => {
+  it('passes through empty input', () => {
     expect(scrubUrl('')).toBe('')
-    expect(scrubUrl('not a url ?token=abc')).toBe('not a url ?token=abc')
+  })
+
+  // Fail closed: this is a privacy control, so input too malformed for `new URL` still gets its
+  // params redacted at the string level rather than passing through raw. The reachable funnel is
+  // form.action — when the browser cannot parse the attribute against the base URL, the IDL getter
+  // returns the raw attribute text, template bugs (a space in the host) included.
+  it('redacts query params even when the URL does not parse', () => {
+    expect(scrubUrl('not a url ?token=abc')).toBe('not a url ?token=redacted')
+    expect(scrubUrl('http://ex ample.com/reset?token=s3cr3t')).toBe('http://ex ample.com/reset?token=redacted')
+  })
+
+  it('redacts fragment params even when the URL does not parse', () => {
+    expect(scrubUrl('bad url#access_token=abc')).toBe('bad url#access_token=redacted')
+    expect(scrubUrl('bad url#/route?token=a&page=2')).toBe('bad url#/route?token=redacted&page=2')
+  })
+
+  it('returns unparseable input byte-identical when nothing matches', () => {
+    expect(scrubUrl('not a url ?page=2')).toBe('not a url ?page=2')
+    expect(scrubUrl('bad url#/settings/billing')).toBe('bad url#/settings/billing')
   })
 
   it('passes a non-string value through instead of throwing', () => {
@@ -157,6 +175,35 @@ describe('scrubUrl', () => {
   it('captures URLs verbatim when redaction is disabled', () => {
     configureUrlRedaction(false)
     expect(scrubUrl('https://x.com/reset?token=abc123')).toBe('https://x.com/reset?token=abc123')
+  })
+
+  it('keeps the default list when configured with an empty array', () => {
+    // init() warns and never forwards []; this re-defends the direct call, where an empty Set is
+    // truthy and matches nothing — disabling redaction exactly like `false`, but silently.
+    configureUrlRedaction([])
+    expect(scrubUrl('https://x.com/reset?token=abc123')).toBe('https://x.com/reset?token=redacted')
+  })
+})
+
+describe('safeStringify', () => {
+  it('stringifies the values JSON.stringify throws or gives up on', async () => {
+    const { safeStringify } = await import('./utils.js')
+    const circular: Record<string, unknown> = {}
+    circular.self = circular
+    expect(safeStringify(circular)).toBe('[object Object]') // circular → String() fallback
+    expect(safeStringify(5n)).toBe('5') // bigint throws in JSON.stringify
+    expect(safeStringify(undefined)).toBe('undefined') // JSON.stringify returns undefined
+    expect(safeStringify({ a: 1 })).toBe('{"a":1}') // the ordinary case is unchanged
+    expect(
+      safeStringify({
+        toString() {
+          throw new Error('nope')
+        },
+        toJSON() {
+          throw new Error('nope')
+        },
+      }),
+    ).toBe('[unrepresentable]') // even String() throwing must not escape a log call
   })
 })
 

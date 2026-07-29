@@ -7,6 +7,21 @@ export const eventFormSubmit = 'form_submit' satisfies WellKnownEventName
 export const setupFormTracking = (track: TrackFn) => {
   const formsSeen = new WeakSet<HTMLFormElement>()
 
+  // Like `action` below, none of these reads is necessarily a string despite the DOM types:
+  // HTMLFormElement is [LegacyOverrideBuiltIns], so a control named "id" or "name" — routine markup
+  // on signup, contact and CRUD forms — shadows the IDL attribute with the element itself. Shipped
+  // unguarded, the element serialized as "{}" (or was dropped with a warning on every
+  // form_start/submit when a framework's own enumerable props made JSON.stringify throw), and its
+  // truthiness defeated the '(anonymous)' fallback. A non-string reads as absent.
+  const formIdentity = (form: HTMLFormElement): { formId: string; formName: string } => {
+    const id = form.id
+    const name = form.name
+    return {
+      formId: typeof id === 'string' && id !== '' ? id : '(anonymous)',
+      formName: typeof name === 'string' ? name : '',
+    }
+  }
+
   // form_start fires on first input, not focus — avoids false positives from tab navigation
   const onInput = (event: Event) => {
     if (!event.target) {
@@ -16,7 +31,7 @@ export const setupFormTracking = (track: TrackFn) => {
 
     if (form && !formsSeen.has(form)) {
       formsSeen.add(form)
-      track(eventFormStart, { formId: form.id || '(anonymous)', formName: form.name })
+      track(eventFormStart, formIdentity(form))
     }
   }
 
@@ -25,13 +40,11 @@ export const setupFormTracking = (track: TrackFn) => {
       return
     }
     const form = event.target as HTMLFormElement
-    // Not necessarily a string despite the DOM types: a control named "action" shadows the IDL
-    // attribute with the element itself. '' rather than the element — serialized, it reads as data.
+    // '' rather than the shadowing element — serialized, it reads as data.
     const action = form.action
     track(eventFormSubmit, {
       action: typeof action === 'string' ? scrubUrl(action) : '',
-      formId: form.id || '(anonymous)',
-      formName: form.name,
+      ...formIdentity(form),
     })
   }
 

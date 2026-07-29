@@ -24,10 +24,12 @@ export const configureProfile = (
   externalIdKey = makeStorageKey(projectId, 'external_id')
 
   // Restore persisted externalId from a previous identify() call into memory (it is consumed only by
-  // the consent-gated track()/identify()). Re-write it so a cookie-backed store refreshes its expiry
-  // for active users — but only while consent permits persisting identity: writing here while denied
-  // would extend an identity cookie's TTL (and re-broadcast it to sibling subdomains) for a user who
-  // has not consented. When no getter is passed (non-init callers, tests) the refresh is unchanged.
+  // the consent-gated track()/identify()). Re-write it so a cookie-backed store keeps the record
+  // present up to its stored deadline — the write carries the deadline forward and clamps it, so it
+  // can never *extend* retention (see Retention in CLAUDE.md) — but only while consent permits
+  // persisting identity: writing here while denied would re-issue an identity cookie (and
+  // re-broadcast it to sibling subdomains) for a user who has not consented. When no getter is
+  // passed (non-init callers, tests) the refresh is unchanged.
   const stored = store?.getItem(externalIdKey)
   if (stored) {
     // The reserved prefix belongs to the server's derived cookieless identities. identify() rejects
@@ -66,7 +68,8 @@ export const getAnonymousId = (): string => {
   if (stored) {
     if (stored.startsWith('anon-')) {
       anonymousId = stored
-      // Re-write so a cookie-backed store refreshes its expiry for active users.
+      // Re-write so a cookie-backed store keeps the value present up to its deadline — which the
+      // carried-forward stamp means this can never extend.
       store?.setItem(storageKey, stored)
       return anonymousId
     }

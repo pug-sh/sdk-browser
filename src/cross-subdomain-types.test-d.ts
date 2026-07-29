@@ -18,6 +18,7 @@
  * happening, tsc reports the unused directive itself (TS2578).
  */
 import type { CookieLayer, CrossSubdomainConfig } from './cookie.js'
+import { encodeStored } from './utils.js'
 
 // ── The legal shapes must compile ────────────────────────────────────────────────────────────────
 const off: CrossSubdomainConfig = false
@@ -58,6 +59,16 @@ declare const layer: CookieLayer
 
 // @ts-expect-error every cookie write must state the value's remaining lifetime
 layer.set('key', 'value')
+
+// The value must be enveloped (`StoredEnvelope`, minted by encodeStored): reads prefer the cookie
+// layer, and a bare value written through set() reads as undecodable and is deleted by the store's
+// next getItem — silent identity loss the brand turns into a compile error at the seam.
+
+// @ts-expect-error a bare string is not an enveloped stored value
+layer.set('key', 'value', 60)
+
+// …while the enveloped spelling compiles.
+layer.set('key', encodeStored('value', Date.now() + 60_000), 60)
 
 void inferred
 void lifetimeHere

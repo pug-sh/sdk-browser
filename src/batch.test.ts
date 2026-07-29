@@ -322,6 +322,46 @@ describe('cookieless loss reporting and flush fairness', () => {
     errSpy.mockRestore()
   })
 
+  it('beacons the pending events on a reset purge before dropping them', async () => {
+    // The happy path of { send: true }: a logout delivers what was collected under unchanged
+    // consent before the queues leave the device. The blocked-beacon test above proves the call
+    // only transitively (reportBeaconLoss cannot fire without it); this pins the payload going out
+    // and the device ending clean.
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('a'))
+    await t.send(evt('b'))
+
+    expect(t.purgeQueue({ send: true })).toBe(true)
+
+    expect(beacon).toHaveBeenCalledTimes(1)
+    expect((beacon.mock.calls[0] as unknown as [Event[]])[0].map(e => e.kind)).toEqual(['a', 'b'])
+    // Nothing left to send: a later page hide carries nothing.
+    window.dispatchEvent(new Event('pagehide'))
+    expect(beacon).toHaveBeenCalledTimes(1)
+  })
+
+  it('persists the debounced tail before reporting a blocked beacon during an in-flight flush', async () => {
+    // beaconFlush's in-flight branch: the flush owns the locked batch, so only the unlocked tail
+    // is beaconed. When that beacon is blocked, sync() must flush the queue's 1s persist debounce
+    // first — the tail is younger than the debounce, so without the sync "remain in the persisted
+    // queue" was false for exactly the click that triggered the navigation.
+    let resolveFlush: (v: unknown) => void = () => {}
+    sendBatch.mockImplementation(() => new Promise(resolve => (resolveFlush = resolve)))
+    const p = freshProject()
+    const queueKey = `__pug_${p}_queue__`
+    const t = createBatchedTransport(ENDPOINT, KEY, p, { maxSize: 1, maxWaitMs: 60_000 })
+
+    await t.send(evt('a')) // maxSize 1 → flush() → in flight, lock held on 'a'
+    await t.send(evt('b')) // the tail: buffered, persist debounced — memory-only right now
+    expect(localStorage.getItem(queueKey) ?? '').not.toContain('"b"')
+
+    beacon.mockReturnValue(false)
+    window.dispatchEvent(new Event('pagehide'))
+
+    expect(localStorage.getItem(queueKey) ?? '').toContain('"b"') // on disk before the debounce fired
+    resolveFlush(okResponse(1))
+  })
+
   it('reports a surviving queue key at error level and returns false', async () => {
     // The last-signal path: pug.ts deliberately logs nothing when purgeQueue() is false, on the
     // strength of this site reporting. A revert to `return true` after removeItem leaves a logout

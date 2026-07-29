@@ -179,6 +179,18 @@ describe('createCookieLayer', () => {
       expect(createCookieLayer({ maxAgeDays: 30 } as never, docAt('https://app.example.com/'))).toBeNull()
     })
 
+    it('does not warn about keys a config builder left explicitly undefined', () => {
+      // { domain, maxAgeDays: undefined } is what spreading an unset legacy optional produces; the
+      // key configures nothing, so "ignores [maxAgeDays]" reported a problem that was not there.
+      // Object.keys sees the key either way; the extras filter must not.
+      const layer = createCookieLayer(
+        { domain: 'example.com', maxAgeDays: undefined } as never,
+        docAt('https://app.example.com/'),
+      )
+      expect(layer?.crossSubdomain).toBe(true)
+      expect(logSpies.warn).not.toHaveBeenCalled()
+    })
+
     it('warns when a pinned domain still carries the removed maxAgeDays key, and pins anyway', () => {
       // The other half of that upgrade path: JSON pinning a domain AND keeping the old lifetime
       // key. The domain is stated, so the opt-in stands — but the deliberately shortened lifetime
@@ -368,6 +380,63 @@ describe('createCookieLayer', () => {
     doc.cookie = `${KEY}=anon-legacy; path=/`
     expect(createCookieLayer(true, doc)?.get(KEY)).toBeNull()
     expect(docAt('https://www.example.com/', jar).cookie).not.toContain('anon-legacy')
+  })
+
+  it('discards an expired host-only twin instead of promoting it', () => {
+    // The expiry write leaves nothing, remainingSeconds() sees the lapsed deadline, and the twin is
+    // dropped — never promoted. `seconds > 0` is the whole guard between an expired identity cookie
+    // and a promotion that re-widens it to the registrable domain with whatever positive lifetime a
+    // "safe" clamp would grant it; a mutation flipping it to Math.max(1, seconds) survived the
+    // entire suite, so the discard is pinned here.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    const writes: string[] = []
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        writes.push(value)
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    doc.cookie = `${KEY}=${encodeURIComponent(persisted('anon-old', -60_000))}; path=/`
+    expect(createCookieLayer(true, doc)?.get(KEY)).toBeNull()
+    const promotion = writes.find(w => w.startsWith(`${KEY}=`) && w.includes('domain=') && !w.includes('max-age=0'))
+    expect(promotion).toBeUndefined()
+  })
+
+  it('warns and retries on a later access when twin reconciliation throws mid-way', () => {
+    // reconciledKeys was marked before the try: a throw at the expiry write latched the key as
+    // done, so the stale twin kept shadowing the shared cookie for the whole page load with no
+    // retry — the exact condition the function exists to prevent — and the only trace was a debug
+    // line no default install can see.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    let expiryAttempts = 0
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        if (value.startsWith(`${KEY}=`) && value.includes('max-age=0') && !value.includes('domain=')) {
+          expiryAttempts += 1
+          throw new Error('blocked')
+        }
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    real.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
+    const layer = createCookieLayer(true, doc)
+
+    layer?.get(KEY)
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('reconcil'), expect.anything())
+
+    layer?.get(KEY)
+    expect(expiryAttempts).toBe(2) // un-latched on failure, so the next access retries
+    expect(logSpies.warn).toHaveBeenCalledTimes(1) // …while the warning stays once per key
   })
 
   it('restores the host-only twin when promoting it to the shared cookie fails', () => {

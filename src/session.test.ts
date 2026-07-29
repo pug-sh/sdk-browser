@@ -79,6 +79,24 @@ describe('configureSession', () => {
 })
 
 describe('resolveSessionId', () => {
+  it('warns when a stored session record parses but has the wrong shape', () => {
+    // The parse-throw path warned while a record that parsed and failed the field checks fell
+    // through to null silently — rotating the session with no trace of why analytics saw a new
+    // one. Absent stays silent; present-but-malformed must not. The value itself is omitted from
+    // the message for the same reason the parse error is: it can echo identity fragments.
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    mockStorage.setItem(SESSION_KEY, persisted(JSON.stringify({ sessionId: 123 })))
+    resolveSessionId()
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('malformed'))
+  })
+
+  it('stays silent for an absent session record', () => {
+    // The control for the malformed warn above: absence is the ordinary first visit, not a fault.
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    resolveSessionId()
+    expect(spy).not.toHaveBeenCalled()
+  })
+
   it('creates a new session on first call', () => {
     const id = resolveSessionId()
     expect(id).toBeTruthy()

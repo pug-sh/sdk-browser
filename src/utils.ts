@@ -16,7 +16,12 @@ export const makeStorageKey = (projectId: string, name: string): string => `__pu
 
 export const SECONDS_PER_DAY = 24 * 60 * 60
 
-/** Default retention for anything the SDK stores on the device; override with `init({ maxAgeDays })`. */
+/**
+ * Default retention for values persisted through the `PersistentStore`; override with
+ * `init({ maxAgeDays })`. Not everything on the device: the batch queue, the tab registry and
+ * `pug_device_id` stay on raw localStorage outside the store — the `maxAgeDays` JSDoc in `pug.ts`
+ * names all three and why.
+ */
 export const DEFAULT_MAX_AGE_DAYS = 365
 
 /**
@@ -29,7 +34,17 @@ export const DEFAULT_MAX_AGE_DAYS = 365
  * that assert against raw storage need to spell the format, and importing it from there would drag
  * `logger.js` into each of them, where a `vi.mock` factory is hoisted above its own spies.
  */
-export const encodeStored = (value: string, expiresAt: number): string => `${expiresAt}|${value}`
+/**
+ * An enveloped stored string, as opposed to a bare value. The brand keeps the two apart at the
+ * persistence↔cookie seam: `CookieLayer.set()` accepts only enveloped strings, because a bare value
+ * written through it reads as undecodable and is deleted by the store's next `getItem` — silent
+ * identity loss with no compile error. Reads stay unbranded (`string`): what comes back off the
+ * device is not trustworthy enough to carry the brand.
+ */
+export type StoredEnvelope = string & { readonly __envelope: true }
+
+export const encodeStored = (value: string, expiresAt: number): StoredEnvelope =>
+  `${expiresAt}|${value}` as StoredEnvelope
 
 export const decodeStored = (raw: string | null): { value: string; expiresAt: number } | null => {
   if (raw === null) {
@@ -85,11 +100,13 @@ let redactedParams: ReadonlySet<string> | null = DEFAULT_REDACTED_SET
  */
 export const configureUrlRedaction = (params?: readonly string[] | false): void => {
   // Re-defends what init() already validated: this module must never throw, and a one-tag install
-  // can reach init() with anything.
+  // can reach init() with anything. An empty array falls back to the default list too — an empty
+  // Set is truthy and matches nothing, so [] would disable redaction exactly like `false` but
+  // silently. init() owns the warning for that case; this module imports nothing and cannot log.
   redactedParams =
     params === false
       ? null
-      : !Array.isArray(params)
+      : !Array.isArray(params) || params.length === 0
         ? DEFAULT_REDACTED_SET
         : new Set(params.map(p => String(p).toLowerCase()))
 }
@@ -138,6 +155,28 @@ const redactFragment = (fragment: string): string | null => {
 }
 
 /**
+ * String-level redaction for input `new URL` cannot parse: split at the first `#`, then the first
+ * `?` before it, and run the same matchers over the slices. This is the fail-closed arm of
+ * scrubUrl — a privacy control must not fail toward leaking, so a URL too malformed to parse
+ * (a form's `action` with a template bug in the host, handed over as raw attribute text) still has
+ * its params redacted rather than passing through carrying a live token. Shares redactQuery /
+ * redactFragment and their null "unchanged" protocol, so a no-match input stays byte-identical.
+ */
+const scrubOpaque = (raw: string): string => {
+  const hashAt = raw.indexOf('#')
+  const head = hashAt < 0 ? raw : raw.slice(0, hashAt)
+  const fragment = hashAt < 0 ? null : raw.slice(hashAt + 1)
+  const queryAt = head.indexOf('?')
+  const query = queryAt < 0 ? null : redactQuery(head.slice(queryAt + 1))
+  const frag = fragment ? redactFragment(fragment) : null
+  if (query === null && frag === null) {
+    return raw
+  }
+  const newHead = query === null ? head : `${head.slice(0, queryAt + 1)}${query}`
+  return fragment === null ? newHead : `${newHead}#${frag ?? fragment}`
+}
+
+/**
  * Redacts sensitive query/fragment params out of a captured URL. Never throws; returns the input
  * unchanged when nothing matched, so URLs are not re-encoded for no reason.
  */
@@ -165,7 +204,13 @@ export const scrubUrl = (raw: string): string => {
     }
     return url.toString()
   } catch {
-    return raw
+    // Unparseable is not a pass: fall back to string-level redaction. The nested guard keeps the
+    // never-throws promise ranked above fail-closed if both are ever threatened at once.
+    try {
+      return scrubOpaque(raw)
+    } catch {
+      return raw
+    }
   }
 }
 
@@ -223,6 +268,25 @@ export const urlBase64ToUint8Array = (base64String: string): Uint8Array<ArrayBuf
     bytes[i] = rawData.charCodeAt(i)
   }
   return bytes
+}
+
+/**
+ * JSON.stringify for log interpolation of untrusted values — the values being *rejected* are
+ * exactly the ones most likely to make JSON.stringify itself throw (circular refs, bigint, a
+ * throwing toJSON), which turned a validation warning into an exception out of the validator.
+ * Never throws; JSON.stringify's `undefined` results (undefined itself, functions, symbols) fall
+ * through to String() rather than interpolating as the literal text "undefined" of a missing value.
+ */
+export const safeStringify = (value: unknown): string => {
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    try {
+      return String(value)
+    } catch {
+      return '[unrepresentable]'
+    }
+  }
 }
 
 export const isStorageAvailable = (): boolean => {

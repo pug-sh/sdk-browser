@@ -12,8 +12,8 @@ interface StoredState {
 }
 
 export interface SessionConfig {
-  readonly idleTimeoutMinutes?: number
-  readonly maxSessionMinutes?: number
+  readonly idleTimeoutMinutes?: number | undefined
+  readonly maxSessionMinutes?: number | undefined
 }
 
 const DEFAULT_CONFIG = {
@@ -191,6 +191,12 @@ const releaseTabRegistry = ({ purge }: { purge: boolean }): boolean => {
         storage.removeItem(key)
         released = storage.getItem(key) === null
       }
+      // When storage is unavailable at teardown time, the skip above leaves `released` true —
+      // unavailable-for-writes treated as evidence-of-absence. A registry key written while storage
+      // *was* usable could in principle survive unreachable; accepted, because a store that cannot
+      // be read cannot be verified either, and reporting false forever on storageless devices would
+      // make every teardown boolean useless there. The registry holds per-tab timestamps, never
+      // identifiers, and its stale entries are pruned by their own idle timeout on the next arm.
     } else if (tabsStorage && tabsKey && tabId) {
       const tabs: Record<string, number> = JSON.parse(tabsStorage.getItem(tabsKey) ?? '{}')
       delete tabs[tabId]
@@ -228,7 +234,11 @@ const read = (): StoredState | null => {
     return null
   }
   try {
-    const parsed = JSON.parse(store.getItem(config.storageKey) ?? 'null')
+    const raw = store.getItem(config.storageKey)
+    if (raw === null) {
+      return null // absent is the ordinary first visit, not a fault — silent
+    }
+    const parsed = JSON.parse(raw)
     if (
       parsed &&
       typeof parsed.sessionId === 'string' &&
@@ -238,6 +248,10 @@ const read = (): StoredState | null => {
     ) {
       return parsed as StoredState
     }
+    // Present but malformed must not share absence's silence: falling through quietly rotated the
+    // session with no trace of why analytics saw a new one. The value is omitted from the message
+    // for the same reason the parse error is below — it can echo identity fragments.
+    log.warn('Stored session state is malformed; starting fresh.')
   } catch {
     // Omit the parse error: its message can echo a fragment of the stored session JSON.
     log.warn('Failed to read session state; starting fresh.')

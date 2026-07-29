@@ -1,5 +1,5 @@
 import { log } from './logger.js'
-import { decodeStored } from './utils.js'
+import { decodeStored, type StoredEnvelope } from './utils.js'
 
 /**
  * Controls whether identity (anonymous ID, external ID, session state, persisted consent) is shared
@@ -36,8 +36,12 @@ export interface CookieLayer {
    * Required, not optional: the store owns retention, and a defaulted argument would silently give
    * a cookie a lifetime nobody chose — the same silent-default shape the `isGranted` gates were made
    * required to close. No write site in this module defaults it either.
+   *
+   * `value` is the *enveloped* stored string (`StoredEnvelope`, minted by `encodeStored`), never a
+   * bare value: reads prefer this layer, and a bare value written here reads as undecodable and is
+   * deleted by the store's next getItem — silent identity loss the brand makes a compile error.
    */
-  set(name: string, value: string, maxAgeSeconds: number): boolean
+  set(name: string, value: StoredEnvelope, maxAgeSeconds: number): boolean
   /** Returns true only when the key is verifiably gone (read-back is null). */
   remove(name: string): boolean
   /** True when the cookie is scoped to a shared domain and therefore visible across subdomains. */
@@ -147,8 +151,12 @@ const resolveIntent = (config: CrossSubdomainConfig): CrossSubdomainIntent => {
   if (typeof domain === 'string' && domain !== '') {
     // The stated domain carries the opt-in, so extra keys do not disable it — but they must not be
     // silent either: `{ domain, maxAgeDays }` is the documented pre-hoist shape, and swallowing the
-    // key replaced a deliberately shortened lifetime with the 365-day default.
-    const extras = Object.keys(config as object).filter(key => key !== 'domain')
+    // key replaced a deliberately shortened lifetime with the 365-day default. Keys holding
+    // `undefined` are exempt: a builder spreading an unset legacy optional produces
+    // `{ domain, maxAgeDays: undefined }`, which configures nothing worth warning about.
+    const extras = Object.keys(config as object).filter(
+      key => key !== 'domain' && (config as Record<string, unknown>)[key] !== undefined,
+    )
     if (extras.length > 0) {
       const lifetimeHint = extras.includes('maxAgeDays')
         ? ' Cookie lifetime moved to the top-level maxAgeDays init option.'
@@ -227,6 +235,9 @@ export const createCookieLayer = (
   const hostOnlyAttrs = `; SameSite=Lax; path=/${secureAttr}`
   // Keys already reconciled against a stale host-only twin this page load (see reconcileTwin).
   const reconciledKeys = new Set<string>()
+  // Keys whose reconciliation failure was already reported — the retry is per access, the warn is
+  // not, or a persistently blocked cookie store would warn on every read of every event.
+  const twinWarnedKeys = new Set<string>()
 
   const writeCookie = (key: string, value: string, maxAgeSeconds: number): boolean => {
     try {
@@ -284,8 +295,17 @@ export const createCookieLayer = (
         }
       }
     } catch (err) {
-      // Sandboxed frame or malformed key — nothing to reconcile; reads fall through to what exists.
-      log.debug(`Cookie twin reconciliation for "${key}" threw:`, err)
+      // Un-latch so the next access retries: latched as done, a stale twin kept shadowing the
+      // shared cookie for the whole page load — the exact condition this function exists to
+      // prevent. Warn (every install sees it), not debug, and once per key rather than per access.
+      reconciledKeys.delete(key)
+      if (!twinWarnedKeys.has(key)) {
+        twinWarnedKeys.add(key)
+        log.warn(
+          `Cookie twin reconciliation for "${key}" threw; a stale host-only cookie may shadow the shared identity until it succeeds:`,
+          err,
+        )
+      }
     }
   }
 

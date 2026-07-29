@@ -47,7 +47,13 @@ import {
   type TrackingConsentController,
   type TrackingGate,
 } from './tracking-consent.js'
-import { configureUrlRedaction, DEFAULT_ENDPOINT, DEVICE_ID_KEY, RESERVED_DISTINCT_ID_PREFIX } from './utils.js'
+import {
+  configureUrlRedaction,
+  DEFAULT_ENDPOINT,
+  DEVICE_ID_KEY,
+  RESERVED_DISTINCT_ID_PREFIX,
+  safeStringify,
+} from './utils.js'
 
 export interface PugConfig {
   readonly endpoint: string
@@ -55,10 +61,10 @@ export interface PugConfig {
 }
 
 export interface InitOptions {
-  readonly endpoint?: string
+  readonly endpoint?: string | undefined
   readonly apiKey: string
-  readonly batch?: Partial<BatchConfig>
-  readonly dryRun?: boolean
+  readonly batch?: Partial<BatchConfig> | undefined
+  readonly dryRun?: boolean | undefined
   /**
    * Logs the SDK's internal activity to `console.debug`. Off by default.
    *
@@ -71,9 +77,9 @@ export interface InitOptions {
    * regardless: a call before `init()` and a bad config warn, and an event too malformed to encode
    * errors. This flag can only widen what you see, never narrow it.
    */
-  readonly debug?: boolean
-  readonly session?: SessionConfig
-  readonly autoCapture?: AutoCaptureConfig
+  readonly debug?: boolean | undefined
+  readonly session?: SessionConfig | undefined
+  readonly autoCapture?: AutoCaptureConfig | undefined
   /**
    * The consent state to start from, or a `TrackingConsentConfig` (`initial`, `onReject`,
    * `persist`, `respectGpc`). **Defaults to `'cookieless'`**: events flow, but no identifier is
@@ -82,7 +88,7 @@ export interface InitOptions {
    * per-load seed; use the config form with `persist: true` to record the user's choice across
    * reloads.
    */
-  readonly trackingConsent?: TrackingConsent | TrackingConsentConfig
+  readonly trackingConsent?: TrackingConsent | TrackingConsentConfig | undefined
   /**
    * Shares identity (anonymous ID, external ID, session state, persisted consent) across subdomains
    * of the same site via a first-party cookie on the registrable domain (e.g. `.example.com`).
@@ -108,7 +114,7 @@ export interface InitOptions {
    * With cross-subdomain sessions, the "rotate when all tabs closed" heuristic is disabled — sessions
    * end by idle/max timeout only, since tab liveness is unknowable across subdomains.
    */
-  readonly crossSubdomainTracking?: CrossSubdomainConfig
+  readonly crossSubdomainTracking?: CrossSubdomainConfig | undefined
   /**
    * How long the SDK's stored identifiers are kept, in days. Default 365; pass 390 for CNIL's
    * 13 months.
@@ -131,7 +137,7 @@ export interface InitOptions {
    * identifier — it has no deadline and no teardown clears it (push is not currently exported, so
    * nothing writes it yet).
    */
-  readonly maxAgeDays?: number
+  readonly maxAgeDays?: number | undefined
   /**
    * Query and fragment params whose values are replaced with `redacted` in `$url`, `$referrer` and a
    * form's `action`. Defaults to a built-in list of credentials and direct identifiers (`token`,
@@ -143,7 +149,7 @@ export interface InitOptions {
    *
    * Applied before `beforeSend`, so a hook can still mask more.
    */
-  readonly redactUrlParams?: readonly string[] | false
+  readonly redactUrlParams?: readonly string[] | false | undefined
   /**
    * Redacts, rewrites or drops each event before it is sent. Mutate `autoProperties` /
    * `customProperties` in place and return the event, `null` to drop it, or nothing at all.
@@ -156,7 +162,7 @@ export interface InitOptions {
    * not exposed. Unavailable on the one-tag install — `data-options` is JSON, which holds no
    * functions.
    */
-  readonly beforeSend?: BeforeSendFn
+  readonly beforeSend?: BeforeSendFn | undefined
 }
 
 export type {
@@ -343,7 +349,7 @@ export const init = (projectId: string, options: InitOptions) => {
       // be inferred from the per-key errors: a purge that did not land means a later
       // optInTracking() resumes the PRE-EXISTING identity while getTrackingConsent() reports the
       // new state as though it fully applied.
-      if (!purgePersistedIdentity()) {
+      if (!purgePersistedIdentity({ dropQueue: true })) {
         log.error(
           'Could not fully remove stored identity for a non-granted consent state. Identifiers may survive on this device, and granting consent later may resume the previous identity rather than minting a fresh one.',
         )
@@ -353,12 +359,18 @@ export const init = (projectId: string, options: InitOptions) => {
       // collected, not an identifier a later grant could resolve. Withholding it here left a prior
       // consented visit's identified payloads on the device for every non-authoritative non-granted
       // init — the bare-string form the README's CMP recipe produces.
-      purgeQueuedEvents({ send: false })
+      const queueDropped = purgeQueuedEvents({ send: false })
       // Identity is deliberately skipped — see isAuthoritative(). Say so, or an integrator passing a
       // bare 'cookieless'/'denied' cannot tell the documented purge did not run — and name the queue
-      // drop, which is where a hard-killed granted session's events went.
+      // drop, which is where a hard-killed granted session's events went. The phrase is conditioned
+      // on the result: on a failed purge the queue's own error already says the key survived, and an
+      // unconditional "were dropped" here contradicted it.
       log.debug(
-        'Consent is not granted but was not restored from storage, so it is a config seed rather than a recorded choice — any queued events from a prior visit were dropped, but stored identity was left in place. Use trackingConsent.persist to record the choice.',
+        `Consent is not granted but was not restored from storage, so it is a config seed rather than a recorded choice — ${
+          queueDropped
+            ? 'any queued events from a prior visit were dropped'
+            : 'the queued-events purge did not fully land (see the error above)'
+        }, and stored identity was left in place. Use trackingConsent.persist to record the choice.`,
       )
     }
   }
@@ -417,10 +429,15 @@ const purgeQueuedEvents = ({ send }: { send: boolean }): boolean => {
  *
  * Idempotent in end state but not side-effect-free: it issues removals (cookie deletions when
  * cross-subdomain) and may log an error on an unconfirmed removal even when nothing was stored.
+ *
+ * `dropQueue` is the caller's statement that this purge accompanies a consent *reduction* (or
+ * init()'s authoritative restore, where there is no previous state) — the identity removals are
+ * end-state no-ops on a re-assert, but the queue drop is not: it destroys queued events, so it
+ * must not run when nothing actually changed.
  */
-const purgePersistedIdentity = (): boolean => {
+const purgePersistedIdentity = ({ dropQueue }: { dropQueue: boolean }): boolean => {
   // Runs first, while those events still exist.
-  let purged = purgeQueuedEvents({ send: false })
+  let purged = dropQueue ? purgeQueuedEvents({ send: false }) : true
   try {
     purged = clearProfile() && purged
   } catch (err) {
@@ -458,11 +475,13 @@ export const setTrackingConsent = (consent: TrackingConsent): boolean => {
     return false
   }
   const wasTracking = state.trackingConsent.isTracking()
+  const wasGranted = state.trackingConsent.isGranted()
   let ok = state.trackingConsent.set(consent)
   const resolved = state.trackingConsent.getConsent()
-  // Consent side effects run before apply(), matching init(): a tracker newly armed by this
-  // transition fires its page_view synchronously into the queue, and purging afterwards destroyed
-  // exactly that event — the first of every mid-page cookieless session — unsent.
+  // Consent side effects run before apply(), matching init(). The order is defense in depth: the
+  // drop predicate below never purges on a transition that arms a tracker, but if that invariant
+  // ever loosens, purging after apply() would destroy the newly-armed tracker's synchronous
+  // page_view — the first event of every mid-page cookieless session — unsent.
   if (resolved === 'granted') {
     // Re-arm the tab-liveness registry configureSession() skipped while consent withheld it.
     // Without this the "all tabs closed → rotate" heuristic stays dead for the page's life — and
@@ -473,9 +492,18 @@ export const setTrackingConsent = (consent: TrackingConsent): boolean => {
       log.warn('Failed to re-arm tab tracking after consent was granted:', err)
     }
   } else {
-    // Required when leaving 'granted'. From another non-granted state it is a no-op in end state,
-    // though not free: it still issues removals and may log on an unconfirmed one.
-    ok = purgePersistedIdentity() && ok
+    // Identity removals run on every non-granted resolve — required when leaving 'granted', and
+    // from another non-granted state a no-op in end state, though not free: they still issue
+    // removals and may log on an unconfirmed one. The queue drop is scoped tighter, to transitions
+    // that actually reduce consent: leaving 'granted' (the consented queue holds identified
+    // payloads the user just withdrew consent for), or landing on 'denied' (a kept cookieless
+    // queue would be beaconed by the next pagehide — transmission after a full reject). A
+    // re-assert of an unchanged non-granted state — a CMP restating its state on every load —
+    // keeps the cookieless queue: those events are identity-free by construction, and purging
+    // them destroyed the pre-banner page_view of every mid-page cookieless session for no
+    // privacy gain, while a granted→granted re-assert kept its queue untouched.
+    const dropQueue = resolved === 'denied' || wasGranted
+    ok = purgePersistedIdentity({ dropQueue }) && ok
   }
   state.autoCapture.apply()
   // Only on the transition *into* tracking: initUserAgentData() clears the hint cache synchronously
@@ -734,7 +762,7 @@ export const track: TrackFn = (kind: string, props?: Record<string, unknown>, op
       log.debug(`track("${kind}") dropped because tracking consent is denied.`)
     } else {
       unreachable(consent)
-      log.error(`track("${kind}") dropped: unhandled tracking consent state ${JSON.stringify(consent)}.`)
+      log.error(`track("${kind}") dropped: unhandled tracking consent state ${safeStringify(consent)}.`)
     }
     if (!identity) {
       return

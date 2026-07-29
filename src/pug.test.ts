@@ -827,6 +827,18 @@ describe('endpoint and device-read hygiene', () => {
     )
   })
 
+  it('warns and keeps the default list when redactUrlParams mixes in non-strings', async () => {
+    // ['email', 42] out of data-options JSON: without the per-element check this fell through to
+    // configureUrlRedaction, whose String(p) coercion silently turned "reject the malformed list"
+    // into "redact a param named 42" — with the default list gone.
+    const { init } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, redactUrlParams: ['email', 42] as never })
+    expect(logSpies.warn).toHaveBeenCalledWith(
+      'redactUrlParams must be an array of strings or `false`; using the default redaction list.',
+    )
+    expect(scrubUrl('https://x.com/?token=abc')).toBe('https://x.com/?token=redacted')
+  })
+
   it('does not re-warm client hints when consent is re-asserted', async () => {
     const { init, setTrackingConsent } = await importPug()
     init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: 'granted' })
@@ -1096,11 +1108,13 @@ describe('cookieless mode', () => {
     expect(trackerSpies.pageView).toHaveBeenCalled()
   })
 
-  it('purges before reconciling capture, so the transition page_view survives', async () => {
+  it('does not purge the queue on a transition that arms capture, so the transition page_view survives', async () => {
     // The real page-view tracker fires its initial page_view synchronously inside setup, and the
-    // transport enqueues synchronously — so with the purge running after apply(), the first event
-    // of every mid-page cookieless session landed in the queue and was destroyed unsent ~20 lines
-    // later. init() orders these correctly; the transition must match it.
+    // transport enqueues synchronously. Two eras of the same protection: originally the purge ran
+    // on every non-granted resolve, so it had to run *before* apply() or it destroyed exactly that
+    // event. The drop predicate now scopes the purge to consent reductions (leaving granted, or
+    // landing on denied) — and no reduction arms a tracker, so on this transition the purge must
+    // not run at all, which protects the same event more strongly than ordering did.
     const { init, setTrackingConsent } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'denied', autoCapture: true })
     trackerSpies.pageView.mockImplementationOnce(track => {
@@ -1113,9 +1127,7 @@ describe('cookieless mode', () => {
     setTrackingConsent('cookieless')
 
     expect(transportSpies.send).toHaveBeenCalled()
-    const purgeOrder = transportSpies.purgeQueue.mock.invocationCallOrder.at(-1) ?? Number.POSITIVE_INFINITY
-    const sendOrder = transportSpies.send.mock.invocationCallOrder[0] ?? Number.NEGATIVE_INFINITY
-    expect(purgeOrder).toBeLessThan(sendOrder)
+    expect(transportSpies.purgeQueue).not.toHaveBeenCalled()
   })
 })
 
