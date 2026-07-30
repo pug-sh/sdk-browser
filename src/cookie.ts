@@ -196,20 +196,26 @@ const resolveExplicitDomain = (doc: CookieDocument, requested: string): string =
 
 /**
  * Creates the cookie layer used by `createPersistentStore()`, or null when cookies are disabled by
- * config or unavailable (blocked, sandboxed frame, non-browser environment). All failures degrade
- * to localStorage-only persistence — never throws.
+ * config or unavailable (blocked, sandboxed frame, non-browser environment). Environment failures
+ * degrade to localStorage-only persistence — the layer itself never throws. The one throw is the
+ * head guard on an omitted consent gate: internal misuse, which must fail loud at creation rather
+ * than reach the twin machinery.
  */
 export const createCookieLayer = (
   config: CrossSubdomainConfig,
   // Gates the twin promotion in reconcileTwin() — the one identity *write* on the read path, and so
-  // the one that escaped every other consent check. Required: an absent gate here throws inside
-  // reconcileTwin's try, which warns once per key and skips the promotion — with the live twin
-  // already expired by then, so its value is destroyed rather than restored. Nothing in the build
-  // or the runtime suite fails on that shape; the arity pin in consent-gate.test-d.ts is what
-  // catches the omission.
+  // the one that escaped every other consent check. Required: the arity pin in
+  // consent-gate.test-d.ts turns a typed omission into a build failure; the head guard below is
+  // for callers typecheck never sees.
   isGranted: GrantedGate,
   doc: CookieDocument | null = typeof document === 'undefined' ? null : document,
 ): CookieLayer | null => {
+  // Fail loud at the head, uniformly with configureProfile and configureSession: an omitted gate
+  // used to throw inside reconcileTwin's try — after the live twin was already expired, so the
+  // misuse destroyed a value and produced only a once-per-key warn.
+  if (typeof isGranted !== 'function') {
+    throw new TypeError('createCookieLayer requires the isGranted consent gate')
+  }
   // Resolved before the availability probe: an unusable config needs no test cookie written.
   const intent = resolveIntent(config)
   if (intent.kind === 'off' || !doc) {
@@ -256,10 +262,15 @@ export const createCookieLayer = (
   // not, or a persistently blocked cookie store would warn on every read of every event.
   const twinWarnedKeys = new Set<string>()
 
-  // Keys whose host-only twin reconcileTwin deliberately left in place (its not-granted arm).
-  const preservedTwins = new Set<string>()
+  // Keys whose host-only twin reconcileTwin deliberately left in place (its not-granted arm), with
+  // what putting it back requires: a later set() whose replacement write fails must *restore* the
+  // twin, not merely know it existed, so the value and remaining lifetime ride the registration.
+  const preservedTwins = new Map<string, { readonly value: string; readonly maxAgeSeconds: number }>()
 
   const writeCookie = (key: string, value: string, maxAgeSeconds: number): boolean => {
+    // Hoisted out of the try so the catch can repair the bookkeeping for a throw that landed
+    // between consuming the registration and finishing the write.
+    let expiredTwin: { readonly value: string; readonly maxAgeSeconds: number } | undefined
     try {
       // encodeURIComponent stays inside the try — it throws on malformed UTF-16 (lone surrogates),
       // and callers must never throw.
@@ -274,12 +285,40 @@ export const createCookieLayer = (
       // replacement is known writable: expired before the checks above, an oversized or
       // unencodable value destroyed the sole copy (cross-subdomain reads have no localStorage
       // fallback) and returned false with nothing in its place.
-      if (preservedTwins.delete(key)) {
+      expiredTwin = preservedTwins.get(key)
+      if (expiredTwin !== undefined) {
+        preservedTwins.delete(key)
         doc.cookie = `${encodeURIComponent(key)}=; path=/; max-age=0`
       }
       doc.cookie = encoded
-      return readCookie(doc, key) === value
+      if (readCookie(doc, key) === value) {
+        return true
+      }
+      // The replacement did not land (a cookie store blocked mid-session, read-back mismatch), and
+      // the expiry above already destroyed the twin to make room for it — put it back, mirroring
+      // reconcileTwin's failed-promotion arm. For the consent record — whose restore write is the
+      // first set() after a preserving reconcile — returning false with the twin gone reverted a
+      // recorded refusal to the config seed on the next init().
+      if (expiredTwin !== undefined) {
+        preserveTwin(key, expiredTwin.value, expiredTwin.maxAgeSeconds)
+      }
+      return false
     } catch (err) {
+      // A throw after the registration was consumed may have destroyed the twin (the expiry
+      // landed, then the encoded write threw) or left it physically present but untracked (the
+      // expiry write itself threw). Restore, not just re-register — the same loss the read-back
+      // path above repairs — but in its own try: a jar broken enough to throw here usually throws
+      // in preserveTwin too, and a throw escaping this catch would break set()'s never-throws
+      // contract. preserveTwin registers before it writes, so even a failed attempt leaves the
+      // bookkeeping consistent, and a stale entry costs one harmless extra expiry write later.
+      if (expiredTwin !== undefined && !preservedTwins.has(key)) {
+        try {
+          preserveTwin(key, expiredTwin.value, expiredTwin.maxAgeSeconds)
+        } catch {
+          // Jar still refusing writes; the registration stands and the store's read-back reports
+          // the failed persist.
+        }
+      }
       log.debug(`Cookie write for "${key}" threw:`, err)
       return false
     }
@@ -307,10 +346,12 @@ export const createCookieLayer = (
    * Registration and restore travel together: a restored twin predates any later shared write for
    * its key, so RFC 6265 sorts it ahead in document.cookie and writeCookie must know to expire it
    * first — a restore without the registration makes that later write fail read-back against the
-   * twin and report a landed write as lost.
+   * twin and report a landed write as lost. The registration carries the twin itself (value and
+   * remaining lifetime), so the reverse move — a consumed registration whose replacement write then
+   * fails — can put the twin back rather than merely remember that one existed.
    */
   const preserveTwin = (key: string, value: string, maxAgeSeconds: number): void => {
-    preservedTwins.add(key)
+    preservedTwins.set(key, { value, maxAgeSeconds })
     restoreTwin(key, value, maxAgeSeconds)
   }
 
@@ -326,6 +367,10 @@ export const createCookieLayer = (
       }
       doc.cookie = `${encodeURIComponent(key)}=; path=/; max-age=0`
       if (readCookie(doc, key) !== null) {
+        // Acknowledged blind spot: a jar that silently no-ops writes leaves the un-expired twin
+        // itself passing this read-back, masquerading as a surviving shared cookie — latched, with
+        // the twin still shadowing. Undetectable here without a probe write, which the denied-
+        // consent read path must not issue; the fault surfaces at the next write's read-back.
         return // a shared cookie survives the host-only expiry and is authoritative — leave it
       }
       // Nothing remains: `before` was a lone host-only twin (a genuine host-only → shared
@@ -374,8 +419,13 @@ export const createCookieLayer = (
       reconciledKeys.delete(key)
       if (!twinWarnedKeys.has(key)) {
         twinWarnedKeys.add(key)
+        // Two outcomes share this catch: a throw before the expiry leaves the stale twin
+        // shadowing (the retry heals it); a throw after — inside the restore, or the documented
+        // omitted-gate misuse before the head guard existed — means the twin was already expired
+        // and its value may be gone, with nothing left to shadow anything. The message covers
+        // both rather than diagnosing shadowing for a loss.
         log.warn(
-          `Cookie twin reconciliation for "${key}" threw; a stale host-only cookie may shadow the shared identity until it succeeds:`,
+          `Cookie twin reconciliation for "${key}" threw; a stale host-only cookie may shadow the shared identity until a retry succeeds, or the twin's value may have been lost mid-reconciliation:`,
           err,
         )
       }

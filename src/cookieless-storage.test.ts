@@ -435,9 +435,15 @@ describe('cookieless storage silence', () => {
     const p = 'proj-leftover-denied'
     await leaveQueueOnDevice(p)
 
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     init(p, { apiKey: 'k', trackingConsent: 'denied', autoCapture: false })
 
     expect(localStorage.getItem(makeStorageKey(p, 'queue'))).toBeNull()
+    // The destruction warning, with the real per-queue count: the (ok, destroyed) × send quadrants
+    // are pinned against a mocked transport in pug.test.ts, so this is the one place the warning
+    // rides the real queue's answer end to end.
+    expect(warnSpy.mock.calls.map(c => c.join(' ')).join('\n')).toContain('Dropped 1 queued event(s)')
+    warnSpy.mockRestore()
   })
 
   // The leftover queue leaves the device unsent — purgeQueue({ send: false })'s documented contract

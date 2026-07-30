@@ -360,12 +360,20 @@ export const createBatchedTransport = (
    * false whenever `sendBeacon` is absent or blocked, which is routine with analytics blockers. The
    * consented queue is localStorage-backed and recovers on the next `init()`; the cookieless queue
    * dies with the page, so reporting both as "they remain queued" was wrong for half of them.
+   *
+   * `terminal` is the reset() farewell: purgeQueue() destroys both queues on the statement after
+   * this report, so "will retry on next init()" is false there — the beacon was the events' one
+   * chance, and the loss is permanent regardless of which queue held them.
    */
-  const reportBeaconLoss = (consentedCount: number, cookielessCount: number, phase: string): void => {
+  const reportBeaconLoss = (consentedCount: number, cookielessCount: number, phase: string, terminal = false): void => {
     if (consentedCount > 0) {
-      // Only recoverable if there is somewhere to recover from: the consented queue fell back to
-      // in-memory when localStorage was unavailable at creation, and that loss is permanent too.
-      if (consentedQueuePersists) {
+      if (terminal) {
+        log.error(
+          `sendBeacon failed ${phase}; ${consentedCount} events were dropped unsent — the queue is removed after its farewell beacon.`,
+        )
+      } else if (consentedQueuePersists) {
+        // Only recoverable if there is somewhere to recover from: the consented queue fell back to
+        // in-memory when localStorage was unavailable at creation, and that loss is permanent too.
         log.warn(
           `sendBeacon failed ${phase}; ${consentedCount} events remain in the persisted queue and will retry on next init().`,
         )
@@ -585,8 +593,11 @@ export const createBatchedTransport = (
      *
      * `destroyed` counts only events that actually left the device, per queue: the memory-only
      * cookieless queue always destroys what it held, while a consented queue whose key survived
-     * destroyed nothing. A single `ok && total` could not say that — `ok` is structurally the
-     * localStorage queue's answer alone, so it made a real cookieless loss unreportable.
+     * destroyed nothing — save its un-persisted debounced tail, gone with the memory buffer yet
+     * uncounted. With the in-flight overcount (a locked batch is included but may still be
+     * delivered), the number is approximate in both directions, never an audit. A single
+     * `ok && total` could not say any of that — `ok` is structurally the localStorage queue's
+     * answer alone, so it made a real cookieless loss unreportable.
      *
      * `send` is true only for `reset()` — a logout, where consent is unchanged and those events were
      * agreed to at collection time. Every consent teardown passes false: transmitting after the user
@@ -611,14 +622,14 @@ export const createBatchedTransport = (
         // nothing. Both other sites (beaconFlush, destroy) already report through reportBeaconLoss.
         // The counts are captured before the call because purge() empties the buffers below.
         if (pending.length > 0 && !inner.beacon?.(pending)) {
-          reportBeaconLoss(consentedTail.length, cookielessTail.length, 'during reset')
+          reportBeaconLoss(consentedTail.length, cookielessTail.length, 'during reset', true)
         }
       }
       // Each queue counts its own buffer, in-flight locked batch included — see purge(). An
-      // in-flight batch may still be delivered, so `destroyed` is a ceiling, not an audit. The one
-      // undercount runs the other way: on a failed consented purge, events younger than the persist
-      // debounce were destroyed with the buffer (never on disk, memory now cleared) yet count 0
-      // along with the rest of the surviving key.
+      // in-flight batch may still be delivered, so `destroyed` can overstate; the undercount runs
+      // the other way — on a failed consented purge, events younger than the persist debounce were
+      // destroyed with the buffer (never on disk, memory now cleared) yet count 0 along with the
+      // rest of the surviving key. Approximate in both directions, never an audit.
       const consented = storage.purge()
       const cookieless = cookielessStorage.purge()
       return {

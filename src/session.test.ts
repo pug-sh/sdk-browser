@@ -618,27 +618,19 @@ describe('cross-subdomain session round-trip', () => {
 
 describe('consent gate', () => {
   // The untyped-caller shape the arity pin cannot reach: tests are transpile-only and production is
-  // typechecked, so only the runtime default decides what an omitted gate means. It must read as
-  // *withheld* — the `?? true` this replaces made the same omission silently arm the registry and
-  // persist identity, the one fail-open default left in the gate chain. resolveSessionId()'s
-  // activity persist stays ungated by design (track() branches on consent first), so the pin
-  // asserts on the two writes the gate owns: the tab registry and resetIdentity's persist.
-  it('treats an omitted gate as withheld rather than permitted (untyped caller)', () => {
+  // typechecked, so only the runtime guard decides what an omitted gate means. It must fail loud at
+  // the head — quietly withheld (`?? false`, the previous shape) never planted an identifier, but
+  // granted-mode installs silently lost the tab registry and rotate()/resetIdentity() persistence
+  // for the page's life, and before that the fail-open `?? true` armed everything with full
+  // permission. A TypeError at configure time is the one answer that cannot be misread.
+  it('throws at configure time on an omitted gate instead of failing quietly (untyped caller)', () => {
     destroySession()
-    ;(configureSession as (p: string, c?: unknown, s?: unknown, g?: unknown) => void)(PROJECT_ID)
-
-    // The registry write is skipped — under the fail-open default it was armed here.
-    expect(mockStorage.getItem(TABS_KEY)).toBeNull()
-
-    // resetIdentity clears rather than writes: a fresh session + device id is exactly the
-    // identifier a withheld gate promises not to store.
-    const now = Date.now()
-    mockStorage.setItem(
-      SESSION_KEY,
-      persisted(JSON.stringify({ sessionId: 's1', deviceId: 'd1', startTime: now, lastActivityTime: now })),
+    expect(() => (configureSession as (p: string, c?: unknown, s?: unknown, g?: unknown) => void)(PROJECT_ID)).toThrow(
+      TypeError,
     )
-    expect(resetIdentity()).toBe(true)
-    expect(mockStorage.getItem(SESSION_KEY)).toBeNull()
+
+    // The failed configure armed nothing: no registry write happened.
+    expect(mockStorage.getItem(TABS_KEY)).toBeNull()
   })
 })
 

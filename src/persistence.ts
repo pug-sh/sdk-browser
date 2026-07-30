@@ -228,8 +228,14 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
           log.error(`localStorage still holds "${key}" after removal; residue remains on this device.`)
         }
       } catch (err) {
+        // Same outcome as the no-op above — the identifier survives the teardown — so the same
+        // level, the same consequence sentence, and the same latch: the mechanism of failure does
+        // not pick the severity, and the residue is one fact per key however it came about.
         localRemoved = false
-        log.warn(`Failed to remove "${key}" from localStorage:`, err)
+        if (!residueWarnedKeys.has(key)) {
+          residueWarnedKeys.add(key)
+          log.error(`Failed to remove "${key}" from localStorage; residue remains on this device:`, err)
+        }
       }
     }
     knownExpiry.delete(key)

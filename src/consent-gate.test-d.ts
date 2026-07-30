@@ -34,11 +34,11 @@ const ok1: GrantedGate = granted
 const ok2: TrackingGate = tracking
 
 /**
- * Arity, not just the brand. An omitted gate fails quietly in every direction: session.ts reads it
- * as withheld (`?? false`, so granted-mode sessions silently stop persisting), profile.ts throws
- * only on the returning-identified-visitor branch, and cookie.ts throws inside reconcileTwin's
- * try, which warns once per key and skips the promotion with the twin already expired. Reverting
- * any one parameter to optional leaves typecheck and the whole runtime suite green, which is what
+ * Arity, not just the brand. All three factories throw a TypeError at the head on a non-function
+ * gate — uniform fail-loud, each pinned in its own runtime suite — but that guard is reachable
+ * only by callers typecheck never sees; for typed code, omission must be a compile error.
+ * Reverting any one parameter to optional changes no runtime behavior (the guard throws
+ * regardless of the typing), so typecheck and the whole runtime suite stay green — which is what
  * these directives close: they go unused, and TS2578 fails the build.
  *
  * Each call is single-defect by construction — every argument except the omitted gate is valid for

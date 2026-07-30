@@ -207,7 +207,25 @@ describe('createPersistentStore', () => {
       throw new Error('boom')
     })
     expect(store?.removeItem('k')).toBe(false)
-    expect(logSpies.warn).toHaveBeenCalledWith('Failed to remove "k" from localStorage:', expect.any(Error))
+  })
+
+  it('reports a throwing localStorage removal at error level with the residue consequence, once per key', () => {
+    // Same device outcome as the silent no-op case above — the identifier survives the teardown —
+    // so the same level and the same consequence sentence: the mechanism of failure does not pick
+    // the severity (batch.ts's purge states the rule). At warn, the throw arm was the one teardown
+    // failure the codebase reported below error — and in cross-subdomain mode the return value
+    // deliberately excludes this layer, so this log is the only signal anywhere. Once per key, like
+    // its no-op sibling: dropStale runs removeItem on every read of a lapsed value, so a
+    // persistently-throwing store would otherwise re-log per tracked event.
+    const { layer } = createFakeCookieLayer(false)
+    const store = createPersistentStore(layer)
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('SecurityError')
+    })
+    expect(store?.removeItem('k')).toBe(false)
+    store?.removeItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('residue remains'))).toHaveLength(1)
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('Failed to remove "k"'), expect.anything())
   })
 
   it('reports success when only the cookie write lands', () => {

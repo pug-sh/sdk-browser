@@ -336,6 +336,70 @@ describe('createCookieLayer', () => {
     expect(layer?.remove(KEY)).toBe(false)
   })
 
+  // remove() latches reconciledKeys / consumes the preservedTwins registration only on a CONFIRMED
+  // removal. Both directions of the up-front spelling regress quietly, so each gets its own pin.
+  it('a later landed set() still reports success after a removal that did not land', () => {
+    // Consumed up front, a removal that no-opped (blocked cookie store) left the twin in place but
+    // untracked — so when the store healed, a *landed* set() failed read-back against the twin and
+    // reported false, reaching the integrator as optOutTracking()/reset() claiming identity remains
+    // on a device where the write succeeded.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    let blockDeletes = false
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        if (blockDeletes && value.includes('max-age=0')) return
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    const stored = persisted('anon-legacy')
+    doc.cookie = `${KEY}=${encodeURIComponent(stored)}; path=/`
+    const layer = createCookieLayer(true, DENIED, doc)
+    layer?.get(KEY) // preserves the twin host-only, registering it for later expiry
+
+    blockDeletes = true
+    expect(layer?.remove(KEY)).toBe(false)
+
+    blockDeletes = false
+    const next = persisted('anon-next')
+    expect(layer?.set(KEY, next, 600)).toBe(true)
+    expect(layer?.get(KEY)).toBe(next)
+  })
+
+  it('a failed removal leaves the key un-latched so the next access reconciles a stale twin', () => {
+    // Latched up front, a removal that no-opped marked the key reconciled with the stale host-only
+    // twin still present — so it shadowed the shared cookie for the rest of the page load, the
+    // exact condition reconcileTwin exists to prevent.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    let blockDeletes = false
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        if (blockDeletes && value.includes('max-age=0')) return
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    // Stale host-only twin first (sorts ahead), then the authoritative shared value via a sibling.
+    doc.cookie = `${KEY}=anon-stale; path=/`
+    const www = grantedLayer(true, docAt('https://www.example.com/', jar))
+    expect(www?.set(KEY, 'anon-shared', TTL)).toBe(true)
+
+    const layer = grantedLayer(true, doc)
+    blockDeletes = true
+    expect(layer?.remove(KEY)).toBe(false)
+
+    blockDeletes = false
+    expect(layer?.get(KEY)).toBe('anon-shared')
+  })
+
   it('expires a stale host-only twin so it cannot shadow the shared cookie', () => {
     const jar = new CookieJar()
     const doc = docAt('https://app.example.com/', jar)
@@ -586,6 +650,14 @@ describe('consent gate on the twin promotion', () => {
 
   const siblingSees = (jar: CookieJar) => docAt('https://www.example.com/', jar).cookie.includes('anon-legacy')
 
+  // The untyped-caller shape the arity pin in consent-gate.test-d.ts cannot reach. An omitted gate
+  // used to throw inside reconcileTwin's try — after the live twin was already expired, so the
+  // misuse *destroyed a value* and produced only a once-per-key warn. A TypeError at creation fails
+  // loud before any twin machinery runs, matching configureProfile and configureSession.
+  it('throws at creation on an omitted gate instead of destroying a twin later', () => {
+    expect(() => (createCookieLayer as (c: unknown, g?: unknown, d?: unknown) => unknown)(true)).toThrow(TypeError)
+  })
+
   // reconcileTwin() promotes a lone host-only cookie onto the registrable domain. That is an
   // identity *write*, and it happens on the read path, so every other consent check missed it:
   // configureProfile reads external_id unconditionally (only its refresh write was gated), so a
@@ -625,6 +697,23 @@ describe('consent gate on the twin promotion', () => {
     expect(restore).not.toContain('domain=')
   })
 
+  it('keeps a pre-envelope twin host-only and short-lived under a denied gate too', () => {
+    // The undecodable arm runs before the gate — deliberately, since what a bare value means is
+    // the store's call and getItemOrLegacy needs it handed up — so this is a Set-Cookie carrying a
+    // raw identifier while consent is withheld. Net-zero on the device: never widened (no shared
+    // write), and the restore carries LEGACY_TWIN_RESTORE_SECONDS rather than a lifetime of its
+    // own — long enough for the store's same-call read, short enough that a value nothing can
+    // expire cannot linger if that read never comes.
+    const { doc, writes } = capturingDoc('https://app.example.com/')
+    doc.cookie = `${KEY}=anon-legacy; path=/`
+    writes.length = 0
+    expect(createCookieLayer(true, DENIED, doc)?.get(KEY)).toBe('anon-legacy')
+
+    expect(writes.filter(w => w.includes('domain=') && !w.includes('__pug_probe_'))).toEqual([])
+    const restore = writes.find(w => w.includes('anon-legacy') && !w.includes('max-age=0'))
+    expect(restore).toContain('max-age=300')
+  })
+
   // The reconciliation latches even when it cannot promote. Un-latched, every later get()/set()
   // repeated the delete-and-restore — an identity Set-Cookie on the *read* path, in the one consent
   // state that promises no device writes at all (measured: 10 cookie writes across 5 reads).
@@ -639,6 +728,53 @@ describe('consent gate on the twin promotion', () => {
     }
 
     expect(writes.filter(w => !w.includes('__pug_probe_'))).toHaveLength(2) // one expire + one restore
+  })
+
+  it('a refused oversized write leaves the preserved twin readable', () => {
+    // writeCookie expires a preserved twin only after the size/encodability checks: expired ahead
+    // of them, an oversized or unencodable value destroyed the sole copy (cross-subdomain reads
+    // have no localStorage fallback) and returned false with nothing in its place.
+    const { doc } = capturingDoc('https://app.example.com/')
+    const stored = persisted('anon-legacy')
+    doc.cookie = `${KEY}=${encodeURIComponent(stored)}; path=/`
+    const layer = createCookieLayer(true, DENIED, doc)
+    layer?.get(KEY) // preserves the twin host-only
+
+    expect(layer?.set(KEY, 'x'.repeat(4000), 600)).toBe(false)
+    expect(layer?.get(KEY)).toBe(stored)
+  })
+
+  it('restores the preserved twin when the replacement write does not land', () => {
+    // The pre-write expiry consumes the preserved twin so read-back cannot resolve to it — but if
+    // the replacement write is then rejected (a cookie store blocked mid-session), returning false
+    // with the twin destroyed leaves the device holding nothing. The failed-write path must put it
+    // back, exactly like reconcileTwin's failed-promotion arm. The reachable case is the consent
+    // record: its restore write is the first set() after the preserving reconcile, and losing the
+    // twin there reverts a recorded refusal to the config seed on the next init().
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    let blockShared = false
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        // Blocks only the domain-scoped replacement write: deletions (max-age=0) and the
+        // host-only restore must still land, or the test could not tell "restored" from "the
+        // whole jar is dead".
+        if (blockShared && value.includes('domain=') && !value.includes('max-age=0')) return
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    const stored = persisted('anon-legacy')
+    doc.cookie = `${KEY}=${encodeURIComponent(stored)}; path=/`
+    const layer = createCookieLayer(true, DENIED, doc)
+    layer?.get(KEY) // preserves the twin host-only
+
+    blockShared = true
+    expect(layer?.set(KEY, persisted('anon-next'), 600)).toBe(false)
+    expect(layer?.get(KEY)).toBe(stored)
   })
 
   // A preserved twin was created before any shared cookie, so RFC 6265 sorts it first in

@@ -347,6 +347,27 @@ describe('cookieless loss reporting and flush fairness', () => {
     errSpy.mockRestore()
   })
 
+  it('does not claim the destroyed queue will retry when the reset beacon is blocked', async () => {
+    // reportBeaconLoss's consented arm says "remain in the persisted queue and will retry on next
+    // init()" — true for the page-hide and destroy() phases, where the events roll back and sync()
+    // puts them on disk. During reset() the very next statement is storage.purge(), which removes
+    // the key: nothing remains and nothing retries. An integrator debugging lost logout events was
+    // told the opposite of what happened by the one message that exists to be truthful about it.
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('consented'))
+    beacon.mockReturnValue(false)
+
+    expect(t.purgeQueue({ send: true }).ok).toBe(true)
+
+    const claims = [...warnSpy.mock.calls, ...errSpy.mock.calls].map(c => String(c[0]))
+    expect(claims.some(m => m.includes('will retry'))).toBe(false)
+    expect(claims.some(m => m.includes('dropped unsent'))).toBe(true)
+    warnSpy.mockRestore()
+    errSpy.mockRestore()
+  })
+
   it('beacons the pending events on a reset purge before dropping them', async () => {
     // The happy path of { send: true }: a logout delivers what was collected under unchanged
     // consent before the queues leave the device. The blocked-beacon test above proves the call
@@ -594,9 +615,21 @@ describe('batch config validation against untrusted input', () => {
     // The counts index arrays: lock()/slice()/splice() truncate a fraction, so maxSize 1.5 reserves
     // half an event and strands a queue (pinned behaviorally above).
     expect(warnFor({ maxSize: 1.5 }).join()).toContain('maxSize')
+    // "using 1." — truncation, not the "using 10." a default-replacement arm would print; the
+    // message is the only place the two are distinguishable for maxSize (for maxQueueSize the
+    // eviction test below pins the behavior too).
+    expect(warnFor({ maxSize: 1.5 }).join()).toContain('using 1.')
     expect(warnFor({ maxQueueSize: 1.5 }).join()).toContain('maxQueueSize')
     // maxWaitMs is a duration handed to setTimeout, which is happy with a fraction.
     expect(warnFor({ maxWaitMs: 1.5 })).toEqual([])
+  })
+
+  it('treats an explicit undefined member as absent, silently', () => {
+    // The config-builder spelling BatchOptions exists for: `{ maxSize: cfg.maxSize }` with the
+    // option unset. validated() reads per member with an explicit === undefined check, so this
+    // must mean "default, no warning" — a spread-then-validate revert would warn about the exact
+    // spelling the type deliberately admits (pinned compile-side in init-options.test-d.ts).
+    expect(warnFor({ maxSize: undefined, maxWaitMs: undefined, maxQueueSize: undefined })).toEqual([])
   })
 
   // Rounded down, not replaced by the default: for the one knob bounding how much

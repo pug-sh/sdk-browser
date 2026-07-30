@@ -291,12 +291,47 @@ export const safeStringify = (value: unknown): string => {
   }
 }
 
+// Shared by the probe-key writer and the sweep below so the two cannot drift; same shape
+// makeStorageKey('_', 'probe_…') produced, stated once. The leading timestamp is what lets the
+// sweep judge staleness without reading a value.
+const PROBE_KEY_PREFIX = '__pug___probe_'
+// Far beyond a probe's real lifetime (sub-millisecond): anything older was stranded by a failed
+// removal, not left by a probe in flight.
+const PROBE_STALE_MS = 5000
+
+/**
+ * Bounds the residue per-call probe keys can strand: on a store whose removeItem persistently
+ * fails, every probe leaves a new key (~3 per init(), accumulating across visits) that sits
+ * outside the retention envelope and every teardown. The bound is "until recovery", not "always":
+ * while removals are still failing, this sweep's own removals fail identically — what it reclaims
+ * is residue stranded by an *earlier* failure, on a later probe once the store works again. Only
+ * demonstrably stale keys are swept — a fresh sibling may be another tab's probe in flight, and
+ * deleting it mid-probe fails that tab's read-back, the exact memory-only downgrade the per-call
+ * key exists to prevent. A key without a parseable stamp (the pre-timestamp fixed key an older
+ * build used) is stale by construction; during a mixed-version rollout that can, in a
+ * sub-millisecond window, fail an old build's in-flight probe — accepted, since the fixed key's
+ * concurrent-tab behavior was already broken (the reason per-call keys exist).
+ */
+const sweepStaleProbeKeys = (currentKey: string): void => {
+  // Backwards: removals shift the indices above them.
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i)
+    if (!k || k === currentKey || !k.startsWith(PROBE_KEY_PREFIX)) {
+      continue
+    }
+    const stamp = Number.parseInt(k.slice(PROBE_KEY_PREFIX.length), 36)
+    if (!Number.isFinite(stamp) || Date.now() - stamp > PROBE_STALE_MS) {
+      localStorage.removeItem(k)
+    }
+  }
+}
+
 export const isStorageAvailable = (): boolean => {
   // The freshness lives in the *key*, not the value: a fixed key let residue from an earlier failed
   // probe read back as this run's own write — and let two tabs probing concurrently clobber each
   // other's value and both report a working store unavailable, downgrading both page loads to
   // memory-only persistence. A per-call key collides with neither.
-  const key = makeStorageKey('_', `probe_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`)
+  const key = `${PROBE_KEY_PREFIX}${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}__`
   try {
     const s = localStorage
     s.setItem(key, '1')
@@ -314,6 +349,13 @@ export const isStorageAvailable = (): boolean => {
       localStorage.removeItem(key)
     } catch {
       // Best-effort: a stranded per-call probe key is inert and collides with nothing.
+    }
+    // Its own try, deliberately: sharing the removal's meant a throwing removeItem skipped the
+    // sweep entirely — in exactly the failure mode that strands keys for it to reclaim later.
+    try {
+      sweepStaleProbeKeys(key)
+    } catch {
+      // Opportunistic: a store that is still failing sweeps nothing this time.
     }
   }
 }

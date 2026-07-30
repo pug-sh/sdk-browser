@@ -380,6 +380,28 @@ describe('isStorageAvailable', () => {
     localStorage.removeItem('__pug___probe__')
   })
 
+  // The cost of per-call keys: a store whose removeItem persistently fails strands a new key per
+  // probe (~3 per init(), accumulating across visits, outside the retention envelope and every
+  // teardown). Later probes sweep the residue — but only keys that are demonstrably stale, because
+  // a fresh sibling may be another tab's probe in flight, and deleting it mid-probe fails that
+  // tab's read-back: the exact memory-only downgrade the per-call key exists to prevent. The
+  // timestamp rides the key, so staleness needs no value read.
+  it('sweeps stale probe residue left by earlier failed removals', () => {
+    localStorage.setItem('__pug___probe_0_stranded__', '1') // stamp 0 — decades stale
+    localStorage.setItem('__pug___probe__', '1') // the pre-timestamp fixed key: no stamp, stale
+    expect(isStorageAvailable()).toBe(true)
+    expect(localStorage.getItem('__pug___probe_0_stranded__')).toBeNull()
+    expect(localStorage.getItem('__pug___probe__')).toBeNull()
+  })
+
+  it('leaves a fresh concurrent probe key from another tab alone', () => {
+    const rival = `__pug___probe_${Date.now().toString(36)}_rival__`
+    localStorage.setItem(rival, '1')
+    expect(isStorageAvailable()).toBe(true)
+    expect(localStorage.getItem(rival)).toBe('1')
+    localStorage.removeItem(rival)
+  })
+
   // The other fixed-key fault ran in the opposite direction: two tabs probing at once clobbered each
   // other's value on the shared key and both reported a working store unavailable — memory-only
   // persistence for both page loads. The rival write below lands where a fixed-key probe would read.

@@ -334,3 +334,16 @@ describe('reserved-prefix heal reports an unconfirmed removal', () => {
     expect(logSpies.error).not.toHaveBeenCalled()
   })
 })
+
+describe('omitted gate (untyped caller)', () => {
+  // The untyped-caller shape the arity pin in consent-gate.test-d.ts cannot reach: tests are
+  // transpile-only and production is typechecked, so only the runtime guard decides what an
+  // omitted gate means. It used to surface as a throw only on the returning-identified-visitor
+  // branch — every other install configured cleanly and the omission stayed invisible. A TypeError
+  // at the head fails every caller the same way, matching configureSession and createCookieLayer.
+  it('throws at configure time instead of deciding an identity write later', async () => {
+    vi.resetModules()
+    const { configureProfile } = await import('./profile.js')
+    expect(() => (configureProfile as (p: string, s?: unknown, g?: unknown) => void)('proj-arity')).toThrow(TypeError)
+  })
+})
