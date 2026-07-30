@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   configureUrlRedaction,
   decodeStored,
   encodeStored,
   getSafeElementText,
   isCaptureSuppressed,
+  isStorageAvailable,
   makeStorageKey,
   scrubUrl,
 } from './utils.js'
@@ -84,6 +85,29 @@ describe('scrubUrl', () => {
     )
     expect(scrubUrl('https://x.com/cb#id_token=abc&redirect_uri=https://x.com/next')).toBe(
       'https://x.com/cb#id_token=redacted&redirect_uri=https%3A%2F%2Fx.com%2Fnext',
+    )
+  })
+
+  // Query and fragment are redacted by two separate matchers joined by one "unchanged" protocol, and
+  // every case above exercises exactly one of them — so returning early after the first match, or
+  // dropping either call, passed the whole suite. An OIDC callback that carries both is the real
+  // shape: the authorization code in the query, the token in the fragment.
+  it('redacts query and fragment in the same URL', () => {
+    expect(scrubUrl('https://x.com/cb?code=abc&page=2#access_token=xyz&state=ok')).toBe(
+      'https://x.com/cb?code=redacted&page=2#access_token=redacted&state=ok',
+    )
+  })
+
+  it('redacts one side without disturbing an unmatched other side', () => {
+    expect(scrubUrl('https://x.com/cb?page=2#access_token=xyz')).toBe('https://x.com/cb?page=2#access_token=redacted')
+    expect(scrubUrl('https://x.com/cb?token=abc#/orders/42')).toBe('https://x.com/cb?token=redacted#/orders/42')
+  })
+
+  // The same combination on the fail-closed path — scrubOpaque has its own pair of calls, so the
+  // parseable case above pins neither of them.
+  it('redacts query and fragment together when the URL does not parse', () => {
+    expect(scrubUrl('http://ex ample.com/cb?code=abc&page=2#access_token=xyz')).toBe(
+      'http://ex ample.com/cb?code=redacted&page=2#access_token=redacted',
     )
   })
 
@@ -305,5 +329,51 @@ describe('getSafeElementText', () => {
 
   it('treats contenteditable with no value as editable', () => {
     expect(getSafeElementText(el('<div contenteditable=""><p id="t">draft</p></div>'), 50)).toBe('')
+  })
+})
+
+describe('isStorageAvailable', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  // Instance spies, not Storage.prototype: in this jsdom environment a prototype-level spy never
+  // fires, so every assertion below would pass unconditionally.
+  it('reports available for a working store', () => {
+    expect(isStorageAvailable()).toBe(true)
+  })
+
+  it('reports unavailable when the store throws', () => {
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError')
+    })
+    expect(isStorageAvailable()).toBe(false)
+  })
+
+  // The shim adversary: a Storage proxy (privacy extension, a partial polyfill) that accepts every
+  // call and stores nothing. Without the probe reading back, the store treated it as usable and
+  // every later write reported success while nothing survived — and the store's own setItem cannot
+  // afford a per-write read-back, since it is on the per-event session path.
+  it('reports unavailable when the store silently no-ops writes', () => {
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(false)
+  })
+
+  // Deliberately still available: a removal that no-ops is a narrower fault than a write that does
+  // — values still persist — and PersistentStore.removeItem verifies removals per call. Failing the
+  // whole layer here would downgrade the default install to memory-only, i.e. a fresh anonymous ID
+  // and session on every page load, over a teardown defect.
+  it('still reports available when only removals no-op', () => {
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(true)
+  })
+
+  // A fixed sentinel let residue from an earlier failed probe read back as this run's own write, so
+  // a store that no-ops setItem reported available — the exact fault the read-back exists to catch.
+  it('is not fooled by a stale probe value left on the device', () => {
+    localStorage.setItem('__pug___probe__', '1')
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(false)
+    localStorage.removeItem('__pug___probe__')
   })
 })

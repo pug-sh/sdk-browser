@@ -28,8 +28,9 @@ export const configureProfile = (
   // present up to its stored deadline — the write carries the deadline forward and clamps it, so it
   // can never *extend* retention (see Retention in CLAUDE.md) — but only while consent permits
   // persisting identity: writing here while denied would re-issue an identity cookie (and
-  // re-broadcast it to sibling subdomains) for a user who has not consented. When no getter is
-  // passed (non-init callers, tests) the refresh is unchanged.
+  // re-broadcast it to sibling subdomains) for a user who has not consented. Called unconditionally:
+  // the parameter is required and its arity is pinned in consent-gate.test-d.ts, so an omitting
+  // caller throws here rather than defaulting to permitted and taking the identity-write branch.
   const stored = store?.getItem(externalIdKey)
   if (stored) {
     // The reserved prefix belongs to the server's derived cookieless identities. identify() rejects
@@ -52,7 +53,7 @@ export const configureProfile = (
       }
     } else {
       externalId = stored
-      if (isGranted?.() ?? true) {
+      if (isGranted()) {
         store?.setItem(externalIdKey, stored)
       }
     }

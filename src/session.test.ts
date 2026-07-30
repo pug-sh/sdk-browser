@@ -1,5 +1,6 @@
 import { CookieJar, JSDOM } from 'jsdom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { GRANTED } from './consent-gate.test-utils.js'
 import type { PersistentStore } from './persistence.js'
 import { clearSession, configureSession, destroySession, resetIdentity, resolveSessionId, rotate } from './session.js'
 import { persisted, storedValue } from './storage-envelope.test-utils.js'
@@ -14,6 +15,7 @@ const createMockStorage = (): Storage => {
   const store: Record<string, string> = {}
   return {
     getItem: (key: string) => store[key] ?? null,
+    getItemOrLegacy: (key: string) => store[key] ?? null,
     setItem: (key: string, value: string) => {
       store[key] = value
     },
@@ -215,6 +217,7 @@ describe('rotate', () => {
     const store: PersistentStore = {
       crossSubdomain: true,
       getItem: () => null,
+      getItemOrLegacy: () => null,
       setItem: () => false,
       removeItem: () => {},
     }
@@ -241,6 +244,7 @@ describe('resetIdentity', () => {
     const store: PersistentStore = {
       crossSubdomain: true,
       getItem: () => null,
+      getItemOrLegacy: () => null,
       setItem: () => false,
       removeItem: () => {},
     }
@@ -269,6 +273,7 @@ describe('clearSession', () => {
     const store: PersistentStore = {
       crossSubdomain: true,
       getItem: () => null,
+      getItemOrLegacy: () => null,
       setItem: () => true,
       removeItem: () => false,
     }
@@ -406,6 +411,7 @@ describe('cross-subdomain sessions', () => {
       map,
       crossSubdomain,
       getItem: key => map.get(key) ?? null,
+      getItemOrLegacy: key => map.get(key) ?? null,
       setItem: (key, value) => {
         map.set(key, value)
         return true
@@ -471,6 +477,7 @@ describe('cross-subdomain sessions', () => {
     const store: PersistentStore = {
       crossSubdomain,
       getItem: key => map.get(key) ?? null,
+      getItemOrLegacy: key => map.get(key) ?? null,
       setItem,
       removeItem: key => {
         map.delete(key)
@@ -547,6 +554,7 @@ describe('cross-subdomain sessions', () => {
     const store: PersistentStore = {
       crossSubdomain: true,
       getItem: key => map.get(key) ?? null,
+      getItemOrLegacy: key => map.get(key) ?? null,
       setItem,
       removeItem: key => {
         map.delete(key)
@@ -580,7 +588,7 @@ describe('cross-subdomain session round-trip', () => {
       import('./persistence.js'),
     ])
     const doc = new JSDOM('', { url, cookieJar: jar }).window.document
-    const store = createPersistentStore(createCookieLayer(true, doc))
+    const store = createPersistentStore(createCookieLayer(true, GRANTED, doc))
     session.configureSession(PROJECT_ID, undefined, store)
     return session
   }

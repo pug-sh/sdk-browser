@@ -25,27 +25,29 @@ export const SECONDS_PER_DAY = 24 * 60 * 60
 export const DEFAULT_MAX_AGE_DAYS = 365
 
 /**
- * The retention envelope every persisted value is wrapped in: `<expiry epoch ms>|<value>`. The
- * deadline is stamped once, at the first write, so refreshing a value cannot extend how long it is
- * kept — localStorage has no expiry of its own, so without this the default install kept identity
- * forever.
- *
- * Lives in this import-free module rather than `persistence.ts`, which owns the layering: the suites
- * that assert against raw storage need to spell the format, and importing it from there would drag
- * `logger.js` into each of them, where a `vi.mock` factory is hoisted above its own spies.
- */
-/**
  * An enveloped stored string, as opposed to a bare value. The brand keeps the two apart at the
- * persistence↔cookie seam: `CookieLayer.set()` accepts only enveloped strings, because a bare value
- * written through it reads as undecodable and is deleted by the store's next `getItem` — silent
- * identity loss with no compile error. Reads stay unbranded (`string`): what comes back off the
- * device is not trustworthy enough to carry the brand.
+ * persistence↔cookie seam: `CookieLayer.set()` and the store's localStorage write accept only
+ * enveloped strings, because a bare value written through either reads as undecodable and is
+ * deleted by the store's next `getItem` — silent identity loss with no compile error. Reads stay
+ * unbranded (`string`): what comes back off the device is not trustworthy enough to carry the brand.
  */
 export type StoredEnvelope = string & { readonly __envelope: true }
 
+/**
+ * Wraps a value in the retention envelope every persisted value carries:
+ * `<expiry epoch ms>|<value>`. The deadline is stamped once, at the first write, so refreshing a
+ * value cannot extend how long it is kept — localStorage has no expiry of its own, so without this
+ * the default install kept identity forever.
+ *
+ * The codec lives in this import-free module rather than in `persistence.ts`, which owns the
+ * layering: the suites that assert against raw storage need to spell the format, and importing it
+ * from there would drag `logger.js` into each of them, where a `vi.mock` factory is hoisted above
+ * its own spies.
+ */
 export const encodeStored = (value: string, expiresAt: number): StoredEnvelope =>
   `${expiresAt}|${value}` as StoredEnvelope
 
+/** Unwraps `encodeStored`'s envelope; null for a bare pre-envelope value or a malformed one. */
 export const decodeStored = (raw: string | null): { value: string; expiresAt: number } | null => {
   if (raw === null) {
     return null
@@ -293,9 +295,20 @@ export const isStorageAvailable = (): boolean => {
   try {
     const s = localStorage
     const key = makeStorageKey('_', 'probe')
-    s.setItem(key, '1')
+    // A fresh value each call, not a fixed sentinel: a probe left behind by an earlier failed run
+    // (or written concurrently by another tab) would otherwise read back as this run's own write
+    // and report a store that no-ops setItem as usable — the exact fault this read-back exists for.
+    const value = `${Date.now()}-${Math.random()}`
+    s.setItem(key, value)
+    // Verify the write only. A shim that no-ops setItem stores nothing while reporting success, so
+    // every later write would lie; that is a property of the Storage object, not of a key, which is
+    // why it is checked here rather than on the store's per-event write path. A removal that no-ops
+    // is a narrower fault — values still persist — and PersistentStore.removeItem verifies that one
+    // per call, so failing the whole layer on it would turn a teardown defect into total identity
+    // loss: no session, no anonymous ID, a fresh identity every page load.
+    const wrote = s.getItem(key) === value
     s.removeItem(key)
-    return true
+    return wrote
   } catch {
     return false
   }

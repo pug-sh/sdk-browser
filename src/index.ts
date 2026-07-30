@@ -1,5 +1,5 @@
 export type { JsonObject, JsonValue } from '@bufbuild/protobuf'
-export { type BatchConfig } from './batch.js'
+export { type BatchConfig, type BatchOptions } from './batch.js'
 export {
   type AutoCaptureConfig,
   type AutoCaptureSelection,

@@ -1,7 +1,17 @@
 import { CookieJar, JSDOM } from 'jsdom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { type CookieDocument, createCookieLayer, seekRegistrableDomain } from './cookie.js'
+import { DENIED, GRANTED } from './consent-gate.test-utils.js'
+import { type CookieDocument, type CrossSubdomainConfig, createCookieLayer, seekRegistrableDomain } from './cookie.js'
 import { persisted } from './storage-envelope.test-utils.js'
+import type { GrantedGate } from './tracking-consent.js'
+
+/**
+ * The layer under test with consent granted. The twin promotion is the one write on the read path
+ * and is gated on full consent (see reconcileTwin), so every case below that exercises it says so;
+ * the gate itself is covered by the "consent gate" describe at the end.
+ */
+const grantedLayer = (config: CrossSubdomainConfig, doc?: CookieDocument | null) =>
+  createCookieLayer(config, GRANTED, doc)
 
 // A document whose writes are captured for assertion while reads/writes still delegate to a real
 // jsdom cookie jar — so read-back verification and public-suffix rules stay faithful. Needed
@@ -68,7 +78,7 @@ describe('seekRegistrableDomain', () => {
 
 describe('createCookieLayer', () => {
   it('returns null when config is false', () => {
-    expect(createCookieLayer(false, docAt('https://app.example.com/'))).toBeNull()
+    expect(grantedLayer(false, docAt('https://app.example.com/'))).toBeNull()
   })
 
   it('returns null and warns when the document refuses cookies', () => {
@@ -81,14 +91,14 @@ describe('createCookieLayer', () => {
       },
       location: { hostname: 'app.example.com', protocol: 'https:' },
     }
-    expect(createCookieLayer(true, sandboxed)).toBeNull()
+    expect(grantedLayer(true, sandboxed)).toBeNull()
     expect(logSpies.warn).toHaveBeenCalledWith('Cookies unavailable; identity will not be shared across subdomains.')
   })
 
   it('shares values across subdomains via the registrable domain', () => {
     const jar = new CookieJar()
-    const app = createCookieLayer(true, docAt('https://app.example.com/', jar))
-    const www = createCookieLayer(true, docAt('https://www.example.com/', jar))
+    const app = grantedLayer(true, docAt('https://app.example.com/', jar))
+    const www = grantedLayer(true, docAt('https://www.example.com/', jar))
 
     expect(app?.crossSubdomain).toBe(true)
     expect(app?.set(KEY, 'anon-123', TTL)).toBe(true)
@@ -97,13 +107,13 @@ describe('createCookieLayer', () => {
 
   it('does not leak values to unrelated sites sharing the jar', () => {
     const jar = new CookieJar()
-    const app = createCookieLayer(true, docAt('https://app.example.com/', jar))
+    const app = grantedLayer(true, docAt('https://app.example.com/', jar))
     app?.set(KEY, 'anon-123', TTL)
     expect(docAt('https://app.other.org/', jar).cookie).not.toContain('anon-123')
   })
 
   it('uses a host-only cookie on localhost', () => {
-    const layer = createCookieLayer(true, docAt('http://localhost:3000/'))
+    const layer = grantedLayer(true, docAt('http://localhost:3000/'))
     expect(layer).not.toBeNull()
     expect(layer?.crossSubdomain).toBe(false)
     expect(layer?.set(KEY, 'v', TTL)).toBe(true)
@@ -111,7 +121,7 @@ describe('createCookieLayer', () => {
   })
 
   it('uses a host-only cookie on IP hosts', () => {
-    const layer = createCookieLayer(true, docAt('http://192.168.1.7/'))
+    const layer = grantedLayer(true, docAt('http://192.168.1.7/'))
     expect(layer?.crossSubdomain).toBe(false)
   })
 
@@ -119,15 +129,15 @@ describe('createCookieLayer', () => {
     // herokuapp.com is a public suffix, so the probe lands on the tenant's own host, not the
     // shared suffix — a sibling app must never see the value.
     const jar = new CookieJar()
-    const app = createCookieLayer(true, docAt('https://myapp.herokuapp.com/', jar))
+    const app = grantedLayer(true, docAt('https://myapp.herokuapp.com/', jar))
     expect(app?.set(KEY, 'anon-123', TTL)).toBe(true)
     expect(docAt('https://other.herokuapp.com/', jar).cookie).not.toContain('anon-123')
   })
 
   it('honors an explicit domain narrower than the registrable domain', () => {
     const jar = new CookieJar()
-    const a = createCookieLayer({ domain: 'app.acme.com' }, docAt('https://a.app.acme.com/', jar))
-    const b = createCookieLayer({ domain: 'app.acme.com' }, docAt('https://b.app.acme.com/', jar))
+    const a = grantedLayer({ domain: 'app.acme.com' }, docAt('https://a.app.acme.com/', jar))
+    const b = grantedLayer({ domain: 'app.acme.com' }, docAt('https://b.app.acme.com/', jar))
 
     expect(a?.crossSubdomain).toBe(true)
     a?.set(KEY, 'scoped', TTL)
@@ -137,12 +147,12 @@ describe('createCookieLayer', () => {
   })
 
   it('normalizes a leading dot in an explicit domain', () => {
-    const layer = createCookieLayer({ domain: '.app.acme.com' }, docAt('https://a.app.acme.com/'))
+    const layer = grantedLayer({ domain: '.app.acme.com' }, docAt('https://a.app.acme.com/'))
     expect(layer?.crossSubdomain).toBe(true)
   })
 
   it('falls back to host-only with a warning when the explicit domain does not cover the host', () => {
-    const layer = createCookieLayer({ domain: 'evil.com' }, docAt('https://app.acme.com/'))
+    const layer = grantedLayer({ domain: 'evil.com' }, docAt('https://app.acme.com/'))
     expect(layer?.crossSubdomain).toBe(false)
     expect(logSpies.warn).toHaveBeenCalledWith(
       'crossSubdomainTracking domain "evil.com" is not usable on "app.acme.com"; using a host-only cookie instead.',
@@ -150,7 +160,7 @@ describe('createCookieLayer', () => {
   })
 
   it('falls back to host-only with a warning when the explicit domain is a public suffix', () => {
-    const layer = createCookieLayer({ domain: 'co.uk' }, docAt('https://foo.bar.co.uk/'))
+    const layer = grantedLayer({ domain: 'co.uk' }, docAt('https://foo.bar.co.uk/'))
     expect(layer?.crossSubdomain).toBe(false)
     expect(logSpies.warn).toHaveBeenCalledWith(
       'crossSubdomainTracking domain "co.uk" is not usable on "foo.bar.co.uk"; using a host-only cookie instead.',
@@ -165,7 +175,7 @@ describe('createCookieLayer', () => {
     it('treats {} as disabled rather than auto-discovering', () => {
       // What a config builder spreading unset optionals produces.
       const jar = new CookieJar()
-      const layer = createCookieLayer({} as never, docAt('https://app.example.com/', jar))
+      const layer = grantedLayer({} as never, docAt('https://app.example.com/', jar))
       expect(layer).toBeNull()
       expect(docAt('https://other.example.com/', jar).cookie).toBe('')
       expect(logSpies.warn).toHaveBeenCalledWith(
@@ -176,14 +186,14 @@ describe('createCookieLayer', () => {
     it('treats a leftover { maxAgeDays } from the removed arm as disabled', () => {
       // The realistic upgrade path: the object arm used to carry a cookie lifetime and still
       // auto-discovered. A one-tag page keeping that JSON must not silently retain cross-subdomain.
-      expect(createCookieLayer({ maxAgeDays: 30 } as never, docAt('https://app.example.com/'))).toBeNull()
+      expect(grantedLayer({ maxAgeDays: 30 } as never, docAt('https://app.example.com/'))).toBeNull()
     })
 
     it('does not warn about keys a config builder left explicitly undefined', () => {
       // { domain, maxAgeDays: undefined } is what spreading an unset legacy optional produces; the
       // key configures nothing, so "ignores [maxAgeDays]" reported a problem that was not there.
       // Object.keys sees the key either way; the extras filter must not.
-      const layer = createCookieLayer(
+      const layer = grantedLayer(
         { domain: 'example.com', maxAgeDays: undefined } as never,
         docAt('https://app.example.com/'),
       )
@@ -195,53 +205,50 @@ describe('createCookieLayer', () => {
       // The other half of that upgrade path: JSON pinning a domain AND keeping the old lifetime
       // key. The domain is stated, so the opt-in stands — but the deliberately shortened lifetime
       // was silently replaced by the 365-day default, the harmful direction for a privacy setting.
-      const layer = createCookieLayer(
-        { domain: 'example.com', maxAgeDays: 30 } as never,
-        docAt('https://app.example.com/'),
-      )
+      const layer = grantedLayer({ domain: 'example.com', maxAgeDays: 30 } as never, docAt('https://app.example.com/'))
       expect(layer?.crossSubdomain).toBe(true)
       expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('maxAgeDays'))
     })
 
     it('treats a non-string or empty domain as disabled', () => {
-      expect(createCookieLayer({ domain: '' } as never, docAt('https://app.example.com/'))).toBeNull()
-      expect(createCookieLayer({ domain: 123 } as never, docAt('https://app.example.com/'))).toBeNull()
-      expect(createCookieLayer({ domain: null } as never, docAt('https://app.example.com/'))).toBeNull()
+      expect(grantedLayer({ domain: '' } as never, docAt('https://app.example.com/'))).toBeNull()
+      expect(grantedLayer({ domain: 123 } as never, docAt('https://app.example.com/'))).toBeNull()
+      expect(grantedLayer({ domain: null } as never, docAt('https://app.example.com/'))).toBeNull()
     })
 
     it('treats a stringly-typed value from a template as disabled', () => {
       // Both are truthy non-objects, so both used to fall through to the probe — including "false".
-      expect(createCookieLayer('true' as never, docAt('https://app.example.com/'))).toBeNull()
-      expect(createCookieLayer('false' as never, docAt('https://app.example.com/'))).toBeNull()
-      expect(createCookieLayer(1 as never, docAt('https://app.example.com/'))).toBeNull()
+      expect(grantedLayer('true' as never, docAt('https://app.example.com/'))).toBeNull()
+      expect(grantedLayer('false' as never, docAt('https://app.example.com/'))).toBeNull()
+      expect(grantedLayer(1 as never, docAt('https://app.example.com/'))).toBeNull()
     })
 
     it('still discovers for a literal true', () => {
       // The guard above must not have disabled the documented opt-in.
-      expect(createCookieLayer(true, docAt('https://app.example.com/'))?.crossSubdomain).toBe(true)
+      expect(grantedLayer(true, docAt('https://app.example.com/'))?.crossSubdomain).toBe(true)
     })
   })
 
   it('round-trips values needing encoding', () => {
-    const layer = createCookieLayer(true, docAt('https://app.example.com/'))
+    const layer = grantedLayer(true, docAt('https://app.example.com/'))
     const value = 'a; b=c, d €'
     expect(layer?.set(KEY, value, TTL)).toBe(true)
     expect(layer?.get(KEY)).toBe(value)
   })
 
   it('refuses oversized values and warns', () => {
-    const layer = createCookieLayer(true, docAt('https://app.example.com/'))
+    const layer = grantedLayer(true, docAt('https://app.example.com/'))
     expect(layer?.set(KEY, 'x'.repeat(4000), TTL)).toBe(false)
     expect(logSpies.warn).toHaveBeenCalledWith(`Cookie for "${KEY}" would exceed 3800 chars; skipping cookie write.`)
   })
 
   it('returns false instead of throwing on malformed UTF-16 (lone surrogate)', () => {
-    const layer = createCookieLayer(true, docAt('https://app.example.com/'))
+    const layer = grantedLayer(true, docAt('https://app.example.com/'))
     expect(layer?.set(KEY, '\uD800', TTL)).toBe(false)
   })
 
   it('logs the cause when a cookie write throws instead of silently swallowing it', () => {
-    const layer = createCookieLayer(true, docAt('https://app.example.com/'))
+    const layer = grantedLayer(true, docAt('https://app.example.com/'))
     layer?.set(KEY, '\uD800', TTL) // encodeURIComponent throws inside writeCookie
     expect(logSpies.debug).toHaveBeenCalledWith(expect.any(String), expect.any(Error))
   })
@@ -251,7 +258,7 @@ describe('createCookieLayer', () => {
   // a failed opt-out. The teardown boolean chain now rests on this return value, and the outcome is
   // an identity cookie surviving on the registrable domain.
   it('logs the cause at error level when a cookie removal throws (privacy teardown must surface why)', () => {
-    const layer = createCookieLayer(true, docAt('https://app.example.com/'))
+    const layer = grantedLayer(true, docAt('https://app.example.com/'))
     expect(layer?.remove('\uD800')).toBe(false) // encodeURIComponent(key) throws inside remove
     expect(logSpies.error).toHaveBeenCalledWith(expect.any(String), expect.any(Error))
     expect(logSpies.debug).not.toHaveBeenCalledWith(expect.any(String), expect.any(Error))
@@ -262,21 +269,21 @@ describe('createCookieLayer', () => {
     const doc = docAt('https://app.example.com/', jar)
     // Malformed host-only twin, created first so it sorts ahead of the shared cookie.
     doc.cookie = `${KEY}=%E0%A4; path=/`
-    const www = createCookieLayer(true, docAt('https://www.example.com/', jar))
+    const www = grantedLayer(true, docAt('https://www.example.com/', jar))
     expect(www?.set(KEY, 'anon-good', TTL)).toBe(true)
-    const app = createCookieLayer(true, doc)
+    const app = grantedLayer(true, doc)
     expect(app?.get(KEY)).toBe('anon-good')
   })
 
   it('returns null from get for a missing name', () => {
-    const layer = createCookieLayer(true, docAt('https://app.example.com/'))
+    const layer = grantedLayer(true, docAt('https://app.example.com/'))
     expect(layer?.get('missing')).toBeNull()
   })
 
   it('removes values across subdomains', () => {
     const jar = new CookieJar()
-    const app = createCookieLayer(true, docAt('https://app.example.com/', jar))
-    const www = createCookieLayer(true, docAt('https://www.example.com/', jar))
+    const app = grantedLayer(true, docAt('https://app.example.com/', jar))
+    const www = grantedLayer(true, docAt('https://www.example.com/', jar))
     app?.set(KEY, 'v', TTL)
     app?.remove(KEY)
     expect(app?.get(KEY)).toBeNull()
@@ -284,7 +291,7 @@ describe('createCookieLayer', () => {
   })
 
   it('reports removal success via the return value', () => {
-    const layer = createCookieLayer(true, docAt('https://app.example.com/'))
+    const layer = grantedLayer(true, docAt('https://app.example.com/'))
     layer?.set(KEY, 'v', TTL)
     expect(layer?.remove(KEY)).toBe(true)
     expect(layer?.get(KEY)).toBeNull()
@@ -295,15 +302,15 @@ describe('createCookieLayer', () => {
     const doc = docAt('https://app.example.com/', jar)
     // A legacy host-only twin coexisting with the shared cookie (older SDK / a prior host-only run).
     doc.cookie = `${KEY}=anon-legacy; path=/`
-    const sibling = createCookieLayer(true, docAt('https://www.example.com/', jar))
+    const sibling = grantedLayer(true, docAt('https://www.example.com/', jar))
     sibling?.set(KEY, 'anon-shared', TTL)
 
-    const local = createCookieLayer(true, doc)
+    const local = grantedLayer(true, doc)
     // Removal must clear BOTH the shared cookie and the host-only twin, so a later reconcile on a
     // fresh page load finds nothing to promote back onto the shared cookie.
     expect(local?.remove(KEY)).toBe(true)
 
-    const fresh = createCookieLayer(true, docAt('https://app.example.com/', jar))
+    const fresh = grantedLayer(true, docAt('https://app.example.com/', jar))
     expect(fresh?.get(KEY)).toBeNull()
     expect(docAt('https://app.example.com/', jar).cookie).not.toContain(KEY)
   })
@@ -324,7 +331,7 @@ describe('createCookieLayer', () => {
       },
       location: { hostname: 'app.example.com', protocol: 'https:' },
     }
-    const layer = createCookieLayer(true, doc)
+    const layer = grantedLayer(true, doc)
     expect(layer?.set(KEY, 'anon-123', TTL)).toBe(true)
     expect(layer?.remove(KEY)).toBe(false)
   })
@@ -333,7 +340,7 @@ describe('createCookieLayer', () => {
     const jar = new CookieJar()
     const doc = docAt('https://app.example.com/', jar)
     doc.cookie = `${KEY}=stale; path=/`
-    const layer = createCookieLayer(true, doc)
+    const layer = grantedLayer(true, doc)
     expect(layer?.set(KEY, 'fresh', TTL)).toBe(true)
     expect(layer?.get(KEY)).toBe('fresh')
     expect(doc.cookie.split('; ').filter(part => part.startsWith(`${KEY}=`))).toHaveLength(1)
@@ -345,10 +352,10 @@ describe('createCookieLayer', () => {
     // A stale host-only twin, created first so it sorts ahead of the shared cookie on this origin.
     doc.cookie = `${KEY}=anon-stale; path=/`
     // The authoritative shared identity is written afterward (e.g. from a sibling subdomain).
-    const www = createCookieLayer(true, docAt('https://www.example.com/', jar))
+    const www = grantedLayer(true, docAt('https://www.example.com/', jar))
     expect(www?.set(KEY, 'anon-shared', TTL)).toBe(true)
 
-    const app = createCookieLayer(true, doc)
+    const app = grantedLayer(true, doc)
     const read = app?.get(KEY)
     // Reads must resolve to the shared value, never the stale host-only twin.
     expect(read).toBe('anon-shared')
@@ -364,21 +371,22 @@ describe('createCookieLayer', () => {
     // Only a host-only value exists (e.g. left by a prior crossSubdomainTracking:false run).
     const stored = persisted('anon-legacy')
     doc.cookie = `${KEY}=${encodeURIComponent(stored)}; path=/`
-    const app = createCookieLayer(true, doc)
+    const app = grantedLayer(true, doc)
     expect(app?.crossSubdomain).toBe(true)
     expect(app?.get(KEY)).toBe(stored)
     // First access promotes it to the registrable domain, so a sibling now reads the same identity.
-    expect(createCookieLayer(true, docAt('https://www.example.com/', jar))?.get(KEY)).toBe(stored)
+    expect(grantedLayer(true, docAt('https://www.example.com/', jar))?.get(KEY)).toBe(stored)
   })
 
-  it('discards a pre-envelope host-only twin instead of promoting it', () => {
-    // A bare value predates the retention envelope, so it carries no deadline and the store reads it
-    // as absent. Promoting it would widen an identifier to the whole registrable domain that nothing
-    // can ever expire.
+  it('keeps a pre-envelope host-only twin host-only instead of promoting it', () => {
+    // A bare value predates the retention envelope, so it carries no deadline. Promoting it would
+    // widen an identifier to the whole registrable domain that nothing can ever expire — but it is
+    // handed back rather than destroyed, because only the store can say what an undecodable value
+    // means: it removes one on sight, and getItemOrLegacy adopts the consent record's first.
     const jar = new CookieJar()
     const doc = docAt('https://app.example.com/', jar)
     doc.cookie = `${KEY}=anon-legacy; path=/`
-    expect(createCookieLayer(true, doc)?.get(KEY)).toBeNull()
+    expect(grantedLayer(true, doc)?.get(KEY)).toBe('anon-legacy')
     expect(docAt('https://www.example.com/', jar).cookie).not.toContain('anon-legacy')
   })
 
@@ -402,7 +410,7 @@ describe('createCookieLayer', () => {
       location: { hostname: 'app.example.com', protocol: 'https:' },
     }
     doc.cookie = `${KEY}=${encodeURIComponent(persisted('anon-old', -60_000))}; path=/`
-    expect(createCookieLayer(true, doc)?.get(KEY)).toBeNull()
+    expect(grantedLayer(true, doc)?.get(KEY)).toBeNull()
     const promotion = writes.find(w => w.startsWith(`${KEY}=`) && w.includes('domain=') && !w.includes('max-age=0'))
     expect(promotion).toBeUndefined()
   })
@@ -429,7 +437,7 @@ describe('createCookieLayer', () => {
       location: { hostname: 'app.example.com', protocol: 'https:' },
     }
     real.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
-    const layer = createCookieLayer(true, doc)
+    const layer = grantedLayer(true, doc)
 
     layer?.get(KEY)
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('reconcil'), expect.anything())
@@ -459,7 +467,7 @@ describe('createCookieLayer', () => {
     }
     const stored = persisted('anon-legacy')
     doc.cookie = `${KEY}=${encodeURIComponent(stored)}; path=/`
-    const layer = createCookieLayer(true, doc)
+    const layer = grantedLayer(true, doc)
     expect(layer?.crossSubdomain).toBe(true)
     expect(layer?.get(KEY)).toBe(stored)
   })
@@ -483,7 +491,7 @@ describe('createCookieLayer', () => {
     }
     const stored = persisted('anon-legacy')
     doc.cookie = `${KEY}=${encodeURIComponent(stored)}; path=/`
-    createCookieLayer(true, doc)?.get(KEY)
+    grantedLayer(true, doc)?.get(KEY)
     // Not the promotion attempt (domain-scoped, dropped above), not the expiry (max-age=0), not the
     // seed (no max-age) — the host-only restore is what is left.
     const restore = writes.find(
@@ -512,7 +520,7 @@ describe('createCookieLayer', () => {
     }
     // Seeded through the real document — the dropping setter above must only affect SDK writes.
     real.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
-    expect(createCookieLayer(true, doc)?.get(KEY)).toBeNull()
+    expect(grantedLayer(true, doc)?.get(KEY)).toBeNull()
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('restore'))
   })
 })
@@ -522,7 +530,7 @@ describe('cookie attributes', () => {
 
   it('writes Secure, SameSite=Lax, path, domain, and a 365-day max-age on https', () => {
     const { doc, writes } = capturingDoc('https://app.example.com/')
-    const layer = createCookieLayer(true, doc)
+    const layer = grantedLayer(true, doc)
     expect(layer?.set(KEY, 'v', TTL)).toBe(true)
     const write = identityWrite(writes)
     expect(write).toBeDefined()
@@ -534,7 +542,7 @@ describe('cookie attributes', () => {
 
   it('omits Secure on http so http subdomains can still read the cookie', () => {
     const { doc, writes } = capturingDoc('http://app.example.com/')
-    const layer = createCookieLayer(true, doc)
+    const layer = grantedLayer(true, doc)
     expect(layer?.set(KEY, 'v', TTL)).toBe(true)
     const write = identityWrite(writes)
     expect(write).toBeDefined()
@@ -549,7 +557,7 @@ describe('cookie lifetime', () => {
 
   it("uses the caller's lifetime, so the cookie dies with the value it holds", () => {
     const { doc, writes } = capturingDoc('https://app.example.com/')
-    createCookieLayer(true, doc)?.set(KEY, 'v', 600)
+    grantedLayer(true, doc)?.set(KEY, 'v', 600)
     expect(longLivedWrite(writes)).toContain('max-age=600')
   })
 
@@ -558,10 +566,93 @@ describe('cookie lifetime', () => {
     // the value inside it, and would ignore a lowered maxAgeDays entirely.
     const { doc, writes } = capturingDoc('https://app.example.com/')
     doc.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy', 600_000))}; path=/`
-    createCookieLayer(true, doc)?.get(KEY)
+    grantedLayer(true, doc)?.get(KEY)
     const write = writes.find(w => w.includes(KEY) && w.includes('domain=.example.com'))
     const maxAge = Number(/max-age=(\d+)/.exec(write ?? '')?.[1])
     expect(maxAge).toBeGreaterThan(500)
     expect(maxAge).toBeLessThanOrEqual(600)
+  })
+})
+
+describe('consent gate on the twin promotion', () => {
+  /** A lone host-only twin at app.example.com, over a jar its sibling can be read from. */
+  const seedTwin = () => {
+    const jar = new CookieJar()
+    const doc = docAt('https://app.example.com/', jar)
+    const stored = persisted('anon-legacy')
+    doc.cookie = `${KEY}=${encodeURIComponent(stored)}; path=/`
+    return { jar, doc, stored }
+  }
+
+  const siblingSees = (jar: CookieJar) => docAt('https://www.example.com/', jar).cookie.includes('anon-legacy')
+
+  // reconcileTwin() promotes a lone host-only cookie onto the registrable domain. That is an
+  // identity *write*, and it happens on the read path, so every other consent check missed it:
+  // configureProfile reads external_id unconditionally (only its refresh write was gated), so a
+  // denied or default-cookieless init widened an identify()ed email to every sibling subdomain.
+  it('does not promote a host-only twin while consent is not granted', () => {
+    const { jar, doc } = seedTwin()
+
+    createCookieLayer(true, DENIED, doc)?.get(KEY)
+
+    expect(siblingSees(jar)).toBe(false)
+  })
+
+  // Skipping the promotion must not cost the value: the expiry probe runs regardless (it is a
+  // deletion, and it is what stops a stale twin shadowing the shared cookie), so the twin is put
+  // back rather than left destroyed. Read back through a *second denied* layer — through a granted
+  // one the read itself promotes, so the assertion could not tell "restored" from "never touched".
+  it('restores the twin, still readable on this host and still invisible to siblings', () => {
+    const { jar, doc, stored } = seedTwin()
+
+    createCookieLayer(true, DENIED, doc)?.get(KEY)
+
+    expect(createCookieLayer(true, DENIED, doc)?.get(KEY)).toBe(stored)
+    expect(siblingSees(jar)).toBe(false)
+  })
+
+  it('restores it with its host-only attributes, not a bare write', () => {
+    // Same reason the failed-promotion restore does: a bare write drops SameSite and secure, and
+    // hands a previously-Secure identity cookie to plain http on the same host.
+    const { doc, writes } = capturingDoc('https://app.example.com/')
+    doc.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
+    writes.length = 0 // drop the seed write above, which is not the layer's
+    createCookieLayer(true, DENIED, doc)?.get(KEY)
+
+    const restore = writes.find(w => w.includes('anon-legacy') && !w.includes('max-age=0'))
+    expect(restore).toContain('SameSite=Lax')
+    expect(restore).toContain('secure')
+    expect(restore).not.toContain('domain=')
+  })
+
+  // The reconciliation latches even when it cannot promote. Un-latched, every later get()/set()
+  // repeated the delete-and-restore — an identity Set-Cookie on the *read* path, in the one consent
+  // state that promises no device writes at all (measured: 10 cookie writes across 5 reads).
+  it('does not repeat the delete-and-restore on later accesses', () => {
+    const { doc, writes } = capturingDoc('https://app.example.com/')
+    doc.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
+    const layer = createCookieLayer(true, DENIED, doc)
+    writes.length = 0
+
+    for (let i = 0; i < 5; i++) {
+      layer?.get(KEY)
+    }
+
+    expect(writes.filter(w => !w.includes('__pug_probe_'))).toHaveLength(2) // one expire + one restore
+  })
+
+  // A preserved twin was created before any shared cookie, so RFC 6265 sorts it first in
+  // document.cookie: left in place, it wins writeCookie's read-back and a write that landed
+  // reports failure — which reaches the integrator as optOutTracking() returning false, i.e.
+  // "identity may still be on this device" shown to an end user.
+  it('reports a shared write as persisted even after preserving a twin', () => {
+    const { doc } = capturingDoc('https://app.example.com/')
+    doc.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
+    const layer = createCookieLayer(true, DENIED, doc)
+    layer?.get(KEY)
+
+    const next = persisted('anon-new') // once: persisted() stamps Date.now(), so two calls differ
+    expect(layer?.set(KEY, next, 600)).toBe(true)
+    expect(layer?.get(KEY)).toBe(next)
   })
 })

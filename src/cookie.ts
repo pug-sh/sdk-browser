@@ -1,4 +1,5 @@
 import { log } from './logger.js'
+import type { GrantedGate } from './tracking-consent.js'
 import { decodeStored, type StoredEnvelope } from './utils.js'
 
 /**
@@ -49,21 +50,29 @@ export interface CookieLayer {
 }
 
 /**
- * Seconds left on a stored value's own retention deadline, or null when it has none left — or none
- * at all, which means a pre-envelope value. Used by the twin migration, the one write that has no
- * caller-supplied lifetime to pass on.
+ * What a twin's own stored value says should happen to it: the seconds it has left, `'expired'`
+ * (retention already ended it), or `'undecodable'` — pre-envelope or corrupt, which only the store
+ * can interpret. The three were one `null` before, which conflated "retention says drop this" with
+ * "this layer cannot read it" and let the second be destroyed on the first's reasoning.
  */
-const remainingSeconds = (raw: string): number | null => {
+const twinLifetime = (raw: string): number | 'expired' | 'undecodable' => {
   const stored = decodeStored(raw)
   if (!stored) {
-    return null
+    return 'undecodable'
   }
   const seconds = Math.round((stored.expiresAt - Date.now()) / 1000)
-  return seconds > 0 ? seconds : null
+  return seconds > 0 ? seconds : 'expired'
 }
 
 /** Browsers cap a cookie (name + value + attributes) around 4096 bytes; refuse oversized writes early. */
 const MAX_COOKIE_LENGTH = 3800
+
+/**
+ * How long an undecodable twin is put back for. It exists only to survive until the store's read on
+ * this same call, which removes it — long enough to absorb a slow page, short enough that a value
+ * with no deadline of its own cannot linger if that read never comes.
+ */
+const LEGACY_TWIN_RESTORE_SECONDS = 300
 
 /** Bound on how many hostname labels the domain probe will consider. */
 const PROBE_LABEL_LIMIT = 8
@@ -191,6 +200,11 @@ const resolveExplicitDomain = (doc: CookieDocument, requested: string): string =
  */
 export const createCookieLayer = (
   config: CrossSubdomainConfig,
+  // Gates the twin promotion in reconcileTwin() — the one identity *write* on the read path, and so
+  // the one that escaped every other consent check. Required: unlike session.ts, an absent gate
+  // here throws inside reconcileTwin's try and silently un-latches rather than defaulting either
+  // way, so the arity pin in consent-gate.test-d.ts is the only thing that catches the omission.
+  isGranted: GrantedGate,
   doc: CookieDocument | null = typeof document === 'undefined' ? null : document,
 ): CookieLayer | null => {
   // Resolved before the availability probe: an unusable config needs no test cookie written.
@@ -239,8 +253,17 @@ export const createCookieLayer = (
   // not, or a persistently blocked cookie store would warn on every read of every event.
   const twinWarnedKeys = new Set<string>()
 
+  // Keys whose host-only twin reconcileTwin deliberately left in place (its not-granted arm).
+  const preservedTwins = new Set<string>()
+
   const writeCookie = (key: string, value: string, maxAgeSeconds: number): boolean => {
     try {
+      // A preserved twin is superseded by the value about to be written, and it was created first,
+      // so RFC 6265 sorts it ahead of the shared cookie in document.cookie — the read-back below
+      // would return the twin and report a landed write as failed.
+      if (preservedTwins.delete(key)) {
+        doc.cookie = `${encodeURIComponent(key)}=; path=/; max-age=0`
+      }
       // encodeURIComponent stays inside the try — it throws on malformed UTF-16 (lone surrogates),
       // and callers must never throw.
       const encoded = `${encodeURIComponent(key)}=${encodeURIComponent(value)}${attrs}; max-age=${maxAgeSeconds}`
@@ -261,6 +284,19 @@ export const createCookieLayer = (
   // refresh (getAnonymousId, session activity) would copy the stale twin onto the shared cookie and
   // corrupt identity site-wide. Once per key on first access: expire the twin, then see what
   // remains. No-op in host-only mode, where there is no shared cookie to shadow.
+  /**
+   * Puts an expired twin back at its own host-only scope — `hostOnlyAttrs`, not a bare write, which
+   * dropped SameSite and secure and handed a previously-Secure identity cookie to plain http.
+   * Read-back-verified and warned on: the twin is already expired by the time this runs, so a
+   * restore that also fails destroys what was the sole copy.
+   */
+  const restoreTwin = (key: string, value: string, maxAgeSeconds: number): void => {
+    doc.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(value)}${hostOnlyAttrs}; max-age=${maxAgeSeconds}`
+    if (readCookie(doc, key) !== value) {
+      log.warn(`Could not restore the host-only "${key}" cookie; its value may be lost on this device.`)
+    }
+  }
+
   const reconcileTwin = (key: string): void => {
     if (!domainAttr || reconciledKeys.has(key)) {
       return
@@ -277,22 +313,45 @@ export const createCookieLayer = (
       }
       // Nothing remains: `before` was a lone host-only twin (a genuine host-only → shared
       // migration), so promote it with the lifetime it has left — a fresh full-length one would
-      // outlive its contents. A value that does not decode predates the envelope and is unreadable
-      // to the store, so it is dropped rather than widened to the whole registrable domain.
-      const remaining = remainingSeconds(before)
-      if (remaining === null) {
+      // outlive its contents.
+      const remaining = twinLifetime(before)
+      if (remaining === 'expired') {
+        // Retention already ended it, and the expiry write above removed it. Nothing to restore.
         return
       }
-      // On a failed promotion, restore the twin rather than lose the value: cross-subdomain reads
-      // don't fall back to localStorage, and the next page load retries. Read-back-verified — the
-      // twin is already expired at this point, so a restore that also fails destroys the sole copy.
+      if (remaining === 'undecodable') {
+        // Pre-envelope or corrupt. Never *promoted* — that would widen an identifier nothing can
+        // expire — but restored rather than left destroyed, because what an undecodable value means
+        // is the store's call, not this layer's: it removes one on sight, and `getItemOrLegacy`
+        // hands the consent record's bare value up first. Destroyed here, that read saw nothing and
+        // a recorded refusal silently reverted to the config seed. Short-lived, because the store
+        // deletes it on the very read that follows.
+        preservedTwins.add(key)
+        restoreTwin(key, before, LEGACY_TWIN_RESTORE_SECONDS)
+        return
+      }
+      // Only the promotion is gated, not the whole reconciliation: everything above is a *deletion*
+      // (expiring a stale twin so it cannot shadow the shared cookie on reads), which no consent
+      // state forbids and which configureProfile depends on — it reads external_id once and latches
+      // the result for the page. The promotion is different: it widens identity to the registrable
+      // domain, so while consent withholds identity storage the twin goes back at its existing
+      // host-only scope, leaving the device exactly as it was. Un-latched, so a mid-page grant
+      // migrates on the next access rather than waiting for the next page load.
+      if (!isGranted()) {
+        // Latched, not retried: un-latched, every later get()/set() repeated this delete-and-restore
+        // — measured at 10 cookie writes across 5 reads, i.e. an identity Set-Cookie on the read
+        // path in the state that promises no device writes. A grant later in the same page migrates
+        // on the next page load instead, which costs nothing real: external_id, the key that
+        // motivated the gate, is read once by configureProfile and latched into module state, so
+        // nothing re-reads it through the store anyway.
+        preservedTwins.add(key)
+        restoreTwin(key, before, remaining)
+        return
+      }
+      // On a failed promotion, restore rather than lose the value: cross-subdomain reads don't fall
+      // back to localStorage, and the next page load retries.
       if (!writeCookie(key, before, remaining)) {
-        doc.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(before)}${hostOnlyAttrs}; max-age=${remaining}`
-        if (readCookie(doc, key) !== before) {
-          log.warn(
-            `Could not restore the host-only "${key}" cookie after a failed promotion; its value may be lost on this device.`,
-          )
-        }
+        restoreTwin(key, before, remaining)
       }
     } catch (err) {
       // Un-latch so the next access retries: latched as done, a stale twin kept shadowing the
@@ -320,8 +379,9 @@ export const createCookieLayer = (
       return writeCookie(key, value, maxAgeSeconds)
     },
     remove: key => {
-      // After an explicit remove there is no twin left worth reconciling on a later access.
+      // After an explicit remove there is no twin left worth reconciling — or clearing — later.
       reconciledKeys.add(key)
+      preservedTwins.delete(key)
       try {
         doc.cookie = `${encodeURIComponent(key)}=; path=/${domainAttr}; max-age=0`
         // Also clear a host-only twin so a removed key cannot resurrect from an older scope.

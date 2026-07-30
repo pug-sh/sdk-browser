@@ -91,10 +91,39 @@ export type GrantedGate = ConsentGate<'granted'>
 export type TrackingGate = ConsentGate<'tracking'>
 
 /**
- * The recognized `TrackingConsentConfig` keys. Kept as a runtime set because the CDN one-tag
- * install supplies this object as untyped JSON, where a typo is otherwise undetectable.
+ * A granted gate for a controller that does not exist yet. `init()` must build the cookie layer
+ * before the controller — the controller needs the store, and the store needs the layer — so the
+ * layer's gate resolves lazily through `controller`.
+ *
+ * Until it resolves this reads as **not granted**, so the window cannot become a hole if a future
+ * edit moves a store access above the assignment: no `?? true` here means no fail-open default
+ * anywhere in the gate chain. It costs nothing today — the only value read in that window is the
+ * consent record, and the sole thing a withheld gate suppresses is `reconcileTwin`'s *promotion*.
+ * The twin is preserved and read normally, and the restore write that follows it is ungated, so a
+ * cookie-backed consent record still round-trips and still lands on the registrable domain.
+ *
+ * Lives here so the `as GrantedGate` cast stays in the module that owns the brand — minted
+ * anywhere else it is indistinguishable from the wrapper-arrow laundering `consent-gate.test-d.ts`
+ * exists to reject.
  */
-const KNOWN_CONSENT_KEYS: ReadonlySet<string> = new Set(['initial', 'onReject', 'persist', 'respectGpc'])
+export const deferredGrantedGate = (controller: () => TrackingConsentController | null): GrantedGate =>
+  ((): boolean => controller()?.isGranted() ?? false) as GrantedGate
+
+/**
+ * The recognized `TrackingConsentConfig` keys. Needed at runtime because the CDN one-tag install
+ * supplies this object as untyped JSON, where a typo is otherwise undetectable — but *derived* from
+ * the type, like `TrackingConsent` is from `CONSENT_STATES`. Written separately, adding a legal
+ * member made valid typed configs fail closed to 'denied'; `satisfies` makes both drift directions
+ * a compile error (a missing key fails the constraint, an extra one the excess-property check).
+ */
+const CONSENT_KEY_MAP = {
+  initial: true,
+  onReject: true,
+  persist: true,
+  respectGpc: true,
+} satisfies Record<keyof TrackingConsentConfig, true>
+
+const KNOWN_CONSENT_KEYS: ReadonlySet<string> = new Set(Object.keys(CONSENT_KEY_MAP))
 
 /** Narrows an untrusted value to a valid consent state. Everything else is out-of-domain. */
 const isConsent = (value: unknown): value is TrackingConsent => (CONSENT_STATES as readonly unknown[]).includes(value)
@@ -207,13 +236,13 @@ export const createTrackingConsent = (
     }
   }
   if (store) {
-    // `legacy: 'adopt'`: a pre-envelope build persisted this record as a bare string, which the
-    // envelope migration reads as undecodable and deletes. For identifiers that is the designed
-    // outcome (they self-heal), but this key records a *refusal* — deleted unread, a user who
-    // clicked Reject on the old build came back on the config seed. Adopt hands the bare value
-    // over (still removed from the device either way); isConsent() below decides whether it was a
-    // recorded choice or corruption, and the refresh write re-envelopes an adopted one.
-    const stored = store.getItem(storageKey, { legacy: 'adopt' })
+    // getItemOrLegacy, the only call site: a pre-envelope build persisted this record as a bare
+    // string, which the envelope migration reads as undecodable and deletes. For identifiers that
+    // is the designed outcome (they self-heal), but this key records a *refusal* — deleted unread,
+    // a user who clicked Reject on the old build came back on the config seed. It hands the bare
+    // value over (still removed from the device either way); isConsent() below decides whether it
+    // was a recorded choice or corruption, and the refresh write re-envelopes an adopted one.
+    const stored = store.getItemOrLegacy(storageKey)
     if (isConsent(stored)) {
       status = stored
       persistedValue = stored

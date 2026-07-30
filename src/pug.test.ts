@@ -39,7 +39,7 @@ const transportSpies = {
   destroy: vi.fn(),
   // Consent teardown drops the persisted event queue too. Omitting it here made every consent
   // transition in this file throw a swallowed TypeError and silently report failure.
-  purgeQueue: vi.fn(() => true),
+  purgeQueue: vi.fn(() => ({ ok: true, dropped: 0 })),
 }
 
 const unaryCallSpy = vi.fn(() => Promise.resolve({}))
@@ -1226,12 +1226,21 @@ describe('consent teardown contract', () => {
 
   it('mentions the routine queue drop at debug on a non-authoritative non-granted init', async () => {
     // The drop itself is deliberate policy (identified payloads must not sit on a device whose
-    // consent is not granted), but an integrator on the README's placeholder-denied CMP flow
-    // wondering where a hard-killed granted session's events went had nothing to find, even with
-    // debug on.
+    // consent is not granted), but an integrator on a placeholder-denied CMP flow wondering where a
+    // hard-killed granted session's events went had nothing to find, even with debug on.
     const { init } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'denied' })
-    expect(logSpies.debug).toHaveBeenCalledWith(expect.stringContaining('queued events'))
+    expect(logSpies.debug).toHaveBeenCalledWith(expect.stringContaining('queued-events purge'))
+  })
+
+  it('warns, not debugs, when that purge actually destroyed events', async () => {
+    // The page that queued them said "will retry" at warn level; this is where that breaks. Keyed
+    // on the count so the no-op purge — the overwhelming majority of loads — stays silent, which
+    // the test above pins from the other side.
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: true, dropped: 3 })
+    const { init } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Dropped 3 queued event(s)'))
   })
 
   // The boolean exists so a withdrawal that did not fully land is detectable rather than
@@ -1239,7 +1248,7 @@ describe('consent teardown contract', () => {
   it('reports false when a queued-event purge does not land', async () => {
     const { init, optOutTracking } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })
-    transportSpies.purgeQueue.mockReturnValueOnce(false)
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, dropped: 0 })
 
     expect(optOutTracking()).toBe(false)
   })
@@ -1318,7 +1327,7 @@ describe('teardown failures surface in the returned boolean', () => {
   it('reports false when the queued events could not be purged', async () => {
     const { init, optOutTracking } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })
-    transportSpies.purgeQueue.mockReturnValueOnce(false)
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, dropped: 0 })
 
     expect(optOutTracking()).toBe(false)
   })

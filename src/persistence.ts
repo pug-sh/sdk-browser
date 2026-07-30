@@ -6,6 +6,7 @@ import {
   encodeStored,
   isStorageAvailable,
   SECONDS_PER_DAY,
+  type StoredEnvelope,
   safeStringify,
 } from './utils.js'
 
@@ -21,13 +22,21 @@ export interface PersistentStore {
   /**
    * A read can delete: an expired or undecodable stored value is removed on sight rather than
    * ignored (see Retention in CLAUDE.md), logging an error when that removal cannot be confirmed.
-   *
-   * `legacy: 'adopt'` returns a pre-envelope (undecodable) value instead of null — it is still
-   * removed from the device either way, so retention cannot be evaded; the caller re-persists
-   * anything it validates through setItem, which stamps a fresh envelope. For the consent record
-   * only: identifiers deliberately stay on the default, where a bare value reads as absent.
+   * A pre-envelope value from an older build reads as absent — see `getItemOrLegacy`.
    */
-  getItem(key: string, opts?: { readonly legacy?: 'drop' | 'adopt' }): string | null
+  getItem(key: string): string | null
+  /**
+   * `getItem`, but a pre-envelope (undecodable) value is returned instead of read as absent. It is
+   * still removed from the device either way, so retention cannot be evaded; the caller validates
+   * it and re-persists through `setItem`, which stamps a fresh envelope.
+   *
+   * A separate method rather than an option on `getItem`: adopting a bare value is only ever
+   * correct for the consent record, which records a *refusal* that must not silently revert to the
+   * config seed. Identifiers must stay on `getItem` — adopting one resurrects an identifier no
+   * deadline can reach — and that is caller discipline either way, but the distinct name puts it in
+   * the call rather than in an argument.
+   */
+  getItemOrLegacy(key: string): string | null
   /**
    * Returns true when the value will be readable on the next page load. In cross-subdomain mode
    * that requires the cookie write to land (reads trust only the cookie); otherwise any layer
@@ -105,6 +114,12 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
   const knownExpiry = new Map<string, number>()
   // Keys whose stale localStorage mirror was already swept after a shared-cookie miss this load.
   const sweptKeys = new Set<string>()
+  // Two independent once-per-key latches, deliberately not shared. They describe the same residue
+  // but answer to different callers: sharing them let one throwing sweep permanently suppress the
+  // teardown report below, which is the only signal anywhere that an opt-out left an identifier on
+  // the device (removeItem's return value excludes this layer in cross-subdomain mode).
+  const sweepWarnedKeys = new Set<string>()
+  const residueWarnedKeys = new Set<string>()
 
   /**
    * Deletes this origin's localStorage mirror of a key whose shared cookie is gone. Reads never
@@ -126,12 +141,21 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
       local.removeItem(key)
       knownExpiry.delete(key)
       if (local.getItem(key) !== null) {
-        log.warn(
+        // Error, not warn: the residue is an identifier — routinely an identify()ed email — that no
+        // deadline reaches and that becomes readable again the moment cross-subdomain is turned off.
+        // The same outcome is reported at error everywhere else in the teardown chain.
+        log.error(
           `localStorage still holds "${key}" after its shared cookie was deleted; residue remains on this device.`,
         )
       }
     } catch (err) {
-      log.warn(`Failed to remove the stale localStorage mirror for "${key}":`, err)
+      // Un-latch so a later miss retries, as reconcileTwin does: latched, one throwing sweep left
+      // the mirror unreachable for the rest of the page load. The warn stays once per key.
+      sweptKeys.delete(key)
+      if (!sweepWarnedKeys.has(key)) {
+        sweepWarnedKeys.add(key)
+        log.error(`Failed to remove the stale localStorage mirror for "${key}"; residue remains on this device:`, err)
+      }
     }
   }
 
@@ -185,10 +209,6 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
     }
   }
 
-  // One warning per key, like warnedKeys: teardowns retry removals (dropStale per read, consent
-  // transitions), and a store that no-ops once will no-op every time.
-  const residueWarnedKeys = new Set<string>()
-
   const removeItem = (key: string): boolean => {
     const cookieRemoved = dropCookie(key, 'remove the')
     // An absent layer can't hold a stale value, so it defaults to "removed".
@@ -200,10 +220,12 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
         // without throwing, and the teardown booleans rest on this answer.
         localRemoved = local.getItem(key) === null
         // In cross-subdomain mode the return value below deliberately excludes this layer, so this
-        // warning is the only signal anywhere that the residue exists.
+        // is the only signal anywhere that the residue exists — and the residue is an identifier
+        // outliving a teardown that reported success. Error, matching how clearProfile() reports the
+        // same outcome on the cookie layer.
         if (!localRemoved && !residueWarnedKeys.has(key)) {
           residueWarnedKeys.add(key)
-          log.warn(`localStorage still holds "${key}" after removal; residue remains on this device.`)
+          log.error(`localStorage still holds "${key}" after removal; residue remains on this device.`)
         }
       } catch (err) {
         localRemoved = false
@@ -215,6 +237,30 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
     // cookie is authoritative in cross-subdomain mode; otherwise reads prefer the cookie and fall
     // back to localStorage, so both must be gone.
     return crossSubdomain ? cookieRemoved : cookieRemoved && localRemoved
+  }
+
+  /**
+   * The one localStorage write path. `raw` is typed to the envelope, like `CookieLayer.set`, so a
+   * bare value cannot reach this layer either — written bare it reads as undecodable and getItem
+   * deletes it on sight.
+   *
+   * No read-back here, unlike `removeItem`: the failure it would catch — a Storage shim that
+   * no-ops without throwing — is a property of the Storage object rather than of a key, so
+   * `isStorageAvailable()` verifies it once at startup and `local` is null when it fails. A
+   * per-write check would put a second `getItem` on the per-event session write for a fact already
+   * known. Quota exhaustion, the other no-op-shaped failure, throws and is caught below.
+   */
+  const writeLocal = (key: string, raw: StoredEnvelope): boolean => {
+    if (!local) {
+      return false
+    }
+    try {
+      local.setItem(key, raw)
+      return true
+    } catch (err) {
+      log.warn(`Failed to write "${key}" to localStorage:`, err)
+      return false
+    }
   }
 
   /** The deadline already stamped on `key`, or undefined when there is none left to carry forward. */
@@ -239,34 +285,37 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
     }
   }
 
+  const readItem = (key: string, adoptLegacy: boolean): string | null => {
+    const raw = readRaw(key)
+    const record = decodeStored(raw)
+    if (!record) {
+      // Pre-envelope or corrupted: unreadable, and it carries no deadline, so leaving it strands
+      // an identifier retention can never reach.
+      if (raw !== null) {
+        dropStale(key, 'is not in the retention format')
+        // getItemOrLegacy hands the bare value back after the removal above, instead of reading it
+        // as absent — the migration path for the consent record, whose silent loss reverted a
+        // recorded 'denied' to the config seed. The caller validates and re-persists it.
+        if (adoptLegacy) {
+          return raw
+        }
+      }
+      return null
+    }
+    if (record.expiresAt <= Date.now()) {
+      // Delete rather than ignore, so the identifier leaves the device on the first visit after
+      // it lapses.
+      dropStale(key, 'is past its retention deadline')
+      return null
+    }
+    knownExpiry.set(key, record.expiresAt)
+    return record.value
+  }
+
   return {
     crossSubdomain,
-    getItem: (key, opts) => {
-      const raw = readRaw(key)
-      const record = decodeStored(raw)
-      if (!record) {
-        // Pre-envelope or corrupted: unreadable, and it carries no deadline, so leaving it strands
-        // an identifier retention can never reach.
-        if (raw !== null) {
-          dropStale(key, 'is not in the retention format')
-          // 'adopt' hands the bare value back after the removal above, instead of reading it as
-          // absent — the migration path for the consent record, whose silent loss reverted a
-          // recorded 'denied' to the config seed. The caller validates and re-persists it.
-          if (opts?.legacy === 'adopt') {
-            return raw
-          }
-        }
-        return null
-      }
-      if (record.expiresAt <= Date.now()) {
-        // Delete rather than ignore, so the identifier leaves the device on the first visit after
-        // it lapses.
-        dropStale(key, 'is past its retention deadline')
-        return null
-      }
-      knownExpiry.set(key, record.expiresAt)
-      return record.value
-    },
+    getItem: key => readItem(key, false),
+    getItemOrLegacy: key => readItem(key, true),
     setItem: (key, value) => {
       const now = Date.now()
       // Carried forward when still live, so a refresh cannot extend retention; clamped to the
@@ -293,15 +342,7 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
       // A cookie surviving a failed write shadows the value below on reads — clear it in host-only
       // mode, where reads fall back to localStorage; a shared one has no fallback and must stay.
       const shadowCleared = cookiePersisted || crossSubdomain || dropCookie(key, 'clear the stale')
-      let localPersisted = false
-      if (local) {
-        try {
-          local.setItem(key, raw)
-          localPersisted = true
-        } catch (err) {
-          log.warn(`Failed to write "${key}" to localStorage:`, err)
-        }
-      }
+      const localPersisted = writeLocal(key, raw)
       // In cross-subdomain mode reads never fall back to localStorage, so a localStorage-only
       // success is not persistence; nor is one a stale cookie we could not clear still shadows.
       const persisted = crossSubdomain ? cookiePersisted : cookiePersisted || (localPersisted && shadowCleared)

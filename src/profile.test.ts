@@ -1,5 +1,6 @@
 import { CookieJar, JSDOM } from 'jsdom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { DENIED, GRANTED } from './consent-gate.test-utils.js'
 import { persisted, storedValue } from './storage-envelope.test-utils.js'
 import { makeStorageKey } from './utils.js'
 
@@ -23,8 +24,8 @@ const pageLoad = async (url: string, jar: CookieJar) => {
     import('./persistence.js'),
   ])
   const doc = new JSDOM('', { url, cookieJar: jar }).window.document
-  const store = createPersistentStore(createCookieLayer(true, doc))
-  profile.configureProfile(PROJECT_ID, store)
+  const store = createPersistentStore(createCookieLayer(true, GRANTED, doc))
+  profile.configureProfile(PROJECT_ID, store, GRANTED)
   return { profile, store }
 }
 
@@ -107,7 +108,7 @@ describe('cross-subdomain identity', () => {
       vi.resetModules()
       const profile = await import('./profile.js')
       const { createPersistentStore } = await import('./persistence.js')
-      profile.configureProfile(PROJECT_ID, createPersistentStore(null))
+      profile.configureProfile(PROJECT_ID, createPersistentStore(null), GRANTED)
       return profile
     }
 
@@ -136,7 +137,7 @@ describe('cross-subdomain identity', () => {
     // A store whose removals never land (e.g. the shared cookie blocked mid-session): clearProfile
     // must surface it, since an unremoved identity cookie would resurface on the next read.
     const store = { crossSubdomain: true, getItem: () => null, setItem: () => true, removeItem: () => false }
-    profile.configureProfile(PROJECT_ID, store)
+    profile.configureProfile(PROJECT_ID, store, GRANTED)
     profile.clearProfile()
     expect(logSpies.error).toHaveBeenCalledWith(
       'Failed to clear the anonymous profile from storage — it may resurface on the next page load.',
@@ -151,6 +152,7 @@ describe('cross-subdomain identity', () => {
     const store = {
       crossSubdomain: true,
       getItem: (k: string) => (k === EXTERNAL_ID_KEY ? externalId : null),
+      getItemOrLegacy: (k: string) => (k === EXTERNAL_ID_KEY ? externalId : null),
       setItem,
       removeItem: () => true,
     }
@@ -161,7 +163,7 @@ describe('cross-subdomain identity', () => {
     vi.resetModules()
     const profile = await import('./profile.js')
     const { store, setItem } = storeWith('user-42')
-    profile.configureProfile(PROJECT_ID, store, () => false)
+    profile.configureProfile(PROJECT_ID, store, DENIED)
     // Restored into memory for consent-gated reads, but NOT persisted: no identity cookie write
     // while the user has not consented (threat-model constraint #6 — "no cookie while denied").
     expect(profile.resolveDistinctId()).toBe('user-42')
@@ -172,15 +174,15 @@ describe('cross-subdomain identity', () => {
     vi.resetModules()
     const profile = await import('./profile.js')
     const { store, setItem } = storeWith('user-42')
-    profile.configureProfile(PROJECT_ID, store, () => true)
+    profile.configureProfile(PROJECT_ID, store, GRANTED)
     expect(setItem).toHaveBeenCalledWith(EXTERNAL_ID_KEY, 'user-42')
   })
 
-  it('refreshes the persisted externalId when no consent getter is provided (backward-compatible)', async () => {
+  it('refreshes the persisted externalId under granted consent, cookie-backed store', async () => {
     vi.resetModules()
     const profile = await import('./profile.js')
     const { store, setItem } = storeWith('user-42')
-    profile.configureProfile(PROJECT_ID, store)
+    profile.configureProfile(PROJECT_ID, store, GRANTED)
     expect(setItem).toHaveBeenCalledWith(EXTERNAL_ID_KEY, 'user-42')
   })
 
@@ -190,7 +192,7 @@ describe('cross-subdomain identity', () => {
     // A store whose writes never land (e.g. the shared cookie blocked mid-session): markIdentified
     // must surface it at error level — identification would otherwise silently not survive a reload.
     const store = { crossSubdomain: true, getItem: () => null, setItem: () => false, removeItem: () => true }
-    profile.configureProfile(PROJECT_ID, store)
+    profile.configureProfile(PROJECT_ID, store, GRANTED)
     profile.markIdentified('user-42')
     expect(logSpies.error).toHaveBeenCalledWith(
       'Failed to persist external ID to storage — identification will not survive page reload.',
@@ -255,7 +257,7 @@ describe('cross-subdomain identity', () => {
   it('warns when no persistence is available and still returns an ID', async () => {
     vi.resetModules()
     const profile = await import('./profile.js')
-    profile.configureProfile(PROJECT_ID, null)
+    profile.configureProfile(PROJECT_ID, null, GRANTED)
     expect(logSpies.warn).toHaveBeenCalledWith(
       'Storage unavailable; anonymous profile ID will not persist across page loads.',
     )
@@ -281,7 +283,7 @@ describe('poisoned externalId restore', () => {
     localStorage.setItem(EXTERNAL_ID_KEY, persisted('cookieless-20260721-abc'))
     vi.resetModules()
     const profile = await import('./profile.js')
-    profile.configureProfile(PROJECT_ID)
+    profile.configureProfile(PROJECT_ID, undefined, GRANTED)
 
     expect(profile.isIdentified()).toBe(false)
     expect(profile.resolveDistinctId()).toMatch(/^anon-/)
@@ -295,7 +297,7 @@ describe('poisoned externalId restore', () => {
     localStorage.setItem(EXTERNAL_ID_KEY, persisted('user@example.com'))
     vi.resetModules()
     const profile = await import('./profile.js')
-    profile.configureProfile(PROJECT_ID)
+    profile.configureProfile(PROJECT_ID, undefined, GRANTED)
 
     expect(profile.isIdentified()).toBe(true)
     expect(profile.resolveDistinctId()).toBe('user@example.com')
@@ -313,12 +315,13 @@ describe('reserved-prefix heal reports an unconfirmed removal', () => {
     const { configureProfile } = await import('./profile.js')
     const store = {
       getItem: (k: string) => (k.includes('external_id') ? 'cookieless-abc123' : null),
+      getItemOrLegacy: (k: string) => (k.includes('external_id') ? 'cookieless-abc123' : null),
       setItem: () => true,
       removeItem: () => false, // the removal does not land
       crossSubdomain: true,
     }
 
-    configureProfile('proj-poison', store, () => true)
+    configureProfile('proj-poison', store, GRANTED)
 
     expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('cookieless-'))
   })
@@ -328,12 +331,13 @@ describe('reserved-prefix heal reports an unconfirmed removal', () => {
     const { configureProfile } = await import('./profile.js')
     const store = {
       getItem: (k: string) => (k.includes('external_id') ? 'cookieless-abc123' : null),
+      getItemOrLegacy: (k: string) => (k.includes('external_id') ? 'cookieless-abc123' : null),
       setItem: () => true,
       removeItem: () => true,
       crossSubdomain: true,
     }
 
-    configureProfile('proj-poison-ok', store, () => true)
+    configureProfile('proj-poison-ok', store, GRANTED)
 
     expect(logSpies.error).not.toHaveBeenCalled()
   })

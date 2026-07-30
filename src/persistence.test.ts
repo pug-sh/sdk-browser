@@ -116,7 +116,7 @@ describe('createPersistentStore', () => {
     expect(storedValue(localStorage.getItem('k'))).toBe('v')
   })
 
-  it('warns when localStorage still holds a value after removal', () => {
+  it('reports an error when localStorage still holds a value after removal', () => {
     // The exact adversary the read-back exists for — a shimmed store that no-ops without throwing.
     // The cross-subdomain return value deliberately excludes this layer, so without a log the
     // residue is invisible everywhere.
@@ -126,7 +126,7 @@ describe('createPersistentStore', () => {
     vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
     expect(store?.removeItem('k')).toBe(true)
     store?.removeItem('k')
-    expect(logSpies.warn.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
   })
 
   it('warns once when a cross-subdomain cookie write is silently dropped', () => {
@@ -458,7 +458,7 @@ describe('retention', () => {
     // re-persists it through setItem, which stamps a fresh envelope.
     const store = createPersistentStore(null)
     localStorage.setItem('k', 'denied')
-    expect(store?.getItem('k', { legacy: 'adopt' })).toBe('denied')
+    expect(store?.getItemOrLegacy('k')).toBe('denied')
     expect(localStorage.getItem('k')).toBeNull()
   })
 
@@ -467,14 +467,14 @@ describe('retention', () => {
     // adopt widens only the undecodable arm.
     const store = createPersistentStore(null)
     localStorage.setItem('k', persisted('v', -60_000))
-    expect(store?.getItem('k', { legacy: 'adopt' })).toBeNull()
+    expect(store?.getItemOrLegacy('k')).toBeNull()
     expect(localStorage.getItem('k')).toBeNull()
   })
 
   it('reads a live enveloped value under adopt exactly like a plain read', () => {
     const store = createPersistentStore(null)
     localStorage.setItem('k', persisted('v'))
-    expect(store?.getItem('k', { legacy: 'adopt' })).toBe('v')
+    expect(store?.getItemOrLegacy('k')).toBe('v')
     expect(storedValue(localStorage.getItem('k'))).toBe('v')
   })
 
@@ -506,6 +506,31 @@ describe('retention', () => {
     expect(store?.removeItem('k')).toBe(false)
   })
 
+  // The sweep and the teardown report describe the same residue but answer to different callers, so
+  // they keep independent once-per-key latches. Shared, one throwing sweep permanently suppressed
+  // the teardown report — which in cross-subdomain mode is the only signal anywhere that an opt-out
+  // left an identifier on the device, since removeItem's return value excludes the localStorage
+  // layer there.
+  it('still reports teardown residue after a throwing mirror sweep latched the same key', () => {
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'v')
+
+    // 1. The shared cookie is gone, so a read sweeps the mirror — and the sweep throws.
+    jar.delete('k')
+    const throwOnce = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('proxied Storage')
+    })
+    store?.getItem('k')
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('stale localStorage mirror'), expect.anything())
+
+    // 2. The user opts out. removeItem now no-ops silently, leaving the identifier behind.
+    logSpies.error.mockClear()
+    throwOnce.mockImplementation(() => {})
+    store?.removeItem('k')
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('still holds "k" after removal'))
+  })
+
   it('reports a stale value that cannot be removed once per key, not once per read', () => {
     // The session read runs getItem on every tracked event; against a store whose removeItem no-ops,
     // an unthrottled report here logged an error per event for the life of the page.
@@ -514,7 +539,10 @@ describe('retention', () => {
     vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
     store?.getItem('k')
     store?.getItem('k')
-    expect(logSpies.error).toHaveBeenCalledTimes(1)
+    // Two distinct once-per-key reports — the failed drop, and removeItem's residue read-back —
+    // and neither repeats on the second read, which is the throttle this pins.
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('could not be removed'))).toHaveLength(1)
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds'))).toHaveLength(1)
   })
 })
 

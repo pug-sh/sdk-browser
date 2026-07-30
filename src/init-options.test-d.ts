@@ -10,7 +10,7 @@
  * this file extends that standard across `InitOptions`, `TrackingConsentConfig` and
  * `SessionConfig`. Reverting any member to a bare optional fails the assignment below.
  */
-import type { InitOptions, SessionConfig, TrackingConsentConfig } from './index.js'
+import type { BatchOptions, InitOptions, SessionConfig, TrackingConsentConfig } from './index.js'
 
 declare const flag: boolean | undefined
 declare const days: number | undefined
@@ -18,12 +18,13 @@ declare const list: readonly string[] | false | undefined
 declare const state: 'granted' | 'denied' | 'cookieless' | undefined
 declare const reject: 'denied' | 'cookieless' | undefined
 declare const minutes: number | undefined
+declare const count: number | undefined
 
 // The config-builder spelling must compile for every optional member.
 const options: InitOptions = {
   apiKey: 'k',
   endpoint: undefined,
-  batch: undefined,
+  batch: { maxSize: count, maxWaitMs: count, maxQueueSize: count },
   dryRun: flag,
   debug: flag,
   autoCapture: undefined,
@@ -35,9 +36,14 @@ const options: InitOptions = {
   session: { idleTimeoutMinutes: minutes, maxSessionMinutes: minutes },
 }
 
+const batchOnly: BatchOptions = { maxSize: count }
+// Both spellings: the whole-option `undefined` this file already pinned, and the per-member one.
+const noBatch: InitOptions = { apiKey: 'k', batch: undefined }
 const sessionOnly: SessionConfig = { idleTimeoutMinutes: minutes }
 const consentOnly: TrackingConsentConfig = { initial: state }
 
 void options
+void batchOnly
+void noBatch
 void sessionOnly
 void consentOnly

@@ -3,7 +3,7 @@ import { type Event, EventSchema } from './gen/sdk/events/v1/events_pb.js'
 import { log } from './logger.js'
 import { GrpcCode, RpcError } from './rpc.js'
 import { createTransport } from './transport.js'
-import { isStorageAvailable, makeStorageKey } from './utils.js'
+import { isStorageAvailable, makeStorageKey, safeStringify } from './utils.js'
 
 interface SendOptions {
   readonly immediate?: boolean
@@ -49,9 +49,12 @@ const createMemoryQueueStorage = (maxQueueSize: number) => {
     // Consent teardown. Nothing to confirm — this queue never reaches the device — but it shares the
     // shape so callers can purge both without asking which is which.
     purge: () => {
+      // buffer.length, not `size`: purge discards the in-flight locked batch too, and the caller's
+      // warning is gated on this count — `size` made it silent in exactly the highest-loss case.
+      const dropped = buffer.length
       buffer.length = 0
       locked = 0
-      return true
+      return { ok: true, dropped }
     },
     get size() {
       return buffer.length - locked
@@ -182,12 +185,13 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
         clearTimeout(persistTimer)
         persistTimer = null
       }
+      const dropped = buffer.length
       buffer = []
       locked = 0
       try {
         localStorage.removeItem(key)
         if (localStorage.getItem(key) === null) {
-          return true
+          return { ok: true, dropped }
         }
         // A Storage shim, an extension proxy or a quota-locked store no-ops the removal without
         // throwing. Reported here because pug.ts deliberately adds no message of its own when
@@ -195,7 +199,7 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
         log.error(
           'Failed to drop the persisted event queue — queued events carry sessionId and distinctId, and may be sent on a later visit.',
         )
-        return false
+        return { ok: false, dropped }
       } catch (err) {
         // Same outcome as the no-op above — the key survives on the device — so the same level and
         // the same consequence sentence; the mechanism of failure does not pick the severity.
@@ -203,7 +207,7 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
           'Failed to drop the persisted event queue — queued events carry sessionId and distinctId, and may be sent on a later visit.',
           err,
         )
-        return false
+        return { ok: false, dropped }
       }
     },
     get size() {
@@ -225,6 +229,14 @@ export interface BatchConfig {
   readonly maxWaitMs: number
   readonly maxQueueSize: number
 }
+
+/**
+ * `batch` as callers supply it — deliberately not `Partial<BatchConfig>`. Under
+ * `exactOptionalPropertyTypes` (which `@tsconfig/strictest` enables) `Partial` produces
+ * `maxSize?: number`, so a config builder holding the option as `number | undefined` is a TS2375 —
+ * the one option surface that rejected the spelling `init-options.test-d.ts` pins everywhere else.
+ */
+export type BatchOptions = { readonly [K in keyof BatchConfig]?: BatchConfig[K] | undefined }
 
 export const DEFAULT_BATCH_CONFIG: BatchConfig = {
   maxSize: 10,
@@ -274,20 +286,31 @@ export const createBatchedTransport = (
   endpoint: string,
   apiKey: string,
   projectId: string,
-  partialConfig?: Partial<BatchConfig>,
+  partialConfig?: BatchOptions,
 ) => {
-  const merged = { ...DEFAULT_BATCH_CONFIG, ...partialConfig }
-  const validated = (name: string, value: number, min: number, fallback: number) => {
-    if (value >= min) {
-      return value
+  // `?? fallback` per member rather than a spread: BatchOptions admits an explicit `undefined` (the
+  // config-builder spelling), and spreading one over the defaults replaces the default with
+  // undefined instead of keeping it.
+  // Untrusted despite the type: the one-tag install supplies `batch` as `data-options` JSON that no
+  // compiler sees, and a bare `value >= min` accepted every shape JSON.parse can produce. `Infinity`
+  // (from `1e999`) passed, disabling the queue bound and size-triggered flushing outright; `null`
+  // passed too (`null >= 0`), turning maxWaitMs into `setTimeout(fn, 0)` — one request per event.
+  const validated = (name: keyof BatchConfig, min: number): number => {
+    const fallback = DEFAULT_BATCH_CONFIG[name]
+    const value: unknown = partialConfig?.[name]
+    if (value === undefined) {
+      return fallback
     }
-    log.warn(`batch.${name} must be >= ${min}, using default.`)
-    return fallback
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < min) {
+      log.warn(`batch.${name} ${safeStringify(value)} must be a finite number >= ${min}; using ${fallback}.`)
+      return fallback
+    }
+    return value
   }
 
-  const maxSize = validated('maxSize', merged.maxSize, 1, DEFAULT_BATCH_CONFIG.maxSize)
-  const maxWaitMs = validated('maxWaitMs', merged.maxWaitMs, 0, DEFAULT_BATCH_CONFIG.maxWaitMs)
-  const maxQueueSize = validated('maxQueueSize', merged.maxQueueSize, 1, DEFAULT_BATCH_CONFIG.maxQueueSize)
+  const maxSize = validated('maxSize', 1)
+  const maxWaitMs = validated('maxWaitMs', 0)
+  const maxQueueSize = validated('maxQueueSize', 1)
   const storageKey = makeStorageKey(projectId, 'queue')
 
   const inner = createTransport(endpoint, apiKey)
@@ -537,8 +560,8 @@ export const createBatchedTransport = (
      * the teardown chain whose meaning is device state. A dropped farewell beacon reports through
      * reportBeaconLoss but does not flip the return: beacons fail routinely under analytics
      * blockers, so folding delivery in made reset() "fail" on blocker-equipped browsers whose
-     * devices were verifiably clean — shown to users by the README's recipe as "your data may
-     * remain".
+     * devices were verifiably clean — and the README's recipe puts that boolean in front of end
+     * users, telling them a stored identifier may have survived.
      *
      * `send` is true only for `reset()` — a logout, where consent is unchanged and those events were
      * agreed to at collection time. Every consent teardown passes false: transmitting after the user
@@ -553,7 +576,7 @@ export const createBatchedTransport = (
      * the events must be gone from the device either way. `peekUnlocked()` excludes any in-flight
      * batch, whose later commit/rollback lands on an emptied buffer and is a harmless no-op.
      */
-    purgeQueue: ({ send }: { send: boolean }): boolean => {
+    purgeQueue: ({ send }: { send: boolean }): { ok: boolean; dropped: number } => {
       if (send && state !== 'destroyed') {
         const consentedTail = storage.peekUnlocked()
         const cookielessTail = cookielessStorage.peekUnlocked()
@@ -566,9 +589,12 @@ export const createBatchedTransport = (
           reportBeaconLoss(consentedTail.length, cookielessTail.length, 'during reset')
         }
       }
-      const consentedPurged = storage.purge()
-      const cookielessPurged = cookielessStorage.purge()
-      return consentedPurged && cookielessPurged
+      // `ok` answers "did the queues leave the device"; `dropped` is how many events that cost, so
+      // a caller can stay quiet on the common no-op purge and speak up when events actually died.
+      // Each queue counts its own buffer, in-flight locked batch included — see purge().
+      const consented = storage.purge()
+      const cookieless = cookielessStorage.purge()
+      return { ok: consented.ok && cookieless.ok, dropped: consented.dropped + cookieless.dropped }
     },
     destroy: () => {
       state = 'destroyed'

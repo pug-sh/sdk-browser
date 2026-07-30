@@ -1,5 +1,6 @@
 import { CookieJar, JSDOM } from 'jsdom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DENIED, GRANTED } from './consent-gate.test-utils.js'
 import { expiryOf, persisted, storedValue } from './storage-envelope.test-utils.js'
 import { isStorageAvailable, makeStorageKey } from './utils.js'
 
@@ -620,6 +621,7 @@ describe('createTrackingConsent with a provided store', () => {
       writes,
       crossSubdomain: true,
       getItem: (key: string) => map.get(key) ?? null,
+      getItemOrLegacy: (key: string) => map.get(key) ?? null,
       setItem: (key: string, value: string) => {
         map.set(key, value)
         writes.push(value)
@@ -712,9 +714,51 @@ describe('cross-subdomain consent propagation (real cookie layer)', () => {
       import('./persistence.js'),
     ])
     const doc = new JSDOM('', { url, cookieJar: jar }).window.document
-    const store = createPersistentStore(createCookieLayer(true, doc))
+    const store = createPersistentStore(createCookieLayer(true, GRANTED, doc))
     return createTrackingConsent('proj', { persist: true }, store)
   }
+
+  // The adoption hook exists so a refusal recorded by a pre-envelope build is not read as absent and
+  // silently replaced by the config seed. In cross-subdomain mode it was defeated before it ran: the
+  // cookie layer expired the bare twin, declined to promote it (no envelope, so no deadline), and
+  // left nothing behind — then the store's own mirror sweep deleted the localStorage copy on the
+  // resulting cookie miss. getItemOrLegacy saw null, nothing was logged, and a user who clicked
+  // Reject came back on `initial` — which the README's own upgrade advice sets to 'granted'.
+  //
+  // DENIED on purpose: this is the pre-banner state a returning visitor's first read happens in, and
+  // the gate must not be what decides whether their recorded refusal survives.
+  it('adopts a pre-envelope consent record left on a cross-subdomain device', async () => {
+    vi.resetModules()
+    const [{ createTrackingConsent }, { createCookieLayer }, { createPersistentStore }] = await Promise.all([
+      import('./tracking-consent.js'),
+      import('./cookie.js'),
+      import('./persistence.js'),
+    ])
+    const jar = new CookieJar()
+    const doc = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    // What an older build left: a bare host-only cookie plus its localStorage mirror.
+    doc.cookie = `${KEY}=denied; path=/`
+    localStorage.setItem(KEY, 'denied')
+
+    const store = createPersistentStore(createCookieLayer(true, DENIED, doc))
+    const consent = createTrackingConsent('proj', { persist: true }, store)
+
+    expect(consent.getConsent()).toBe('denied')
+    // Adopted as the user's own recorded choice, not as a seed: isPending() false gates the banner,
+    // isAuthoritative() true is what makes init() purge the earlier visit's identity.
+    expect(consent.isPending()).toBe(false)
+    expect(consent.isAuthoritative()).toBe(true)
+    // And re-persisted under a fresh envelope, so the adopted record now ages out on schedule
+    // instead of sitting on the device with no deadline the way the bare one did.
+    const raw = decodeURIComponent(
+      doc.cookie
+        .split('; ')
+        .find(c => c.startsWith(`${KEY}=`))
+        ?.slice(KEY.length + 1) ?? '',
+    )
+    expect(raw).not.toBe('denied')
+    expect(storedValue(raw)).toBe('denied')
+  })
 
   it('an opt-out on one subdomain is seen as denied on a sibling subdomain', async () => {
     const jar = new CookieJar()
@@ -792,5 +836,24 @@ describe('persist coercion', () => {
 
     expect(controller.getConsent()).toBe('denied')
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('default'))
+  })
+})
+
+describe('deferredGrantedGate', () => {
+  // init() builds the cookie layer before the consent controller (the controller needs the store,
+  // the store needs the layer), so the layer's gate is resolved lazily. It must not read as granted
+  // in that window: a `?? true` there is a fail-open default sitting in the middle of a chain the
+  // rest of this module makes unrepresentable, and nothing observable depends on it — the consent
+  // record still round-trips, because only reconcileTwin's *promotion* is gated.
+  it('reads as not granted until the controller resolves', async () => {
+    vi.resetModules()
+    const { createTrackingConsent, deferredGrantedGate } = await import('./tracking-consent.js')
+    let controller: ReturnType<typeof createTrackingConsent> | null = null
+    const gate = deferredGrantedGate(() => controller)
+
+    expect(gate()).toBe(false)
+
+    controller = createTrackingConsent('proj', 'granted')
+    expect(gate()).toBe(true)
   })
 })

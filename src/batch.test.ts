@@ -321,7 +321,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     await t.send(cookielessEvt('ck'))
     beacon.mockReturnValue(false)
 
-    expect(t.purgeQueue({ send: true })).toBe(true)
+    expect(t.purgeQueue({ send: true }).ok).toBe(true)
     // The cookieless queue is memory-only, so its loss is permanent — error, not warn.
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('cookieless'))
     errSpy.mockRestore()
@@ -336,7 +336,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     await t.send(evt('a'))
     await t.send(evt('b'))
 
-    expect(t.purgeQueue({ send: true })).toBe(true)
+    expect(t.purgeQueue({ send: true }).ok).toBe(true)
 
     expect(beacon).toHaveBeenCalledTimes(1)
     expect((beacon.mock.calls[0] as unknown as [Event[]])[0].map(e => e.kind)).toEqual(['a', 'b'])
@@ -377,7 +377,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     await vi.advanceTimersByTimeAsync(1100) // let the debounce write the key to disk
     const removeSpy = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
 
-    expect(t.purgeQueue({ send: false })).toBe(false)
+    expect(t.purgeQueue({ send: false }).ok).toBe(false)
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('sessionId and distinctId'))
     removeSpy.mockRestore()
     errSpy.mockRestore()
@@ -396,7 +396,7 @@ describe('cookieless loss reporting and flush fairness', () => {
       throw new Error('locked')
     })
 
-    expect(t.purgeQueue({ send: false })).toBe(false)
+    expect(t.purgeQueue({ send: false }).ok).toBe(false)
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('sessionId and distinctId'), expect.any(Error))
     removeSpy.mockRestore()
     errSpy.mockRestore()
@@ -410,7 +410,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     await t.send(evt('consented'))
     await t.send(cookielessEvt('ck'))
 
-    expect(t.purgeQueue({ send: false })).toBe(true)
+    expect(t.purgeQueue({ send: false }).ok).toBe(true)
     expect(beacon).not.toHaveBeenCalled()
   })
 
@@ -503,5 +503,43 @@ describe('rollback messaging after a concurrent purge', () => {
 
     expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('will retry'), expect.anything())
     warnSpy.mockRestore()
+  })
+})
+
+// `batch` reaches the SDK as untyped `data-options` JSON on the one-tag install, so every member is
+// runtime-untrusted. A bare `value >= min` accepted everything JSON.parse can produce, and the two
+// that matter both disable a safety bound rather than merely mis-sizing it.
+describe('batch config validation against untrusted input', () => {
+  const warnFor = (batch: unknown) => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), batch as never)
+    const messages = warn.mock.calls.map(c => String(c[0]))
+    warn.mockRestore()
+    t.destroy()
+    return messages
+  }
+
+  it('rejects Infinity, which JSON.parse yields for 1e999', () => {
+    // Infinity >= 1 is true, so this passed: `buffer.length >= maxQueueSize` never fires and the
+    // persisted queue grows until QuotaExceededError — maxAgeDays does not bound the queue either.
+    expect(warnFor({ maxQueueSize: Number.POSITIVE_INFINITY }).join()).toContain('maxQueueSize')
+    // And on maxSize it disables size-triggered flushing outright.
+    expect(warnFor({ maxSize: Number.POSITIVE_INFINITY }).join()).toContain('maxSize')
+  })
+
+  it('rejects null, which passes a bare >= check', () => {
+    // `null >= 0` is true, and setTimeout(fn, null) fires immediately — batching becomes one
+    // request per event.
+    expect(warnFor({ maxWaitMs: null }).join()).toContain('maxWaitMs')
+  })
+
+  it('rejects non-numbers and NaN', () => {
+    expect(warnFor({ maxSize: '5' }).join()).toContain('maxSize')
+    expect(warnFor({ maxSize: true }).join()).toContain('maxSize')
+    expect(warnFor({ maxWaitMs: Number.NaN }).join()).toContain('maxWaitMs')
+  })
+
+  it('still accepts a valid config silently', () => {
+    expect(warnFor({ maxSize: 5, maxWaitMs: 0, maxQueueSize: 20 })).toEqual([])
   })
 })

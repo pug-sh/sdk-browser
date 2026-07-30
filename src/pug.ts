@@ -5,7 +5,7 @@ import {
   type AutoCaptureSelection,
   createAutoCaptureController,
 } from './auto-capture.js'
-import { type BatchConfig, createBatchedTransport } from './batch.js'
+import { type BatchOptions, createBatchedTransport } from './batch.js'
 import { type CrossSubdomainConfig, createCookieLayer } from './cookie.js'
 import { IdentifyRequestSchema, ProfilesSDKService } from './gen/sdk/profiles/v1/profiles_pb.js'
 import { log, setDebugLogging } from './logger.js'
@@ -41,6 +41,7 @@ import {
 } from './track.js'
 import {
   createTrackingConsent,
+  deferredGrantedGate,
   type RejectConsent,
   type TrackingConsent,
   type TrackingConsentConfig,
@@ -63,7 +64,7 @@ export interface PugConfig {
 export interface InitOptions {
   readonly endpoint?: string | undefined
   readonly apiKey: string
-  readonly batch?: Partial<BatchConfig> | undefined
+  readonly batch?: BatchOptions | undefined
   readonly dryRun?: boolean | undefined
   /**
    * Logs the SDK's internal activity to `console.debug`. Off by default.
@@ -129,10 +130,12 @@ export interface InitOptions {
    * window on the next write, so tightening retention reaches the population that matters.
    *
    * Not covered: the outbound event queue and the tab-liveness registry, which stay on raw
-   * `localStorage`. Both are cleared by every consent teardown, so neither is a path identity
-   * survives a withdrawal on; `reset()` additionally sends-and-drops the queue but leaves the
-   * registry, which holds per-tab timestamps and no identifiers (and whose stale entries are pruned
-   * by their own idle timeout). A queue that cannot reach the network is bounded by
+   * `localStorage`. Neither is a path identity survives a withdrawal on — the registry is cleared by
+   * every consent teardown, and the queue by every teardown that *reduces* consent (leaving
+   * `'granted'`, or landing on `'denied'`); the one case it survives is a re-assert of an unchanged
+   * cookieless state, where it holds only identity-free events. `reset()` additionally
+   * sends-and-drops the queue but leaves the registry, which holds per-tab timestamps and no
+   * identifiers (and whose stale entries are pruned by their own idle timeout). A queue that cannot reach the network is bounded by
    * `batch.maxQueueSize`, not by this deadline. Nor is `pug_device_id`, the push module's device
    * identifier — it has no deadline and no teardown clears it (push is not currently exported, so
    * nothing writes it yet).
@@ -143,7 +146,8 @@ export interface InitOptions {
    * form's `action`. Defaults to a built-in list of credentials and direct identifiers (`token`,
    * `access_token`, `code`, `email`, `password`, …) plus any param ending in `_token`, which covers
    * framework reset-link names like `reset_password_token`. Pass an array to replace that list
-   * (exact match only — the `_token` suffix rule rides the default list, never a replacement), or
+   * (matched case-insensitively by exact name — the `_token` suffix rule rides the default list and
+   * never a replacement), or
    * `false` to disable redaction and capture URLs verbatim. An empty array warns and keeps the
    * default list — it would otherwise disable redaction exactly like `false`, but silently.
    *
@@ -272,12 +276,21 @@ export const init = (projectId: string, options: InitOptions) => {
   const config: PugConfig = { endpoint: options.endpoint || DEFAULT_ENDPOINT, projectId }
   warnOnInsecureEndpoint(config.endpoint)
 
+  // Late-bound: the controller needs the store, the store needs the cookie layer. See
+  // deferredGrantedGate for why reading as permitted until it resolves is sound, and for the
+  // constraint that keeps it sound — no store access before the assignment below.
+  let consentRef: TrackingConsentController | null = null
+  const cookieGate = deferredGrantedGate(() => consentRef)
+
   let store: PersistentStore | null = null
   try {
     // The cookie probes (availability + domain discovery) run before consent is read: the consent
     // record itself may ride the shared cookie, so the layer cannot wait on the answer. They are
     // capability checks — random names, max-age ≤ 3s, deleted on the spot — never identifiers.
-    store = createPersistentStore(createCookieLayer(options.crossSubdomainTracking ?? false), options.maxAgeDays)
+    store = createPersistentStore(
+      createCookieLayer(options.crossSubdomainTracking ?? false, cookieGate),
+      options.maxAgeDays,
+    )
   } catch (err) {
     log.warn('Failed to initialize persistence:', err)
   }
@@ -285,6 +298,7 @@ export const init = (projectId: string, options: InitOptions) => {
   // Before configureProfile, so its init-time expiry refresh can be gated on consent — no identity
   // cookie write while denied (threat model constraint #6, in the backend `pug` repo).
   const trackingConsent = createTrackingConsent(projectId, options.trackingConsent, store)
+  consentRef = trackingConsent
 
   try {
     configureSession(projectId, options.session, store, trackingConsent.isGranted)
@@ -358,8 +372,9 @@ export const init = (projectId: string, options: InitOptions) => {
       // The queue goes either way, unlike identity: it is an outbound buffer of events already
       // collected, not an identifier a later grant could resolve. Withholding it here left a prior
       // consented visit's identified payloads on the device for every non-authoritative non-granted
-      // init — the bare-string form the README's CMP recipe produces.
-      const queueDropped = purgeQueuedEvents({ send: false })
+      // init — any config without `persist: true`, i.e. a bare `'denied'`/`'cookieless'` string or
+      // the `{ initial, persist: false }` form in examples/cdn/index.html.
+      const queueDropped = purgeQueuedEvents({ send: false }).ok
       // Identity is deliberately skipped — see isAuthoritative(). Say so, or an integrator passing a
       // bare 'cookieless'/'denied' cannot tell the documented purge did not run — and name the queue
       // drop, which is where a hard-killed granted session's events went. The phrase is conditioned
@@ -368,7 +383,7 @@ export const init = (projectId: string, options: InitOptions) => {
       log.debug(
         `Consent is not granted but was not restored from storage, so it is a config seed rather than a recorded choice — ${
           queueDropped
-            ? 'any queued events from a prior visit were dropped'
+            ? 'the queued-events purge landed'
             : 'the queued-events purge did not fully land (see the error above)'
         }, and stored identity was left in place. Use trackingConsent.persist to record the choice.`,
       )
@@ -404,20 +419,32 @@ export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
  * `isAuthoritative()` does not apply. Folded together, it left a prior consented visit's identified
  * payloads on the device through every non-authoritative non-granted init.
  */
-const purgeQueuedEvents = ({ send }: { send: boolean }): boolean => {
+const purgeQueuedEvents = ({ send }: { send: boolean }): { ok: boolean; dropped: number } => {
   // A null state means the transport was never built, so the queue was not purged. Report that
   // rather than defaulting to success inside a privacy teardown.
   if (!state) {
-    return false
+    return { ok: false, dropped: 0 }
   }
   try {
-    // A false means a queue key survived on the device, and the queue's own purge() reports that at
-    // its site with the cause in hand; a dropped farewell beacon reports through reportBeaconLoss
-    // and does not affect the return. Adding a message here would only guess at either.
-    return state.transport.purgeQueue({ send })
+    // `ok: false` means a queue key survived on the device, and the queue's own purge() reports that
+    // at its site with the cause in hand; a dropped farewell beacon reports through reportBeaconLoss
+    // and does not affect it. Adding a message for either would only guess.
+    const result = state.transport.purgeQueue({ send })
+    // The destruction itself is worth a warn wherever it happens — the page that queued these
+    // events logged "will retry" at warn level, and this is where that breaks. Keyed on the count,
+    // so the no-op purge every other load performs stays silent, and on `!send`, since reset()
+    // beacons them out first rather than destroying them. The reason is *what the events are*, not
+    // "consent forbids a queue": under the 'cookieless' default a queue is perfectly permitted —
+    // these are identified payloads left by an earlier granted visit.
+    if (!send && result.dropped > 0) {
+      log.warn(
+        `Dropped ${result.dropped} queued event(s) collected under a previous consent state, unsent — identified payloads may not be held or transmitted once consent is no longer granted.`,
+      )
+    }
+    return result
   } catch (err) {
     log.error('Failed to purge queued events:', err)
-    return false
+    return { ok: false, dropped: 0 }
   }
 }
 
@@ -437,7 +464,7 @@ const purgeQueuedEvents = ({ send }: { send: boolean }): boolean => {
  */
 const purgePersistedIdentity = ({ dropQueue }: { dropQueue: boolean }): boolean => {
   // Runs first, while those events still exist.
-  let purged = dropQueue ? purgeQueuedEvents({ send: false }) : true
+  let purged = dropQueue ? purgeQueuedEvents({ send: false }).ok : true
   try {
     purged = clearProfile() && purged
   } catch (err) {
@@ -640,7 +667,7 @@ export const reset = (): boolean => {
   // After identify() the queued events' distinctId is the outgoing user's externalId, so on a shared
   // device the next person must not inherit them. Sent once first — consent is unchanged here, so
   // they were agreed to at collection time.
-  ok = purgeQueuedEvents({ send: true }) && ok
+  ok = purgeQueuedEvents({ send: true }).ok && ok
   try {
     ok = clearProfile() && ok
   } catch (err) {
