@@ -308,6 +308,26 @@ describe('cookieless loss reporting and flush fairness', () => {
     expect(attempted).toContain('c0')
   })
 
+  // Same starvation, reached through the config instead of the reserve arithmetic: a fractional
+  // maxSize makes `lock(maxSize - consented.length)` reserve 0.5 events, which slice() returns as []
+  // while `locked` stays 0.5 — and settle() releases only the queues that contributed, so every
+  // later lock() short-circuits on `locked > 0`. Measured at maxSize 1.5 before the fix: 18 send
+  // attempts, not one carrying a cookieless event, for the life of the page.
+  it('does not strand the cookieless queue on a fractional maxSize', async () => {
+    sendBatch.mockRejectedValue(new RpcError('down', GrpcCode.Unavailable))
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 1.5, maxWaitMs: 500 })
+    for (const k of ['b0', 'b1', 'b2']) {
+      await t.send(evt(k))
+    }
+    await vi.advanceTimersByTimeAsync(3000)
+
+    await t.send(cookielessEvt('c0'))
+    await vi.advanceTimersByTimeAsync(5000)
+
+    const attempted = sendBatch.mock.calls.flatMap((c: unknown) => (c as [Event[]])[0].map(e => e.eventId || e.kind))
+    expect(attempted).toContain('c0')
+  })
+
   // purgeQueue()'s boolean answers one question: did the queues leave the device? The farewell
   // beacon (send: true is reset()-only — a logout; consent teardowns pass false) reports its own
   // loss through reportBeaconLoss but must not flip the return: beacons fail routinely under
@@ -379,6 +399,25 @@ describe('cookieless loss reporting and flush fairness', () => {
 
     expect(t.purgeQueue({ send: false }).ok).toBe(false)
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('sessionId and distinctId'))
+    removeSpy.mockRestore()
+    errSpy.mockRestore()
+  })
+
+  // `ok` is structurally the localStorage queue's answer alone — the memory-only cookieless queue
+  // hardcodes true — so `destroyed` has to be counted per queue: the surviving consented key
+  // destroyed nothing, while the cookieless events are gone for good. Summing both buffers instead
+  // (and gating the caller's report on `ok`) got it backwards in both directions at once.
+  it('counts only the queues whose removal landed as destroyed', async () => {
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('consented-1'))
+    await t.send(evt('consented-2'))
+    await t.send(cookielessEvt('c1'))
+    await vi.advanceTimersByTimeAsync(1100) // let the debounce write the consented key to disk
+    const removeSpy = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+
+    // Not 3: the two consented events are still on the device and hydrate on the next init().
+    expect(t.purgeQueue({ send: false })).toEqual({ ok: false, destroyed: 1 })
     removeSpy.mockRestore()
     errSpy.mockRestore()
   })
@@ -531,6 +570,30 @@ describe('batch config validation against untrusted input', () => {
     // `null >= 0` is true, and setTimeout(fn, null) fires immediately — batching becomes one
     // request per event.
     expect(warnFor({ maxWaitMs: null }).join()).toContain('maxWaitMs')
+  })
+
+  it('rounds a fractional event count down while still allowing a fractional wait', () => {
+    // The counts index arrays: lock()/slice()/splice() truncate a fraction, so maxSize 1.5 reserves
+    // half an event and strands a queue (pinned behaviorally above).
+    expect(warnFor({ maxSize: 1.5 }).join()).toContain('maxSize')
+    expect(warnFor({ maxQueueSize: 1.5 }).join()).toContain('maxQueueSize')
+    // maxWaitMs is a duration handed to setTimeout, which is happy with a fraction.
+    expect(warnFor({ maxWaitMs: 1.5 })).toEqual([])
+  })
+
+  // Rounded down, not replaced by the default: for the one knob bounding how much
+  // sessionId/distinctId-bearing data sits in localStorage, falling back to 1000 would answer a
+  // fractional bound by widening it 500x — the opposite of what rejecting bad input is for.
+  it('keeps a fractional maxQueueSize as a bound rather than widening it to the default', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxQueueSize: 1.5, maxWaitMs: 60_000 })
+    for (const k of ['a', 'b', 'c']) {
+      await t.send(evt(k))
+    }
+
+    // Bounded at 1, so each arrival evicts the previous one; at the 1000 default nothing evicts.
+    expect(warn.mock.calls.filter(c => String(c[0]).includes('Queue full'))).toHaveLength(2)
+    warn.mockRestore()
   })
 
   it('rejects non-numbers and NaN', () => {

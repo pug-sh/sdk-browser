@@ -14,6 +14,9 @@ interface SendOptions {
 // peekUnlocked() exclude locked events and subsequent lock() calls return [].
 // commit() permanently removes locked events. rollback() releases the lock
 // without removing events. Only one lock can be active at a time.
+// n is truncated to a whole, non-negative count: slice() ignores a fraction but `locked` keeps it,
+// and a flush releases only the queues that returned events — so lock(0.5) returns [] and then
+// locks that queue for the life of the page.
 const createMemoryQueueStorage = (maxQueueSize: number) => {
   const buffer: Event[] = []
   let locked = 0
@@ -34,7 +37,7 @@ const createMemoryQueueStorage = (maxQueueSize: number) => {
       if (locked > 0) {
         return []
       }
-      locked = Math.min(limit, buffer.length)
+      locked = Math.min(Math.max(0, Math.trunc(limit)), buffer.length)
       return buffer.slice(0, locked)
     },
     commit: () => {
@@ -143,7 +146,7 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
       if (locked > 0) {
         return []
       }
-      locked = Math.min(limit, buffer.length)
+      locked = Math.min(Math.max(0, Math.trunc(limit)), buffer.length)
       return buffer.slice(0, locked)
     },
     commit: () => {
@@ -295,7 +298,7 @@ export const createBatchedTransport = (
   // compiler sees, and a bare `value >= min` accepted every shape JSON.parse can produce. `Infinity`
   // (from `1e999`) passed, disabling the queue bound and size-triggered flushing outright; `null`
   // passed too (`null >= 0`), turning maxWaitMs into `setTimeout(fn, 0)` — one request per event.
-  const validated = (name: keyof BatchConfig, min: number): number => {
+  const validated = (name: keyof BatchConfig, kind: 'whole' | 'finite', min: number): number => {
     const fallback = DEFAULT_BATCH_CONFIG[name]
     const value: unknown = partialConfig?.[name]
     if (value === undefined) {
@@ -305,12 +308,19 @@ export const createBatchedTransport = (
       log.warn(`batch.${name} ${safeStringify(value)} must be a finite number >= ${min}; using ${fallback}.`)
       return fallback
     }
+    // Rounded down, not replaced by the default: defaulting would answer a too-tight maxQueueSize
+    // by widening it 500x. See lock() for what a fractional count does.
+    if (kind === 'whole' && !Number.isInteger(value)) {
+      const whole = Math.max(min, Math.trunc(value))
+      log.warn(`batch.${name} ${safeStringify(value)} must be a whole number of events; using ${whole}.`)
+      return whole
+    }
     return value
   }
 
-  const maxSize = validated('maxSize', 1)
-  const maxWaitMs = validated('maxWaitMs', 0)
-  const maxQueueSize = validated('maxQueueSize', 1)
+  const maxSize = validated('maxSize', 'whole', 1)
+  const maxWaitMs = validated('maxWaitMs', 'finite', 0)
+  const maxQueueSize = validated('maxQueueSize', 'whole', 1)
   const storageKey = makeStorageKey(projectId, 'queue')
 
   const inner = createTransport(endpoint, apiKey)
@@ -555,13 +565,18 @@ export const createBatchedTransport = (
     },
 
     /**
-     * Empties both queues from the device. Returns false when a persisted key survived the removal
-     * — the boolean answers exactly one question, "did the queues leave the device", so it can feed
-     * the teardown chain whose meaning is device state. A dropped farewell beacon reports through
-     * reportBeaconLoss but does not flip the return: beacons fail routinely under analytics
-     * blockers, so folding delivery in made reset() "fail" on blocker-equipped browsers whose
-     * devices were verifiably clean — and the README's recipe puts that boolean in front of end
-     * users, telling them a stored identifier may have survived.
+     * Empties both queues from the device. `ok` is false when a persisted key survived the removal —
+     * it answers exactly one question, "did the queues leave the device", so it can feed the teardown
+     * chain whose meaning is device state. A dropped farewell beacon reports through reportBeaconLoss
+     * but does not flip it: beacons fail routinely under analytics blockers, so folding delivery in
+     * made reset() "fail" on blocker-equipped browsers whose devices were verifiably clean — and the
+     * README's recipe puts that boolean in front of end users, telling them a stored identifier may
+     * have survived.
+     *
+     * `destroyed` counts only events that actually left the device, per queue: the memory-only
+     * cookieless queue always destroys what it held, while a consented queue whose key survived
+     * destroyed nothing. A single `ok && total` could not say that — `ok` is structurally the
+     * localStorage queue's answer alone, so it made a real cookieless loss unreportable.
      *
      * `send` is true only for `reset()` — a logout, where consent is unchanged and those events were
      * agreed to at collection time. Every consent teardown passes false: transmitting after the user
@@ -576,7 +591,7 @@ export const createBatchedTransport = (
      * the events must be gone from the device either way. `peekUnlocked()` excludes any in-flight
      * batch, whose later commit/rollback lands on an emptied buffer and is a harmless no-op.
      */
-    purgeQueue: ({ send }: { send: boolean }): { ok: boolean; dropped: number } => {
+    purgeQueue: ({ send }: { send: boolean }): { ok: boolean; destroyed: number } => {
       if (send && state !== 'destroyed') {
         const consentedTail = storage.peekUnlocked()
         const cookielessTail = cookielessStorage.peekUnlocked()
@@ -589,12 +604,14 @@ export const createBatchedTransport = (
           reportBeaconLoss(consentedTail.length, cookielessTail.length, 'during reset')
         }
       }
-      // `ok` answers "did the queues leave the device"; `dropped` is how many events that cost, so
-      // a caller can stay quiet on the common no-op purge and speak up when events actually died.
-      // Each queue counts its own buffer, in-flight locked batch included — see purge().
+      // Each queue counts its own buffer, in-flight locked batch included — see purge(). An
+      // in-flight batch may still be delivered, so `destroyed` is a ceiling, not an audit.
       const consented = storage.purge()
       const cookieless = cookielessStorage.purge()
-      return { ok: consented.ok && cookieless.ok, dropped: consented.dropped + cookieless.dropped }
+      return {
+        ok: consented.ok && cookieless.ok,
+        destroyed: (consented.ok ? consented.dropped : 0) + cookieless.dropped,
+      }
     },
     destroy: () => {
       state = 'destroyed'

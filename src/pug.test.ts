@@ -39,7 +39,7 @@ const transportSpies = {
   destroy: vi.fn(),
   // Consent teardown drops the persisted event queue too. Omitting it here made every consent
   // transition in this file throw a swallowed TypeError and silently report failure.
-  purgeQueue: vi.fn(() => ({ ok: true, dropped: 0 })),
+  purgeQueue: vi.fn(() => ({ ok: true, destroyed: 0 })),
 }
 
 const unaryCallSpy = vi.fn(() => Promise.resolve({}))
@@ -1237,10 +1237,33 @@ describe('consent teardown contract', () => {
     // The page that queued them said "will retry" at warn level; this is where that breaks. Keyed
     // on the count so the no-op purge — the overwhelming majority of loads — stays silent, which
     // the test above pins from the other side.
-    transportSpies.purgeQueue.mockReturnValueOnce({ ok: true, dropped: 3 })
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: true, destroyed: 3 })
     const { init } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    // Asserted alongside the message: the negative case below passes just as well against a build
+    // that never purges at all, so the call itself has to be pinned somewhere in the pair.
+    expect(transportSpies.purgeQueue).toHaveBeenCalledWith({ send: false })
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Dropped 3 queued event(s)'))
+  })
+
+  it('does not claim destruction when the purge left the persisted key behind', async () => {
+    // A purge whose key survived destroyed nothing — those events hydrate and send on the next
+    // init() — so a "dropped, unsent" warning would contradict, at a lower level, the error purge()
+    // logs saying they may still be sent.
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, destroyed: 0 })
+    const { init } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    expect(transportSpies.purgeQueue).toHaveBeenCalledWith({ send: false })
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('queued event(s)'))
+  })
+
+  it('still reports cookieless events destroyed by a purge that failed on the consented queue', async () => {
+    // ok is structurally the localStorage queue's answer alone — the memory-only cookieless queue
+    // hardcodes true. Gating the report on it silenced the one loss that is permanent.
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, destroyed: 2 })
+    const { init } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Dropped 2 queued event(s)'))
   })
 
   // The boolean exists so a withdrawal that did not fully land is detectable rather than
@@ -1248,7 +1271,7 @@ describe('consent teardown contract', () => {
   it('reports false when a queued-event purge does not land', async () => {
     const { init, optOutTracking } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })
-    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, dropped: 0 })
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, destroyed: 0 })
 
     expect(optOutTracking()).toBe(false)
   })
@@ -1327,7 +1350,7 @@ describe('teardown failures surface in the returned boolean', () => {
   it('reports false when the queued events could not be purged', async () => {
     const { init, optOutTracking } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })
-    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, dropped: 0 })
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, destroyed: 0 })
 
     expect(optOutTracking()).toBe(false)
   })

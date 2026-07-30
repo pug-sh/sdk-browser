@@ -419,32 +419,30 @@ export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
  * `isAuthoritative()` does not apply. Folded together, it left a prior consented visit's identified
  * payloads on the device through every non-authoritative non-granted init.
  */
-const purgeQueuedEvents = ({ send }: { send: boolean }): { ok: boolean; dropped: number } => {
+const purgeQueuedEvents = ({ send }: { send: boolean }): { ok: boolean; destroyed: number } => {
   // A null state means the transport was never built, so the queue was not purged. Report that
   // rather than defaulting to success inside a privacy teardown.
   if (!state) {
-    return { ok: false, dropped: 0 }
+    return { ok: false, destroyed: 0 }
   }
   try {
     // `ok: false` means a queue key survived on the device, and the queue's own purge() reports that
     // at its site with the cause in hand; a dropped farewell beacon reports through reportBeaconLoss
     // and does not affect it. Adding a message for either would only guess.
     const result = state.transport.purgeQueue({ send })
-    // The destruction itself is worth a warn wherever it happens — the page that queued these
-    // events logged "will retry" at warn level, and this is where that breaks. Keyed on the count,
-    // so the no-op purge every other load performs stays silent, and on `!send`, since reset()
-    // beacons them out first rather than destroying them. The reason is *what the events are*, not
-    // "consent forbids a queue": under the 'cookieless' default a queue is perfectly permitted —
-    // these are identified payloads left by an earlier granted visit.
-    if (!send && result.dropped > 0) {
+    // The page that queued these events logged "will retry" at warn level; this is where that
+    // breaks. Keyed on `destroyed` rather than a buffer count, so a purge that left the persisted
+    // key behind claims no destruction while a cookieless queue's permanent loss is still reported,
+    // and on `!send`, since reset() beacons them out first.
+    if (!send && result.destroyed > 0) {
       log.warn(
-        `Dropped ${result.dropped} queued event(s) collected under a previous consent state, unsent — identified payloads may not be held or transmitted once consent is no longer granted.`,
+        `Dropped ${result.destroyed} queued event(s) collected under a previous consent state, unsent — they may include identified payloads, which must not be held or transmitted once consent is no longer granted.`,
       )
     }
     return result
   } catch (err) {
     log.error('Failed to purge queued events:', err)
-    return { ok: false, dropped: 0 }
+    return { ok: false, destroyed: 0 }
   }
 }
 
