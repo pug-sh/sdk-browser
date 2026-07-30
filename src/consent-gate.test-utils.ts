@@ -5,8 +5,10 @@
 // has to follow. The import is type-only, so this module has zero runtime imports and is safe in
 // the suites that drive `vi.resetModules()` with dynamic imports.
 //
-// Excluded from tsconfig.json (never emitted to dist/) but included in tsconfig.typecheck.json,
-// like the other *.test-utils.ts.
+// Excluded from tsconfig.json and included in tsconfig.typecheck.json, like the other
+// *.test-utils.ts — but `exclude` only prunes roots: a production module importing this file pulls
+// it back into the build and emits it to dist/, minting gates outside the brand's module. Nothing
+// under src/ outside tests and test-utils may import it.
 import type { GrantedGate } from './tracking-consent.js'
 
 /** Consent granted — identity writes permitted. */

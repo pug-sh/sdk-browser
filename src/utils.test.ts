@@ -338,7 +338,9 @@ describe('isStorageAvailable', () => {
   })
 
   // Instance spies, not Storage.prototype: in this jsdom environment a prototype-level spy never
-  // fires, so every assertion below would pass unconditionally.
+  // fires, so the faults below would never be injected — the negative cases would fail against a
+  // healthy store instead of exercising the fault they name, and the positive ones would pass
+  // vacuously.
   it('reports available for a working store', () => {
     expect(isStorageAvailable()).toBe(true)
   })
@@ -368,12 +370,26 @@ describe('isStorageAvailable', () => {
     expect(isStorageAvailable()).toBe(true)
   })
 
-  // A fixed sentinel let residue from an earlier failed probe read back as this run's own write, so
+  // A fixed probe key let residue from an earlier failed run read back as this run's own write, so
   // a store that no-ops setItem reported available — the exact fault the read-back exists to catch.
+  // The per-call key closes it by construction: the seeded residue can never be at this run's key.
   it('is not fooled by a stale probe value left on the device', () => {
     localStorage.setItem('__pug___probe__', '1')
     vi.spyOn(localStorage, 'setItem').mockImplementation(() => {})
     expect(isStorageAvailable()).toBe(false)
+    localStorage.removeItem('__pug___probe__')
+  })
+
+  // The other fixed-key fault ran in the opposite direction: two tabs probing at once clobbered each
+  // other's value on the shared key and both reported a working store unavailable — memory-only
+  // persistence for both page loads. The rival write below lands where a fixed-key probe would read.
+  it('is not failed by a concurrent probe from another tab', () => {
+    const realSet = localStorage.setItem.bind(localStorage)
+    vi.spyOn(localStorage, 'setItem').mockImplementation((k: string, v: string) => {
+      realSet(k, v)
+      realSet('__pug___probe__', 'other-tab-nonce')
+    })
+    expect(isStorageAvailable()).toBe(true)
     localStorage.removeItem('__pug___probe__')
   })
 })

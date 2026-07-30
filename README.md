@@ -175,7 +175,7 @@ With `crossSubdomainTracking: true`, identity is written to a first-party cookie
 
 Lowering it applies to existing visitors, not just new devices: a stored deadline is clamped to the current window on the next write, so tightening retention reaches the population that already has identifiers.
 
-Two things it does not bound: the outbound event queue and the tab-liveness registry, which stay on raw `localStorage`. Neither is a way for identity to survive a withdrawal — the registry is cleared by every consent teardown, and the queue by every teardown that *reduces* consent (leaving `'granted'`, or landing on `'denied'`); the one case it survives is a consent callback re-asserting an unchanged `'cookieless'`, where it holds only identity-free events. `reset()` additionally sends-and-drops the queue, while the registry — per-tab timestamps, no identifiers — is left for the still-open tab and prunes its own stale entries. A queue that cannot reach your endpoint is bounded by `batch.maxQueueSize`, not by this deadline. (A third key, `pug_device_id`, would sit outside it too, but it belongs to the push module, which is not currently shipped — nothing writes it today.)
+Two things it does not bound: the outbound event queue and the tab-liveness registry, which stay on raw `localStorage`. Neither is a way for identity to survive a withdrawal — the registry is cleared by every consent teardown, and the queue by every teardown that *reduces* consent (leaving `'granted'`, or landing on `'denied'`); it survives only a transition that reduces nothing — a consent callback re-asserting an unchanged `'cookieless'` (identity-free events by construction), or a `'denied'` → `'cookieless'` change, where the entry to `'denied'` already emptied it. `reset()` additionally sends-and-drops the queue, while the registry — per-tab timestamps, no identifiers — is left for the still-open tab and prunes its own stale entries. A queue that cannot reach your endpoint is bounded by `batch.maxQueueSize`, not by this deadline. (A third key, `pug_device_id`, would sit outside it too, but it belongs to the push module, which is not currently shipped — nothing writes it today.)
 
 ```ts
 init('your-project-id', {
@@ -352,7 +352,7 @@ https://app.example.com/reset?token=s3cr3t&plan=pro
 
 Matching is case-insensitive, and the fragment is covered too — an OAuth implicit-flow `#access_token=…` never reaches a server *except* through analytics. URLs with nothing to redact are passed through byte for byte. When something *is* redacted, the whole query is re-serialized in standard form (`%20` becomes `+`, a bare `?flag` becomes `flag=`), so joining a redacted `$url` against raw server logs may need form-decoding-aware comparison. Redaction also fails closed: a URL too malformed to parse (a template bug in a form's `action`) still gets its query and fragment params redacted at the string level rather than passing through carrying a live token.
 
-Pass `redactUrlParams` an array to replace the list (exact match only — the `_token` suffix rule rides the default list, never a replacement), or `false` to capture URLs verbatim:
+Pass `redactUrlParams` an array to replace the list (matched case-insensitively by exact name — the `_token` suffix rule rides the default list, never a replacement), or `false` to capture URLs verbatim:
 
 ```ts
 init('your-project-id', { apiKey: 'your-api-key', redactUrlParams: ['token', 'orderId'] })

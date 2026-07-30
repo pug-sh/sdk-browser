@@ -52,8 +52,9 @@ export interface CookieLayer {
 /**
  * What a twin's own stored value says should happen to it: the seconds it has left, `'expired'`
  * (retention already ended it), or `'undecodable'` — pre-envelope or corrupt, which only the store
- * can interpret. The three were one `null` before, which conflated "retention says drop this" with
- * "this layer cannot read it" and let the second be destroyed on the first's reasoning.
+ * can interpret. The two terminal outcomes were one `null` before, which conflated "retention says
+ * drop this" with "this layer cannot read it" and let the second be destroyed on the first's
+ * reasoning.
  */
 const twinLifetime = (raw: string): number | 'expired' | 'undecodable' => {
   const stored = decodeStored(raw)
@@ -201,9 +202,11 @@ const resolveExplicitDomain = (doc: CookieDocument, requested: string): string =
 export const createCookieLayer = (
   config: CrossSubdomainConfig,
   // Gates the twin promotion in reconcileTwin() — the one identity *write* on the read path, and so
-  // the one that escaped every other consent check. Required: unlike session.ts, an absent gate
-  // here throws inside reconcileTwin's try and silently un-latches rather than defaulting either
-  // way, so the arity pin in consent-gate.test-d.ts is the only thing that catches the omission.
+  // the one that escaped every other consent check. Required: an absent gate here throws inside
+  // reconcileTwin's try, which warns once per key and skips the promotion — with the live twin
+  // already expired by then, so its value is destroyed rather than restored. Nothing in the build
+  // or the runtime suite fails on that shape; the arity pin in consent-gate.test-d.ts is what
+  // catches the omission.
   isGranted: GrantedGate,
   doc: CookieDocument | null = typeof document === 'undefined' ? null : document,
 ): CookieLayer | null => {
@@ -258,18 +261,21 @@ export const createCookieLayer = (
 
   const writeCookie = (key: string, value: string, maxAgeSeconds: number): boolean => {
     try {
-      // A preserved twin is superseded by the value about to be written, and it was created first,
-      // so RFC 6265 sorts it ahead of the shared cookie in document.cookie — the read-back below
-      // would return the twin and report a landed write as failed.
-      if (preservedTwins.delete(key)) {
-        doc.cookie = `${encodeURIComponent(key)}=; path=/; max-age=0`
-      }
       // encodeURIComponent stays inside the try — it throws on malformed UTF-16 (lone surrogates),
       // and callers must never throw.
       const encoded = `${encodeURIComponent(key)}=${encodeURIComponent(value)}${attrs}; max-age=${maxAgeSeconds}`
       if (encoded.length > MAX_COOKIE_LENGTH) {
         log.warn(`Cookie for "${key}" would exceed ${MAX_COOKIE_LENGTH} chars; skipping cookie write.`)
         return false
+      }
+      // A preserved twin is superseded by the value about to be written, and it was created first,
+      // so RFC 6265 sorts it ahead of the shared cookie in document.cookie — the read-back below
+      // would return the twin and report a landed write as failed. Expired only once the
+      // replacement is known writable: expired before the checks above, an oversized or
+      // unencodable value destroyed the sole copy (cross-subdomain reads have no localStorage
+      // fallback) and returned false with nothing in its place.
+      if (preservedTwins.delete(key)) {
+        doc.cookie = `${encodeURIComponent(key)}=; path=/; max-age=0`
       }
       doc.cookie = encoded
       return readCookie(doc, key) === value
@@ -295,6 +301,17 @@ export const createCookieLayer = (
     if (readCookie(doc, key) !== value) {
       log.warn(`Could not restore the host-only "${key}" cookie; its value may be lost on this device.`)
     }
+  }
+
+  /**
+   * Registration and restore travel together: a restored twin predates any later shared write for
+   * its key, so RFC 6265 sorts it ahead in document.cookie and writeCookie must know to expire it
+   * first — a restore without the registration makes that later write fail read-back against the
+   * twin and report a landed write as lost.
+   */
+  const preserveTwin = (key: string, value: string, maxAgeSeconds: number): void => {
+    preservedTwins.add(key)
+    restoreTwin(key, value, maxAgeSeconds)
   }
 
   const reconcileTwin = (key: string): void => {
@@ -326,8 +343,7 @@ export const createCookieLayer = (
         // hands the consent record's bare value up first. Destroyed here, that read saw nothing and
         // a recorded refusal silently reverted to the config seed. Short-lived, because the store
         // deletes it on the very read that follows.
-        preservedTwins.add(key)
-        restoreTwin(key, before, LEGACY_TWIN_RESTORE_SECONDS)
+        preserveTwin(key, before, LEGACY_TWIN_RESTORE_SECONDS)
         return
       }
       // Only the promotion is gated, not the whole reconciliation: everything above is a *deletion*
@@ -335,8 +351,7 @@ export const createCookieLayer = (
       // state forbids and which configureProfile depends on — it reads external_id once and latches
       // the result for the page. The promotion is different: it widens identity to the registrable
       // domain, so while consent withholds identity storage the twin goes back at its existing
-      // host-only scope, leaving the device exactly as it was. Un-latched, so a mid-page grant
-      // migrates on the next access rather than waiting for the next page load.
+      // host-only scope, leaving the device exactly as it was.
       if (!isGranted()) {
         // Latched, not retried: un-latched, every later get()/set() repeated this delete-and-restore
         // — measured at 10 cookie writes across 5 reads, i.e. an identity Set-Cookie on the read
@@ -344,14 +359,13 @@ export const createCookieLayer = (
         // on the next page load instead, which costs nothing real: external_id, the key that
         // motivated the gate, is read once by configureProfile and latched into module state, so
         // nothing re-reads it through the store anyway.
-        preservedTwins.add(key)
-        restoreTwin(key, before, remaining)
+        preserveTwin(key, before, remaining)
         return
       }
       // On a failed promotion, restore rather than lose the value: cross-subdomain reads don't fall
       // back to localStorage, and the next page load retries.
       if (!writeCookie(key, before, remaining)) {
-        restoreTwin(key, before, remaining)
+        preserveTwin(key, before, remaining)
       }
     } catch (err) {
       // Un-latch so the next access retries: latched as done, a stale twin kept shadowing the
@@ -379,9 +393,6 @@ export const createCookieLayer = (
       return writeCookie(key, value, maxAgeSeconds)
     },
     remove: key => {
-      // After an explicit remove there is no twin left worth reconciling — or clearing — later.
-      reconciledKeys.add(key)
-      preservedTwins.delete(key)
       try {
         doc.cookie = `${encodeURIComponent(key)}=; path=/${domainAttr}; max-age=0`
         // Also clear a host-only twin so a removed key cannot resurrect from an older scope.
@@ -391,7 +402,17 @@ export const createCookieLayer = (
         // Read back and report whether the key is actually gone. A cookie store blocked mid-session
         // no-ops the assignments above without throwing, so a privacy teardown (opt-out/reset) could
         // otherwise silently fail and let the shared identity cookie resurface on the next read.
-        return readCookie(doc, key) === null
+        const gone = readCookie(doc, key) === null
+        if (gone) {
+          // After a confirmed remove there is no twin left worth reconciling — or clearing — later.
+          // Consumed only on that confirmation: consumed up front, a removal that threw or no-opped
+          // left the twin in place but untracked, so a later successful set() failed read-back
+          // against it. Unconsumed, the key stays un-latched and the next access reconciles the
+          // leftover instead.
+          reconciledKeys.add(key)
+          preservedTwins.delete(key)
+        }
+        return gone
       } catch (err) {
         // Error, not debug: `log.debug` is off unless the integrator already set `debug: true`, so
         // the reason was invisible to exactly the person diagnosing a failed opt-out. The whole

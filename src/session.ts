@@ -52,16 +52,19 @@ let isGrantedFn: GrantedGate | null = null
 /**
  * Gates the *deliberate* device writes — rotate(), resetIdentity(), the tab registry. Not every
  * write: resolveSessionId()'s activity persist is ungated, safe only because track() branches on
- * consent first. Absent getter = unguarded (tests, non-init callers).
+ * consent first. An absent gate reads as *withheld*, like everywhere else in the gate chain
+ * (deferredGrantedGate, the cookie layer): the fail-open `?? true` this replaces was the one place
+ * an untyped caller's omitted argument silently wrote identity with full permission.
  */
-const mayWriteToDevice = (): boolean => isGrantedFn?.() ?? true
+const mayWriteToDevice = (): boolean => isGrantedFn?.() ?? false
 
 export const configureSession = (
   projectId: string,
   sessionConfig: SessionConfig | undefined,
   persistentStore: PersistentStore | null | undefined,
-  // Required, not optional: `mayWriteToDevice()` defaults to *permitted* when the gate is absent,
-  // so an omitted argument would write identity to the device with nothing in the types to say so.
+  // Required, not optional: an omitted gate reads as withheld (mayWriteToDevice fails closed), so
+  // it plants no identifier — but granted-mode sessions silently stop persisting, and only the
+  // arity pin in consent-gate.test-d.ts turns that omission into a build failure.
   isGranted: GrantedGate,
 ): void => {
   store = resolveStore(persistentStore)
@@ -70,7 +73,7 @@ export const configureSession = (
   }
   fallbackSessionId = uuidv7()
   sessionProjectId = projectId
-  isGrantedFn = isGranted ?? null
+  isGrantedFn = isGranted
   config.storageKey = makeStorageKey(projectId, 'session')
 
   if (sessionConfig?.idleTimeoutMinutes != null) {

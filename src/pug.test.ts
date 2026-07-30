@@ -1266,6 +1266,20 @@ describe('consent teardown contract', () => {
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Dropped 2 queued event(s)'))
   })
 
+  it('does not emit the destruction warning on reset(), which sends first', async () => {
+    // reset() beacons the queue out before dropping it and consent is unchanged, so the
+    // consent-withdrawal message ("must not be held or transmitted once consent is no longer
+    // granted") would be false on every logout with pending events. The !send conjunct in
+    // purgeQueuedEvents is the only thing scoping it to the consent teardowns.
+    const { init, reset } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: true, destroyed: 2 })
+    logSpies.warn.mockClear()
+
+    expect(reset()).toBe(true)
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('queued event(s)'))
+  })
+
   // The boolean exists so a withdrawal that did not fully land is detectable rather than
   // console-only. Nothing asserted it, so a teardown that reported failure looked identical.
   it('reports false when a queued-event purge does not land', async () => {

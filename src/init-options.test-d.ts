@@ -7,8 +7,8 @@
  * population these options exist for: a privacy config assembled from a CMP. The runtime already
  * treats an explicit `undefined` as "use the default" everywhere, so admitting it costs nothing.
  * `AutoCaptureSelection`'s values are `true | undefined` for the same reason (see auto-capture.ts);
- * this file extends that standard across `InitOptions`, `TrackingConsentConfig` and
- * `SessionConfig`. Reverting any member to a bare optional fails the assignment below.
+ * this file extends that standard across `InitOptions`, `TrackingConsentConfig`, `SessionConfig`
+ * and `BatchOptions`. Reverting any member to a bare optional fails the assignment below.
  */
 import type { BatchOptions, InitOptions, SessionConfig, TrackingConsentConfig } from './index.js'
 

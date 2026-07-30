@@ -178,14 +178,6 @@ describe('cross-subdomain identity', () => {
     expect(setItem).toHaveBeenCalledWith(EXTERNAL_ID_KEY, 'user-42')
   })
 
-  it('refreshes the persisted externalId under granted consent, cookie-backed store', async () => {
-    vi.resetModules()
-    const profile = await import('./profile.js')
-    const { store, setItem } = storeWith('user-42')
-    profile.configureProfile(PROJECT_ID, store, GRANTED)
-    expect(setItem).toHaveBeenCalledWith(EXTERNAL_ID_KEY, 'user-42')
-  })
-
   it('logs an error when the external ID write does not land', async () => {
     vi.resetModules()
     const profile = await import('./profile.js')

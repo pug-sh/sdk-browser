@@ -150,7 +150,7 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
       }
     } catch (err) {
       // Un-latch so a later miss retries, as reconcileTwin does: latched, one throwing sweep left
-      // the mirror unreachable for the rest of the page load. The warn stays once per key.
+      // the mirror unreachable for the rest of the page load. The error stays once per key.
       sweptKeys.delete(key)
       if (!sweepWarnedKeys.has(key)) {
         sweepWarnedKeys.add(key)

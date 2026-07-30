@@ -14,9 +14,9 @@ interface SendOptions {
 // peekUnlocked() exclude locked events and subsequent lock() calls return [].
 // commit() permanently removes locked events. rollback() releases the lock
 // without removing events. Only one lock can be active at a time.
-// n is truncated to a whole, non-negative count: slice() ignores a fraction but `locked` keeps it,
-// and a flush releases only the queues that returned events — so lock(0.5) returns [] and then
-// locks that queue for the life of the page.
+// n is truncated to a whole, non-negative count: un-truncated, slice() ignores a fraction while
+// `locked` keeps it, and a flush releases only the queues that returned events — lock(0.5) would
+// return [] and then lock that queue for the life of the page.
 const createMemoryQueueStorage = (maxQueueSize: number) => {
   const buffer: Event[] = []
   let locked = 0
@@ -247,6 +247,16 @@ export const DEFAULT_BATCH_CONFIG: BatchConfig = {
   maxQueueSize: 1000,
 }
 
+/**
+ * What `purgeQueue()` reports. `ok` answers exactly one question — did the queues leave the
+ * device; `destroyed` is how many events that cost. One shape shared with `purgeQueuedEvents` in
+ * pug.ts, so the aggregate cannot be re-spelled narrower there and silently hide a new field.
+ */
+export interface PurgeResult {
+  readonly ok: boolean
+  readonly destroyed: number
+}
+
 // gRPC codes for client errors / server rejections that retrying cannot fix. Uses the shared
 // GrpcCode vocabulary from rpc.ts (the producer) so this consumer table can't silently drift
 // from the codes rpc.ts actually emits.
@@ -291,9 +301,9 @@ export const createBatchedTransport = (
   projectId: string,
   partialConfig?: BatchOptions,
 ) => {
-  // `?? fallback` per member rather than a spread: BatchOptions admits an explicit `undefined` (the
-  // config-builder spelling), and spreading one over the defaults replaces the default with
-  // undefined instead of keeping it.
+  // Read per member with an explicit `=== undefined` check — not a spread, which lets an explicit
+  // `undefined` (the config-builder spelling) replace the default, and not `??`, which would
+  // silently coalesce the `null` the warning below exists to name.
   // Untrusted despite the type: the one-tag install supplies `batch` as `data-options` JSON that no
   // compiler sees, and a bare `value >= min` accepted every shape JSON.parse can produce. `Infinity`
   // (from `1e999`) passed, disabling the queue bound and size-triggered flushing outright; `null`
@@ -309,7 +319,7 @@ export const createBatchedTransport = (
       return fallback
     }
     // Rounded down, not replaced by the default: defaulting would answer a too-tight maxQueueSize
-    // by widening it 500x. See lock() for what a fractional count does.
+    // (1.5 → 1) by widening it 1000x. See lock() for what a fractional count would do.
     if (kind === 'whole' && !Number.isInteger(value)) {
       const whole = Math.max(min, Math.trunc(value))
       log.warn(`batch.${name} ${safeStringify(value)} must be a whole number of events; using ${whole}.`)
@@ -591,7 +601,7 @@ export const createBatchedTransport = (
      * the events must be gone from the device either way. `peekUnlocked()` excludes any in-flight
      * batch, whose later commit/rollback lands on an emptied buffer and is a harmless no-op.
      */
-    purgeQueue: ({ send }: { send: boolean }): { ok: boolean; destroyed: number } => {
+    purgeQueue: ({ send }: { send: boolean }): PurgeResult => {
       if (send && state !== 'destroyed') {
         const consentedTail = storage.peekUnlocked()
         const cookielessTail = cookielessStorage.peekUnlocked()
@@ -605,7 +615,10 @@ export const createBatchedTransport = (
         }
       }
       // Each queue counts its own buffer, in-flight locked batch included — see purge(). An
-      // in-flight batch may still be delivered, so `destroyed` is a ceiling, not an audit.
+      // in-flight batch may still be delivered, so `destroyed` is a ceiling, not an audit. The one
+      // undercount runs the other way: on a failed consented purge, events younger than the persist
+      // debounce were destroyed with the buffer (never on disk, memory now cleared) yet count 0
+      // along with the rest of the surviving key.
       const consented = storage.purge()
       const cookieless = cookielessStorage.purge()
       return {

@@ -292,24 +292,28 @@ export const safeStringify = (value: unknown): string => {
 }
 
 export const isStorageAvailable = (): boolean => {
+  // The freshness lives in the *key*, not the value: a fixed key let residue from an earlier failed
+  // probe read back as this run's own write — and let two tabs probing concurrently clobber each
+  // other's value and both report a working store unavailable, downgrading both page loads to
+  // memory-only persistence. A per-call key collides with neither.
+  const key = makeStorageKey('_', `probe_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`)
   try {
     const s = localStorage
-    const key = makeStorageKey('_', 'probe')
-    // A fresh value each call, not a fixed sentinel: a probe left behind by an earlier failed run
-    // (or written concurrently by another tab) would otherwise read back as this run's own write
-    // and report a store that no-ops setItem as usable — the exact fault this read-back exists for.
-    const value = `${Date.now()}-${Math.random()}`
-    s.setItem(key, value)
+    s.setItem(key, '1')
     // Verify the write only. A shim that no-ops setItem stores nothing while reporting success, so
     // every later write would lie; that is a property of the Storage object, not of a key, which is
     // why it is checked here rather than on the store's per-event write path. A removal that no-ops
     // is a narrower fault — values still persist — and PersistentStore.removeItem verifies that one
     // per call, so failing the whole layer on it would turn a teardown defect into total identity
     // loss: no session, no anonymous ID, a fresh identity every page load.
-    const wrote = s.getItem(key) === value
-    s.removeItem(key)
-    return wrote
+    return s.getItem(key) === '1'
   } catch {
     return false
+  } finally {
+    try {
+      localStorage.removeItem(key)
+    } catch {
+      // Best-effort: a stranded per-call probe key is inert and collides with nothing.
+    }
   }
 }

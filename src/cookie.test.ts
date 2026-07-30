@@ -391,7 +391,7 @@ describe('createCookieLayer', () => {
   })
 
   it('discards an expired host-only twin instead of promoting it', () => {
-    // The expiry write leaves nothing, remainingSeconds() sees the lapsed deadline, and the twin is
+    // The expiry write leaves nothing, twinLifetime() sees the lapsed deadline, and the twin is
     // dropped — never promoted. `seconds > 0` is the whole guard between an expired identity cookie
     // and a promotion that re-widens it to the registrable domain with whatever positive lifetime a
     // "safe" clamp would grant it; a mutation flipping it to Math.max(1, seconds) survived the

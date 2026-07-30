@@ -13,7 +13,9 @@ let store: PersistentStore | null = null
 export const configureProfile = (
   projectId: string,
   persistentStore: PersistentStore | null | undefined,
-  // Required for the reason given on configureSession: an omitted gate reads as "permitted".
+  // Required, not optional: the gate decides an identity write, and an omitted argument surfaces
+  // at runtime only in the returning-identified-visitor branch below — the arity pin in
+  // consent-gate.test-d.ts is what turns the omission into a build failure.
   isGranted: GrantedGate,
 ): void => {
   store = resolveStore(persistentStore)
@@ -28,9 +30,10 @@ export const configureProfile = (
   // present up to its stored deadline — the write carries the deadline forward and clamps it, so it
   // can never *extend* retention (see Retention in CLAUDE.md) — but only while consent permits
   // persisting identity: writing here while denied would re-issue an identity cookie (and
-  // re-broadcast it to sibling subdomains) for a user who has not consented. Called unconditionally:
-  // the parameter is required and its arity is pinned in consent-gate.test-d.ts, so an omitting
-  // caller throws here rather than defaulting to permitted and taking the identity-write branch.
+  // re-broadcast it to sibling subdomains) for a user who has not consented. `isGranted()` is
+  // called bare rather than `isGranted?.() ?? true`, so an untyped caller omitting the gate throws
+  // instead of taking the identity-write branch — but only when a stored externalId exists, so the
+  // arity pin in consent-gate.test-d.ts, not this throw, is what catches the omission.
   const stored = store?.getItem(externalIdKey)
   if (stored) {
     // The reserved prefix belongs to the server's derived cookieless identities. identify() rejects

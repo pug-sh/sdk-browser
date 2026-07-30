@@ -5,7 +5,7 @@ import {
   type AutoCaptureSelection,
   createAutoCaptureController,
 } from './auto-capture.js'
-import { type BatchOptions, createBatchedTransport } from './batch.js'
+import { type BatchOptions, createBatchedTransport, type PurgeResult } from './batch.js'
 import { type CrossSubdomainConfig, createCookieLayer } from './cookie.js'
 import { IdentifyRequestSchema, ProfilesSDKService } from './gen/sdk/profiles/v1/profiles_pb.js'
 import { log, setDebugLogging } from './logger.js'
@@ -132,13 +132,14 @@ export interface InitOptions {
    * Not covered: the outbound event queue and the tab-liveness registry, which stay on raw
    * `localStorage`. Neither is a path identity survives a withdrawal on — the registry is cleared by
    * every consent teardown, and the queue by every teardown that *reduces* consent (leaving
-   * `'granted'`, or landing on `'denied'`); the one case it survives is a re-assert of an unchanged
-   * cookieless state, where it holds only identity-free events. `reset()` additionally
-   * sends-and-drops the queue but leaves the registry, which holds per-tab timestamps and no
-   * identifiers (and whose stale entries are pruned by their own idle timeout). A queue that cannot reach the network is bounded by
-   * `batch.maxQueueSize`, not by this deadline. Nor is `pug_device_id`, the push module's device
-   * identifier — it has no deadline and no teardown clears it (push is not currently exported, so
-   * nothing writes it yet).
+   * `'granted'`, or landing on `'denied'`); it survives only a transition that does neither — a
+   * re-assert of an unchanged cookieless state (identity-free events by construction), or a
+   * `'denied'` → `'cookieless'` thaw, where the entry to `'denied'` already emptied it. `reset()`
+   * additionally sends-and-drops the queue but leaves the registry, which holds per-tab timestamps
+   * and no identifiers (and whose stale entries are pruned by their own idle timeout). A queue that
+   * cannot reach the network is bounded by `batch.maxQueueSize`, not by this deadline. Nor is
+   * `pug_device_id`, the push module's device identifier — it has no deadline and no teardown clears
+   * it (push is not currently exported, so nothing writes it yet).
    */
   readonly maxAgeDays?: number | undefined
   /**
@@ -276,9 +277,11 @@ export const init = (projectId: string, options: InitOptions) => {
   const config: PugConfig = { endpoint: options.endpoint || DEFAULT_ENDPOINT, projectId }
   warnOnInsecureEndpoint(config.endpoint)
 
-  // Late-bound: the controller needs the store, the store needs the cookie layer. See
-  // deferredGrantedGate for why reading as permitted until it resolves is sound, and for the
-  // constraint that keeps it sound — no store access before the assignment below.
+  // Late-bound: the controller needs the store, the store needs the cookie layer. Until the
+  // assignment below the gate reads as *not granted* — see deferredGrantedGate for why that
+  // fail-closed window is sound whatever runs inside it, and costless today: the one store access
+  // in it is the consent-record read, whose own ungated restore re-write lands the value on the
+  // shared domain that the suppressed twin promotion would have.
   let consentRef: TrackingConsentController | null = null
   const cookieGate = deferredGrantedGate(() => consentRef)
 
@@ -419,7 +422,7 @@ export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
  * `isAuthoritative()` does not apply. Folded together, it left a prior consented visit's identified
  * payloads on the device through every non-authoritative non-granted init.
  */
-const purgeQueuedEvents = ({ send }: { send: boolean }): { ok: boolean; destroyed: number } => {
+const purgeQueuedEvents = ({ send }: { send: boolean }): PurgeResult => {
   // A null state means the transport was never built, so the queue was not purged. Report that
   // rather than defaulting to success inside a privacy teardown.
   if (!state) {
@@ -492,7 +495,9 @@ const purgePersistedIdentity = ({ dropQueue }: { dropQueue: boolean }): boolean 
  * state (consent then fails closed to `'denied'`), a choice that could not be persisted, or an
  * identifier that could not be removed. After `init()` a valid state is always applied in memory, so
  * `false` means "applied, not fully durable" rather than "ignored" — only the pre-`init()` case is
- * genuinely ignored, which a banner racing initialization is most likely to hit.
+ * genuinely ignored, which a banner racing initialization is most likely to hit. A failed
+ * tab-registry re-arm on entering `'granted'` warns without failing the call: it is neither
+ * identity nor durability, and a later grant or `init()` re-arms it.
  */
 export const setTrackingConsent = (consent: TrackingConsent): boolean => {
   if (!state) {

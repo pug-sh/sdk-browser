@@ -25,9 +25,11 @@ const { rotate } = await import('./session.js')
  * The write/remove sentinel isStorageAvailable() uses to probe localStorage. It is a capability
  * probe, not data: written and removed synchronously, never carrying a value about the user, and
  * exactly analogous to the cookie layer's `max-age=3` probe. Excluded from the write assertions
- * below on that basis — but excluded *by name*, so anything else the SDK writes still fails.
+ * below on that basis — by shape rather than exact name, since the key carries a per-call nonce
+ * (a fixed key let concurrent tabs clobber each other's probe) — so anything else the SDK writes
+ * still fails.
  */
-const PROBE_KEY = makeStorageKey('_', 'probe')
+const PROBE_KEY_PREFIX = makeStorageKey('_', 'probe').replace(/__$/, '_')
 
 /**
  * Records every localStorage mutation as it happens.
@@ -71,7 +73,7 @@ const recordDeviceWrites = () => {
     vi.spyOn(document, 'cookie', 'get').mockImplementation(() => get.call(document) as string)
   }
   vi.spyOn(localStorage, 'setItem').mockImplementation((key: string, value: string) => {
-    if (key !== PROBE_KEY) {
+    if (!key.startsWith(PROBE_KEY_PREFIX)) {
       writes.push(key)
     }
     realSet(key, value)
@@ -86,7 +88,7 @@ const recordDeviceWrites = () => {
 /** jsdom's Storage exposes its methods as own enumerable properties, so Object.keys() is useless here. */
 const storedKeys = (): string[] =>
   Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(
-    (k): k is string => k !== null && k !== PROBE_KEY,
+    (k): k is string => k !== null && !k.startsWith(PROBE_KEY_PREFIX),
   )
 
 const sentEvents = () => sendBatch.mock.calls.flatMap(call => (call as unknown as [unknown[]])[0])
@@ -570,10 +572,10 @@ describe('tab registry re-arm guard', () => {
   })
 
   // The mirror of "keeps the cookieless queue across a consent re-assert that changes nothing".
-  // That case pinned the cookieless half; the granted half lived only in its comment, and making
-  // granted->granted run the identity purge + queue drop passed all 653 tests. CMPs re-fire their
-  // callback on every page load, so the regression would fragment identity and destroy the queued
-  // events of every returning consented visitor, silently.
+  // That case pinned the cookieless half; the granted half lived only in its comment, and a
+  // regression making granted->granted run the identity purge + queue drop was invisible to the
+  // entire suite before this test. CMPs re-fire their callback on every page load, so it would
+  // fragment identity and destroy the queued events of every returning consented visitor, silently.
   it('keeps identity and the queued events across a granted -> granted re-assert', async () => {
     vi.useFakeTimers()
     const p = 'proj-reassert-granted'
@@ -619,8 +621,10 @@ describe('cookie-layer consent gate', () => {
     expect(sharedWrites(cookieWrites)).toEqual([])
   })
 
-  // The control: without it the assertion above also passes for a layer that never promotes at all,
-  // and the gate would be pinning nothing.
+  // The control: without it the assertion above also passes for a layer that never promotes at
+  // all. It cannot distinguish the promotion from configureProfile's refresh write, though — both
+  // land the value with domain= — so the wiring test below pins the gate through the restore write
+  // instead.
   it('still promotes it once consent is granted (control)', () => {
     const p = 'proj-twin-granted'
     seedHostOnlyTwin(p, 'user@example.com')
@@ -631,6 +635,23 @@ describe('cookie-layer consent gate', () => {
     expect(
       sharedWrites(cookieWrites).some(w => w.includes('user%40example.com') && w.includes('domain=.example.test')),
     ).toBe(true)
+  })
+
+  // The deferred gate is wired to the live controller by one assignment in init()
+  // (`consentRef = trackingConsent`); severed, it reads not-granted forever and the twin goes back
+  // host-only even under granted consent. The control above cannot see that — configureProfile's
+  // gated refresh write also lands the value with domain=, and it takes the *directly passed*
+  // predicate, not the deferred gate — so the host-only restore write, which exists only on the
+  // not-granted arm, is what distinguishes severed from wired.
+  it('does not restore the twin host-only under granted consent (deferred-gate wiring)', () => {
+    const p = 'proj-twin-wiring'
+    seedHostOnlyTwin(p, 'user@example.com')
+
+    const { cookieWrites } = recordDeviceWrites()
+    init(p, { apiKey: 'k', trackingConsent: 'granted', crossSubdomainTracking: true, autoCapture: false })
+
+    const hostOnlyValueWrites = cookieWrites.filter(w => w.includes('user%40example.com') && !w.includes('domain='))
+    expect(hostOnlyValueWrites).toEqual([])
   })
 
   // The gate covers the promotion only. Expiring a stale twin is a *deletion*, and configureProfile

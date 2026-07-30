@@ -403,6 +403,24 @@ describe('cookieless loss reporting and flush fairness', () => {
     errSpy.mockRestore()
   })
 
+  // `destroyed` counts each queue's whole buffer, in-flight locked batch included: a consent
+  // teardown arriving mid-flush is the highest-loss case — the locked batch can be the entire
+  // queue — and counting `size` (which excludes locked events) made the caller's "Dropped N queued
+  // event(s)" warning silent exactly there. Every other purge test here runs with no lock held, so
+  // only this one distinguishes buffer.length from size.
+  it('counts the in-flight locked batch in destroyed', async () => {
+    let resolveFlush: (v: unknown) => void = () => {}
+    sendBatch.mockImplementation(() => new Promise(resolve => (resolveFlush = resolve)))
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 2, maxWaitMs: 60_000 })
+    await t.send(evt('a'))
+    await t.send(evt('b')) // hits maxSize → flush() → both events locked, request in flight
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sendBatch).toHaveBeenCalledTimes(1)
+
+    expect(t.purgeQueue({ send: false })).toEqual({ ok: true, destroyed: 2 })
+    resolveFlush(okResponse(2)) // settle the in-flight request; its commit lands on an empty buffer
+  })
+
   // `ok` is structurally the localStorage queue's answer alone — the memory-only cookieless queue
   // hardcodes true — so `destroyed` has to be counted per queue: the surviving consented key
   // destroyed nothing, while the cookieless events are gone for good. Summing both buffers instead
@@ -583,7 +601,8 @@ describe('batch config validation against untrusted input', () => {
 
   // Rounded down, not replaced by the default: for the one knob bounding how much
   // sessionId/distinctId-bearing data sits in localStorage, falling back to 1000 would answer a
-  // fractional bound by widening it 500x — the opposite of what rejecting bad input is for.
+  // fractional bound (1.5 → 1) by widening it 1000x — the opposite of what rejecting bad input is
+  // for.
   it('keeps a fractional maxQueueSize as a bound rather than widening it to the default', async () => {
     const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
     const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxQueueSize: 1.5, maxWaitMs: 60_000 })
@@ -600,6 +619,59 @@ describe('batch config validation against untrusted input', () => {
     expect(warnFor({ maxSize: '5' }).join()).toContain('maxSize')
     expect(warnFor({ maxSize: true }).join()).toContain('maxSize')
     expect(warnFor({ maxWaitMs: Number.NaN }).join()).toContain('maxWaitMs')
+  })
+
+  it('rejects below-minimum values', () => {
+    // 0 and negatives pass typeof/isFinite; without the >= min arm, maxSize 0 reaches lock(0) and
+    // stalls delivery for the life of the page, and maxQueueSize -1 evicts every arriving event.
+    expect(warnFor({ maxSize: 0 }).join()).toContain('maxSize')
+    expect(warnFor({ maxQueueSize: -1 }).join()).toContain('maxQueueSize')
+  })
+
+  // The warnings above prove the validator *spoke*; these prove it *acted*. A warn-but-accept
+  // implementation — log the message, then use the invalid value anyway — passed every message-only
+  // case while shipping exactly the stalls and floods the messages describe.
+  it('applies the default after rejecting an invalid maxSize, size-triggering at 10', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    sendBatch.mockResolvedValue(okResponse(10))
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), {
+      maxSize: Number.POSITIVE_INFINITY,
+      maxWaitMs: 60_000,
+    })
+    for (let i = 0; i < 10; i++) {
+      await t.send(evt(`e${i}`))
+    }
+    // No timer has fired, so this flush can only be size-triggered at the default 10. Accepted,
+    // Infinity disables size-triggered flushing outright and nothing sends here.
+    expect(sendBatch).toHaveBeenCalledTimes(1)
+    expect((sendBatch.mock.calls[0] as [Event[]])[0]).toHaveLength(10)
+    warn.mockRestore()
+  })
+
+  it('applies the default after rejecting a below-minimum maxSize', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    sendBatch.mockResolvedValue(okResponse(10))
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 0, maxWaitMs: 60_000 })
+    for (let i = 0; i < 10; i++) {
+      await t.send(evt(`e${i}`))
+    }
+    // Accepted, maxSize 0 trips the size threshold on every send but lock(0) hands flush an empty
+    // batch — nothing ever sends.
+    expect(sendBatch).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it('applies the default wait after rejecting an invalid maxWaitMs', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    sendBatch.mockResolvedValue(okResponse(1))
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: null as never })
+    await t.send(evt('a'))
+    // Accepted, setTimeout(fn, null) fires immediately — one request per event.
+    await vi.advanceTimersByTimeAsync(4999)
+    expect(sendBatch).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(2)
+    expect(sendBatch).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
   })
 
   it('still accepts a valid config silently', () => {

@@ -531,6 +531,29 @@ describe('retention', () => {
     expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('still holds "k" after removal'))
   })
 
+  // The other half of the throwing-sweep contract: the un-latch. Latched as done, one throwing
+  // sweep left an identify()ed mirror unreachable for the rest of the page load — every later miss
+  // skipped the sweep, and the value sat outside every deadline until the next full page load.
+  it('retries the mirror sweep on the next miss after a throwing sweep', () => {
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'v')
+
+    jar.delete('k')
+    const realRemove = localStorage.removeItem.bind(localStorage)
+    const spy = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('proxied Storage')
+    })
+    store?.getItem('k')
+    expect(localStorage.getItem('k')).not.toBeNull() // the throwing sweep left the mirror behind
+
+    // Heal by swapping the implementation, not mockRestore(): restore does not reliably re-attach
+    // over jsdom's Storage proxy, and a permanently broken removeItem leaks into later tests.
+    spy.mockImplementation((key: string) => realRemove(key))
+    store?.getItem('k')
+    expect(localStorage.getItem('k')).toBeNull()
+  })
+
   it('reports a stale value that cannot be removed once per key, not once per read', () => {
     // The session read runs getItem on every tracked event; against a store whose removeItem no-ops,
     // an unthrottled report here logged an error per event for the life of the page.

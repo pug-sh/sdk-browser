@@ -15,7 +15,6 @@ const createMockStorage = (): Storage => {
   const store: Record<string, string> = {}
   return {
     getItem: (key: string) => store[key] ?? null,
-    getItemOrLegacy: (key: string) => store[key] ?? null,
     setItem: (key: string, value: string) => {
       store[key] = value
     },
@@ -41,7 +40,7 @@ let mockStorage: Storage
 beforeEach(() => {
   mockStorage = createMockStorage()
   Object.defineProperty(globalThis, 'localStorage', { value: mockStorage, writable: true, configurable: true })
-  configureSession(PROJECT_ID)
+  configureSession(PROJECT_ID, undefined, undefined, GRANTED)
 })
 
 afterEach(() => {
@@ -59,20 +58,20 @@ describe('configureSession', () => {
   it('warns on idleTimeoutMinutes <= 0', () => {
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     destroySession()
-    configureSession(PROJECT_ID, { idleTimeoutMinutes: 0 })
+    configureSession(PROJECT_ID, { idleTimeoutMinutes: 0 }, undefined, GRANTED)
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('idleTimeoutMinutes must be > 0'))
   })
 
   it('warns on maxSessionMinutes <= 0', () => {
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     destroySession()
-    configureSession(PROJECT_ID, { maxSessionMinutes: -1 })
+    configureSession(PROJECT_ID, { maxSessionMinutes: -1 }, undefined, GRANTED)
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('maxSessionMinutes must be > 0'))
   })
 
   it('applies valid config', () => {
     destroySession()
-    configureSession(PROJECT_ID, { idleTimeoutMinutes: 5, maxSessionMinutes: 60 })
+    configureSession(PROJECT_ID, { idleTimeoutMinutes: 5, maxSessionMinutes: 60 }, undefined, GRANTED)
     const id1 = resolveSessionId()
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6 * 60 * 1000)
     const id2 = resolveSessionId()
@@ -167,13 +166,13 @@ describe('resolveSessionId', () => {
   it('returns fallback when state is null after rotate', () => {
     // Simulate: storageKey gets cleared so rotate() bails
     destroySession()
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     // Wipe the storageKey to make rotate() bail
     // We need to access internal config — instead, destroy and don't reconfigure
     destroySession()
     // Now storageKey is empty, but we have no fallbackSessionId either
     // Let's set up properly: configure, then break state
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     // This should always return a valid string
     const id = resolveSessionId()
@@ -198,7 +197,7 @@ describe('rotate', () => {
     const savedSession = mockStorage.getItem(SESSION_KEY)!
     destroySession()
     mockStorage.setItem(SESSION_KEY, savedSession)
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     rotate()
     const newDevice = JSON.parse(storedValue(mockStorage.getItem(SESSION_KEY))!).deviceId
     expect(newDevice).toBe(device)
@@ -221,7 +220,7 @@ describe('rotate', () => {
       setItem: () => false,
       removeItem: () => {},
     }
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     rotate()
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('rotated session'))
@@ -248,7 +247,7 @@ describe('resetIdentity', () => {
       setItem: () => false,
       removeItem: () => {},
     }
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     resetIdentity()
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('identity reset'))
@@ -277,7 +276,7 @@ describe('clearSession', () => {
       setItem: () => true,
       removeItem: () => false,
     }
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     clearSession()
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('clear the session'))
@@ -314,7 +313,7 @@ describe('destroySession', () => {
   it('allows re-initialization after destroy', () => {
     resolveSessionId()
     destroySession()
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     const id = resolveSessionId()
     expect(id).toBeTruthy()
   })
@@ -335,7 +334,7 @@ describe('tab detection', () => {
     const id1 = resolveSessionId()
     mockStorage.removeItem(TABS_KEY)
     destroySession()
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     const id2 = resolveSessionId()
     expect(id2).not.toBe(id1)
   })
@@ -351,7 +350,7 @@ describe('tab detection', () => {
     mockStorage.setItem(SESSION_KEY, savedSession)
     // Keep the other tab entry
     mockStorage.setItem(TABS_KEY, JSON.stringify({ 'other-tab': Date.now() }))
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     const id2 = resolveSessionId()
     expect(id2).toBe(id1)
   })
@@ -364,7 +363,7 @@ describe('tab detection', () => {
     )
     mockStorage.setItem(TABS_KEY, JSON.stringify({ 'stale-tab': now - 31 * 60 * 1000 }))
     destroySession()
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     const id = resolveSessionId()
     expect(id).not.toBe('old-session')
   })
@@ -372,7 +371,7 @@ describe('tab detection', () => {
   it('registers pagehide listener', () => {
     const spy = vi.spyOn(window, 'addEventListener')
     destroySession()
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     expect(spy).toHaveBeenCalledWith('pagehide', expect.any(Function))
   })
 
@@ -430,14 +429,14 @@ describe('cross-subdomain sessions', () => {
   it('persists session state through the provided store', () => {
     destroySession()
     const store = createFakeStore(true)
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     const id = resolveSessionId()
     expect(JSON.parse(store.map.get(SESSION_KEY)!).sessionId).toBe(id)
   })
 
   it('skips the tab registry when the store is cross-subdomain', () => {
     destroySession()
-    configureSession(PROJECT_ID, undefined, createFakeStore(true))
+    configureSession(PROJECT_ID, undefined, createFakeStore(true), GRANTED)
     resolveSessionId()
     expect(mockStorage.getItem(TABS_KEY)).toBeNull()
   })
@@ -445,7 +444,7 @@ describe('cross-subdomain sessions', () => {
   it('does not register a pagehide listener when the store is cross-subdomain', () => {
     destroySession()
     const spy = vi.spyOn(window, 'addEventListener')
-    configureSession(PROJECT_ID, undefined, createFakeStore(true))
+    configureSession(PROJECT_ID, undefined, createFakeStore(true), GRANTED)
     expect(spy).not.toHaveBeenCalledWith('pagehide', expect.any(Function))
   })
 
@@ -455,7 +454,7 @@ describe('cross-subdomain sessions', () => {
     seedSession(store, 'shared-session')
     // No tabs registry entries exist for this origin — under origin-scoped rules this
     // would rotate; with a cross-subdomain session it must not.
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     expect(resolveSessionId()).toBe('shared-session')
   })
 
@@ -463,7 +462,7 @@ describe('cross-subdomain sessions', () => {
     destroySession()
     const store = createFakeStore(false)
     seedSession(store, 'old-session')
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     expect(resolveSessionId()).not.toBe('old-session')
   })
 
@@ -489,7 +488,7 @@ describe('cross-subdomain sessions', () => {
   it('throttles the activity-time write so a cross-subdomain cookie is not rewritten every event', () => {
     destroySession()
     const { store, setItem } = countingStore(true)
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     const id = resolveSessionId() // first event persists the new session (via rotate)
     const writesAfterFirst = setItem.mock.calls.length
     expect(resolveSessionId()).toBe(id)
@@ -501,7 +500,7 @@ describe('cross-subdomain sessions', () => {
   it('resumes persisting a cross-subdomain session once the throttle interval elapses', () => {
     destroySession()
     const { store, setItem } = countingStore(true)
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     const start = Date.now()
     resolveSessionId()
     const writesAfterFirst = setItem.mock.calls.length
@@ -513,7 +512,7 @@ describe('cross-subdomain sessions', () => {
   it('persists every event for an origin-scoped store (no throttle)', () => {
     destroySession()
     const { store, setItem } = countingStore(false)
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     resolveSessionId()
     const writesAfterFirst = setItem.mock.calls.length
     resolveSessionId()
@@ -524,7 +523,7 @@ describe('cross-subdomain sessions', () => {
     destroySession()
     const store = createFakeStore(true)
     seedSession(store, 'shared-session')
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     resolveSessionId()
     destroySession()
     // Teardown must leave the shared cookie so siblings keep their session.
@@ -535,7 +534,7 @@ describe('cross-subdomain sessions', () => {
     destroySession()
     const store = createFakeStore(true)
     seedSession(store, 'shared-session')
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     resolveSessionId()
     clearSession()
     expect(store.map.get(SESSION_KEY)).toBeUndefined()
@@ -560,7 +559,7 @@ describe('cross-subdomain sessions', () => {
         map.delete(key)
       },
     }
-    configureSession(PROJECT_ID, undefined, store)
+    configureSession(PROJECT_ID, undefined, store, GRANTED)
     const start = Date.now()
     resolveSessionId() // rotate persists at t0 → lastPersistMs = t0
     persistOk = false
@@ -589,7 +588,7 @@ describe('cross-subdomain session round-trip', () => {
     ])
     const doc = new JSDOM('', { url, cookieJar: jar }).window.document
     const store = createPersistentStore(createCookieLayer(true, GRANTED, doc))
-    session.configureSession(PROJECT_ID, undefined, store)
+    session.configureSession(PROJECT_ID, undefined, store, GRANTED)
     return session
   }
 
@@ -617,6 +616,32 @@ describe('cross-subdomain session round-trip', () => {
   })
 })
 
+describe('consent gate', () => {
+  // The untyped-caller shape the arity pin cannot reach: tests are transpile-only and production is
+  // typechecked, so only the runtime default decides what an omitted gate means. It must read as
+  // *withheld* — the `?? true` this replaces made the same omission silently arm the registry and
+  // persist identity, the one fail-open default left in the gate chain. resolveSessionId()'s
+  // activity persist stays ungated by design (track() branches on consent first), so the pin
+  // asserts on the two writes the gate owns: the tab registry and resetIdentity's persist.
+  it('treats an omitted gate as withheld rather than permitted (untyped caller)', () => {
+    destroySession()
+    ;(configureSession as (p: string, c?: unknown, s?: unknown, g?: unknown) => void)(PROJECT_ID)
+
+    // The registry write is skipped — under the fail-open default it was armed here.
+    expect(mockStorage.getItem(TABS_KEY)).toBeNull()
+
+    // resetIdentity clears rather than writes: a fresh session + device id is exactly the
+    // identifier a withheld gate promises not to store.
+    const now = Date.now()
+    mockStorage.setItem(
+      SESSION_KEY,
+      persisted(JSON.stringify({ sessionId: 's1', deviceId: 'd1', startTime: now, lastActivityTime: now })),
+    )
+    expect(resetIdentity()).toBe(true)
+    expect(mockStorage.getItem(SESSION_KEY)).toBeNull()
+  })
+})
+
 describe('read validation', () => {
   it('rejects stored state with non-string sessionId', () => {
     mockStorage.setItem(
@@ -624,7 +649,7 @@ describe('read validation', () => {
       persisted(JSON.stringify({ sessionId: 123, deviceId: 'dev', startTime: 1, lastActivityTime: 1 })),
     )
     destroySession()
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     const id = resolveSessionId()
     expect(id).not.toBe('123')
   })
@@ -635,7 +660,7 @@ describe('read validation', () => {
       persisted(JSON.stringify({ sessionId: 'sid', deviceId: 'dev', startTime: 'bad', lastActivityTime: 1 })),
     )
     destroySession()
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     const id = resolveSessionId()
     expect(id).not.toBe('sid')
   })
@@ -644,7 +669,7 @@ describe('read validation', () => {
     mockStorage.setItem(SESSION_KEY, persisted('{not valid json'))
     destroySession()
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    configureSession(PROJECT_ID)
+    configureSession(PROJECT_ID, undefined, undefined, GRANTED)
     const id = resolveSessionId()
     expect(id).toBeTruthy()
     spy.mockRestore()
