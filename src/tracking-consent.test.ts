@@ -1,5 +1,6 @@
 import { CookieJar, JSDOM } from 'jsdom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { expiryOf, persisted, storedValue } from './storage-envelope.test-utils.js'
 import { isStorageAvailable, makeStorageKey } from './utils.js'
 
 const logSpies = { warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
@@ -28,12 +29,18 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+// Persisted values carry an absolute expiry: `<epoch ms>|<value>`.
+
 describe('createTrackingConsent', () => {
-  it('defaults to granted with no config', async () => {
+  it('defaults to cookieless with no config, so nothing is stored before the user answers', async () => {
     const createTrackingConsent = await loadFactory()
     const consent = createTrackingConsent('proj')
-    expect(consent.isGranted()).toBe(true)
-    expect(consent.getConsent()).toBe('granted')
+    expect(consent.getConsent()).toBe('cookieless')
+    // Events flow, but no identity may be written to the device.
+    expect(consent.isTracking()).toBe(true)
+    expect(consent.isGranted()).toBe(false)
+    // And it is a seed, not an answer — the banner still has to be shown.
+    expect(consent.isPending()).toBe(true)
   })
 
   it('honors the default seed from the object form', async () => {
@@ -93,7 +100,7 @@ describe('createTrackingConsent', () => {
     const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     consent.set('cookieless')
     expect(consent.getConsent()).toBe('cookieless')
-    expect(localStorage.getItem(KEY)).toBe('cookieless')
+    expect(storedValue(localStorage.getItem(KEY))).toBe('cookieless')
     consent.set('denied')
     expect(consent.getConsent()).toBe('denied')
     consent.set('granted')
@@ -102,7 +109,7 @@ describe('createTrackingConsent', () => {
 
   it('restores a persisted cookieless choice over the default seed', async () => {
     const createTrackingConsent = await loadFactory()
-    localStorage.setItem(KEY, 'cookieless')
+    localStorage.setItem(KEY, persisted('cookieless'))
     const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     expect(consent.getConsent()).toBe('cookieless')
   })
@@ -137,6 +144,37 @@ describe('createTrackingConsent', () => {
     expect(consent.optIn()).toBe(true)
   })
 
+  it('rejects an unstringifiable seed without throwing out of the factory', async () => {
+    // The validators interpolate the very value they reject, and a circular object (or a bigint)
+    // made JSON.stringify itself throw — out of the one factory init() calls unguarded, so init()
+    // died mid-setup on exactly the input the validation existed to reject.
+    const circular: Record<string, unknown> = {}
+    circular.self = circular
+    const createTrackingConsent = await loadFactory()
+    let consent: ReturnType<typeof createTrackingConsent> | undefined
+    expect(() => {
+      consent = createTrackingConsent('proj', { initial: circular } as never)
+    }).not.toThrow()
+    expect(consent?.getConsent()).toBe('denied')
+    expect(logSpies.warn).toHaveBeenCalled()
+  })
+
+  it('fails closed without throwing when set() receives an unstringifiable value', async () => {
+    // Same throw, worse funnel: set() is reached through the public setTrackingConsent, so a CMP
+    // handing over a malformed object took down the caller instead of returning false.
+    const circular: Record<string, unknown> = {}
+    circular.self = circular
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', 'granted')
+    let result: boolean | undefined
+    expect(() => {
+      result = consent.set(circular as never)
+    }).not.toThrow()
+    expect(result).toBe(false)
+    expect(consent.getConsent()).toBe('denied')
+    expect(logSpies.error).toHaveBeenCalled()
+  })
+
   // I8: a persist that does not land leaves the opt-out in memory only, so the next page load falls
   // back to the seed and silently re-consents the user. The caller has to be able to see that.
   it('reports failure when persistence was requested but is unavailable', async () => {
@@ -165,24 +203,151 @@ describe('createTrackingConsent', () => {
     const createTrackingConsent = await loadFactory()
     const consent = createTrackingConsent('proj', { initial: 'denied', persist: true })
     consent.optIn()
-    expect(localStorage.getItem(KEY)).toBe('granted')
+    expect(storedValue(localStorage.getItem(KEY))).toBe('granted')
   })
 
   it('writes denied to storage on optOut when persist is true', async () => {
     const createTrackingConsent = await loadFactory()
     const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     consent.optOut()
-    expect(localStorage.getItem(KEY)).toBe('denied')
+    expect(storedValue(localStorage.getItem(KEY))).toBe('denied')
   })
 
   it('restores a persisted value over the default seed', async () => {
-    localStorage.setItem(KEY, 'denied')
+    localStorage.setItem(KEY, persisted('denied'))
     const createTrackingConsent = await loadFactory()
     expect(createTrackingConsent('proj', { initial: 'granted', persist: true }).getConsent()).toBe('denied')
   })
 
+  it('adopts a legacy pre-envelope consent record as the user’s recorded choice', async () => {
+    // The retention envelope made every pre-envelope value unreadable, and getItem deletes what it
+    // cannot decode — sound for identifiers, which self-heal, but this key records a *refusal*:
+    // deleted unread, a user who clicked Reject on the previous build came back on the config seed
+    // (the README's own migration advice is `initial: 'granted'`), fully tracked until they
+    // re-answered a banner they had already answered.
+    localStorage.setItem(KEY, 'denied') // what a pre-envelope build persisted
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
+    expect(consent.getConsent()).toBe('denied')
+    expect(consent.isPending()).toBe(false) // an answer, not a seed — no re-prompt
+    expect(consent.isAuthoritative()).toBe(true) // init()'s identity purge honors it
+    // Re-persisted through the store, so it now carries a deadline like any other record.
+    expect(storedValue(localStorage.getItem(KEY))).toBe('denied')
+    expect(expiryOf(localStorage.getItem(KEY)) ?? 0).toBeGreaterThan(Date.now())
+  })
+
+  it('drops a legacy record that is not a valid consent state and falls back to the seed', async () => {
+    // Adoption is gated on isConsent(): corruption is not a choice. The store already removed the
+    // value (adopt never skips the removal), so nothing is stranded outside retention either.
+    localStorage.setItem(KEY, 'yes-please')
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'cookieless', persist: true })
+    expect(consent.getConsent()).toBe('cookieless')
+    expect(consent.isPending()).toBe(true)
+    expect(localStorage.getItem(KEY)).toBeNull()
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('invalid'))
+  })
+
+  it('restarts the retention window when the user changes their mind', async () => {
+    // Otherwise opting out on day 1 and back in on day 360 leaves a record lapsing in five days,
+    // re-prompting a user who just answered.
+    localStorage.setItem(KEY, persisted('denied', 5_000))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { persist: true })
+
+    expect(consent.set('granted')).toBe(true)
+    expect(expiryOf(localStorage.getItem(KEY)) ?? 0).toBeGreaterThan(Date.now() + 60_000)
+  })
+
+  it('does not restart the retention window when the same choice is re-asserted', async () => {
+    // A CMP restating a state it already holds must not slide the clock, or the record never ages
+    // out and the banner is never shown again.
+    localStorage.setItem(KEY, persisted('denied', 5_000))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { persist: true })
+
+    expect(consent.set('denied')).toBe(true)
+    expect(expiryOf(localStorage.getItem(KEY)) ?? 0).toBeLessThan(Date.now() + 60_000)
+  })
+
+  it('keeps the previously recorded choice when persisting a change fails', async () => {
+    // The old order deleted the record first: a removeItem that landed followed by a setItem that
+    // failed left the device empty, so the next init() fell back to the config seed — a recorded
+    // 'denied' effectively becoming the integrator's more permissive placeholder. The one write in
+    // the SDK that must not fail open.
+    localStorage.setItem(KEY, persisted('denied'))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
+    expect(consent.getConsent()).toBe('denied')
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('quota')
+    })
+    expect(consent.set('cookieless')).toBe(false)
+    expect(storedValue(localStorage.getItem(KEY))).toBe('denied')
+  })
+
+  it('warns when the retention-window restart cannot clear the old record', async () => {
+    // The remove is what restarts the window; when it silently no-ops, the new value carries the
+    // old deadline forward — early lapse, the safe direction — but nothing said the restart was
+    // skipped, so the early re-prompt read as a bug with no trail.
+    localStorage.setItem(KEY, persisted('denied', 5_000))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { persist: true })
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    expect(consent.set('granted')).toBe(true)
+    expect(storedValue(localStorage.getItem(KEY))).toBe('granted')
+    expect(expiryOf(localStorage.getItem(KEY)) ?? 0).toBeLessThan(Date.now() + 60_000)
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('retention window'))
+  })
+
+  it('reports losing the record when the restart rewrite fails after the old one was cleared', async () => {
+    // The narrow sequence the write-first order cannot save: the remove landed and the layer died
+    // before the rewrite. Nothing is on the device now, and that must be an error, not a silence.
+    localStorage.setItem(KEY, persisted('denied', 5_000))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { persist: true })
+    const realSet = localStorage.setItem.bind(localStorage)
+    let writes = 0
+    vi.spyOn(localStorage, 'setItem').mockImplementation((k: string, v: string) => {
+      writes += 1
+      if (writes >= 2) {
+        throw new Error('quota')
+      }
+      realSet(k, v)
+    })
+    expect(consent.set('granted')).toBe(false)
+    expect(logSpies.error).toHaveBeenCalled()
+  })
+
+  it('does not run the window-restart cycle on the first-ever persist', async () => {
+    // persistedValue starts null, so the first set() after { persist: true } on a fresh device took
+    // the value-changed branch and issued a needless remove+rewrite — two extra cookie operations
+    // in cross-subdomain mode, a spurious "could not clear the previous consent record" warning
+    // when the remove failed with no previous record to clear, and a pointless walk through the
+    // one remove-landed-rewrite-failed sequence write-first cannot save.
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { persist: true })
+    const removals = vi.spyOn(localStorage, 'removeItem')
+    expect(consent.set('granted')).toBe(true)
+    expect(storedValue(localStorage.getItem(KEY))).toBe('granted')
+    expect(removals).not.toHaveBeenCalledWith(KEY)
+  })
+
+  it('treats a lapsed consent record as unanswered, so the banner shows afresh', async () => {
+    // The maxAgeDays JSDoc promises exactly this compound: the record is deleted on read, the state
+    // falls back to the seed, isPending() is true again — and the lapsed record is not
+    // authoritative, so init() must not purge identity on its strength.
+    localStorage.setItem(KEY, persisted('denied', -1_000))
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
+    expect(consent.getConsent()).toBe('granted')
+    expect(consent.isPending()).toBe(true)
+    expect(consent.isAuthoritative()).toBe(false)
+    expect(localStorage.getItem(KEY)).toBeNull()
+  })
+
   it('ignores an invalid persisted value and warns', async () => {
-    localStorage.setItem(KEY, 'maybe')
+    localStorage.setItem(KEY, persisted('maybe'))
     const createTrackingConsent = await loadFactory()
     const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     expect(consent.getConsent()).toBe('granted')
@@ -248,7 +413,7 @@ describe('pending vs decided', () => {
   })
 
   it('is decided when a choice is restored from storage', async () => {
-    localStorage.setItem(KEY, 'cookieless')
+    localStorage.setItem(KEY, persisted('cookieless'))
     const createTrackingConsent = await loadFactory()
     const consent = createTrackingConsent('proj', { initial: 'granted', persist: true })
     expect(consent.getConsent()).toBe('cookieless')
@@ -275,7 +440,7 @@ describe('respectGpc', () => {
   it('is ignored unless opted into', async () => {
     withGpc(true)
     const createTrackingConsent = await loadFactory()
-    expect(createTrackingConsent('proj').getConsent()).toBe('granted')
+    expect(createTrackingConsent('proj').getConsent()).toBe('cookieless')
   })
 
   it('resolves to the reject state when the signal is set', async () => {
@@ -297,9 +462,26 @@ describe('respectGpc', () => {
 
   it('leaves the seed alone when the signal is absent or false', async () => {
     const createTrackingConsent = await loadFactory()
-    expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('granted')
+    expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('cookieless')
     withGpc(false)
-    expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('granted')
+    expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('cookieless')
+  })
+
+  it('warns when the signal cannot be read, instead of hiding it at debug', async () => {
+    // isGpcEnabled's own comment states the requirement — a throwing getter (a privacy extension)
+    // must not silently disable an opt-in signal — but log.debug is off in every default install,
+    // so the user's standing opt-out fell back to the integrator's seed with nothing visible
+    // saying why. Only respectGpc integrators reach this, once per init(); a warn cannot spam.
+    Object.defineProperty(navigator, 'globalPrivacyControl', {
+      get() {
+        throw new Error('extension says no')
+      },
+      configurable: true,
+    })
+    const createTrackingConsent = await loadFactory()
+    const consent = createTrackingConsent('proj', { respectGpc: true })
+    expect(consent.getConsent()).toBe('cookieless') // treated as absent
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Global Privacy Control'), expect.anything())
   })
 
   it('counts as decided, so no banner re-prompts a user who already opted out globally', async () => {
@@ -318,7 +500,7 @@ describe('respectGpc', () => {
 
   it('yields to a choice the user made on this site', async () => {
     withGpc(true)
-    localStorage.setItem(KEY, 'granted')
+    localStorage.setItem(KEY, persisted('granted'))
     const createTrackingConsent = await loadFactory()
     const consent = createTrackingConsent('proj', { respectGpc: true, persist: true })
     expect(consent.getConsent()).toBe('granted')
@@ -365,7 +547,7 @@ describe('respectGpc', () => {
   it('ignores a truthy non-signal value', async () => {
     withGpc('yes')
     const createTrackingConsent = await loadFactory()
-    expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('granted')
+    expect(createTrackingConsent('proj', { respectGpc: true }).getConsent()).toBe('cookieless')
   })
 
   it('warns and ignores a non-boolean respectGpc from data-options JSON', async () => {
@@ -373,7 +555,7 @@ describe('respectGpc', () => {
     const createTrackingConsent = await loadFactory()
     const consent = createTrackingConsent('proj', { respectGpc: 'true' as unknown as boolean })
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('respectGpc'))
-    expect(consent.getConsent()).toBe('granted')
+    expect(consent.getConsent()).toBe('cookieless')
   })
 })
 
@@ -444,7 +626,10 @@ describe('createTrackingConsent with a provided store', () => {
         return true
       },
       removeItem: (key: string) => {
+        // Conforms to PersistentStore: true when a subsequent read would miss. write() now consults
+        // this (the retention restart), so a void-returning fake reads as a failed removal.
         map.delete(key)
+        return true
       },
     }
   }

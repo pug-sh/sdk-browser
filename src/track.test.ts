@@ -379,6 +379,50 @@ describe('Event proto integrity', () => {
     })
   })
 
+  // The redaction itself is covered in utils.test.ts; this pins that $url actually goes through it,
+  // and that beforeSend sees the already-redacted value rather than being the only line of defence.
+  describe('URL redaction', () => {
+    const RESET_LINK = 'https://app.example.com/reset?token=s3cr3t&plan=pro'
+
+    beforeEach(() => {
+      window.history.replaceState({}, '', '/reset?token=s3cr3t&plan=pro')
+    })
+
+    afterEach(() => {
+      window.history.replaceState({}, '', '/')
+      configureBeforeSend(undefined)
+    })
+
+    it('redacts sensitive params from $url', () => {
+      const ev = toEvent(PROJECT_ID, 'page_view', { sessionId: SESSION_ID, distinctId: DISTINCT_ID })
+      const url = ev!.autoProperties.$url.value.value as string
+      expect(url).toContain('token=redacted')
+      expect(url).toContain('plan=pro')
+    })
+
+    it('redacts sensitive params from $referrer', () => {
+      // The riskier of the two: the referrer carries the *previous* page's URL, so a visitor
+      // arriving from their own magic-link page hands over that token — and unlike $url nobody
+      // ever sees it in an address bar to notice.
+      vi.spyOn(document, 'referrer', 'get').mockReturnValue('https://mail.example.com/open?token=s3cr3t&id=9')
+      const ev = toEvent(PROJECT_ID, 'page_view', { sessionId: SESSION_ID, distinctId: DISTINCT_ID })
+      const referrer = ev!.autoProperties.$referrer.value.value as string
+      expect(referrer).toContain('token=redacted')
+      expect(referrer).toContain('id=9')
+      expect(referrer).not.toContain('s3cr3t')
+    })
+
+    it('hands beforeSend the redacted value', () => {
+      let seen = ''
+      configureBeforeSend(e => {
+        seen = e.autoProperties.$url
+      })
+      toEvent(PROJECT_ID, 'page_view', { sessionId: SESSION_ID, distinctId: DISTINCT_ID })
+      expect(seen).not.toContain('s3cr3t')
+      expect(RESET_LINK).toContain('s3cr3t') // the raw link really did carry it
+    })
+  })
+
   // The backend promotes $platform into a dedicated events column and never derives it from the UA
   // header, so an omitted or non-"web" value silently empties every platform breakdown/filter.
   it('sets $platform to "web"', () => {

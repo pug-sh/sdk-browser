@@ -15,5 +15,5 @@
   },
   "include": ["src/**/*"],
   // *.test-d.ts holds type-level tests: checked by tsconfig.typecheck.json, never emitted to dist.
-  "exclude": ["src/**/*.test.ts", "src/**/*.test-d.ts"]
+  "exclude": ["src/**/*.test.ts", "src/**/*.test-d.ts", "src/**/*.test-utils.ts"]
 }

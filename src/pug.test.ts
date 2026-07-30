@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { initUserAgentData } from './parsers.js'
 import {
   clearProfile,
   configureProfile,
@@ -8,7 +9,8 @@ import {
   resolveDistinctId,
 } from './profile.js'
 import { clearSession, configureSession, onConsentGranted, resetIdentity, resolveSessionId } from './session.js'
-import { makeStorageKey } from './utils.js'
+import { expiryOf, persisted, storedValue } from './storage-envelope.test-utils.js'
+import { makeStorageKey, scrubUrl } from './utils.js'
 
 const logSpies = {
   warn: vi.fn(),
@@ -131,6 +133,8 @@ afterEach(async () => {
   const { destroy } = await importPug()
   destroy()
 })
+
+// Persisted values carry an absolute expiry: `<epoch ms>|<value>`.
 
 describe('init debug logging', () => {
   it('leaves debug logging off by default', async () => {
@@ -499,7 +503,7 @@ describe('tracking consent', () => {
   // from a real opt-out. A consent banner gated on it would re-prompt a user who had already opted in,
   // because the persisted choice is not read from storage until init() runs.
   it('reports undefined — not denied — before init even when a granted choice is persisted', async () => {
-    localStorage.setItem(makeStorageKey('project-id', 'consent'), 'granted')
+    localStorage.setItem(makeStorageKey('project-id', 'consent'), persisted('granted'))
     const { getTrackingConsent, init } = await importPug()
 
     expect(getTrackingConsent()).toBeUndefined()
@@ -517,8 +521,8 @@ describe('tracking consent', () => {
     expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('isConsentPending() called before init()'))
 
     init('project-id', { apiKey: 'api-key', autoCapture: false })
-    // Seeded 'granted' — the SDK is tracking, but the user has not chosen it.
-    expect(getTrackingConsent()).toBe('granted')
+    // Seeded 'cookieless' — events flow, nothing is stored, and the user has not chosen yet.
+    expect(getTrackingConsent()).toBe('cookieless')
     expect(isConsentPending()).toBe(true)
 
     optInTracking()
@@ -526,7 +530,7 @@ describe('tracking consent', () => {
   })
 
   it('reports consent decided when a persisted choice is restored', async () => {
-    localStorage.setItem(makeStorageKey('project-id', 'consent'), 'cookieless')
+    localStorage.setItem(makeStorageKey('project-id', 'consent'), persisted('cookieless'))
     const { init, isConsentPending } = await importPug()
 
     init('project-id', {
@@ -683,7 +687,7 @@ describe('identify', () => {
     unaryCallSpy.mockImplementationOnce(() => Promise.reject(new Error('rpc down')))
     const { identify, init } = await importPug()
 
-    init('project-id', { apiKey: 'api-key', autoCapture: false })
+    init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: 'granted' })
 
     await expect(identify('user-1')).resolves.toBeUndefined()
     expect(logSpies.error).toHaveBeenCalledWith('Failed to identify:', expect.any(Error))
@@ -701,7 +705,7 @@ describe('identify', () => {
     })
     const { identify, init } = await importPug()
 
-    init('project-id', { apiKey: 'api-key', autoCapture: false })
+    init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: 'granted' })
     await expect(identify(PII)).resolves.toBeUndefined()
 
     expect(logSpies.error).toHaveBeenCalledWith('Unexpected error in identify():', expect.any(Error))
@@ -724,7 +728,7 @@ describe('tracking consent persistence', () => {
       trackingConsent: { initial: 'granted', persist: true },
     })
     optOutTracking()
-    expect(localStorage.getItem(CONSENT_KEY)).toBe('denied')
+    expect(storedValue(localStorage.getItem(CONSENT_KEY))).toBe('denied')
 
     destroy()
 
@@ -745,7 +749,7 @@ describe('tracking consent persistence', () => {
       trackingConsent: { initial: 'denied', persist: true },
     })
     optInTracking()
-    expect(localStorage.getItem(CONSENT_KEY)).toBe('granted')
+    expect(storedValue(localStorage.getItem(CONSENT_KEY))).toBe('granted')
 
     destroy()
 
@@ -775,11 +779,102 @@ describe('tracking consent persistence', () => {
       trackingConsent: { initial: 'granted', persist: true },
     })
     optOutTracking()
-    expect(localStorage.getItem(CONSENT_KEY)).toBe('denied')
+    expect(storedValue(localStorage.getItem(CONSENT_KEY))).toBe('denied')
 
     reset()
 
-    expect(localStorage.getItem(CONSENT_KEY)).toBe('denied')
+    expect(storedValue(localStorage.getItem(CONSENT_KEY))).toBe('denied')
+  })
+})
+
+describe('endpoint and device-read hygiene', () => {
+  it('warns when the endpoint is not https, since events would cross the network in the clear', async () => {
+    const { init } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, endpoint: 'http://collector.example.com' })
+    expect(logSpies.warn).toHaveBeenCalledWith(
+      'endpoint "http://collector.example.com" is not https — events will be sent unencrypted.',
+    )
+  })
+
+  it('stays quiet for https and for a local dev collector', async () => {
+    const { init, destroy } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, endpoint: 'http://localhost:8080' })
+    destroy()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, endpoint: 'https://api.pugs.dev' })
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('unencrypted'))
+  })
+
+  it('does not request high-entropy client hints while consent is denied', async () => {
+    const { init } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: 'denied' })
+    // Reading device characteristics for a user who is not being tracked buys nothing and is a
+    // device read in its own right.
+    expect(initUserAgentData).not.toHaveBeenCalled()
+  })
+
+  it('warms client hints once consent allows tracking', async () => {
+    const { init, optInTracking } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: 'denied' })
+    optInTracking()
+    expect(initUserAgentData).toHaveBeenCalled()
+  })
+
+  it('warns and keeps the default list when redactUrlParams is malformed', async () => {
+    const { init } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, redactUrlParams: 'token' as never })
+    expect(logSpies.warn).toHaveBeenCalledWith(
+      'redactUrlParams must be an array of strings or `false`; using the default redaction list.',
+    )
+  })
+
+  it('warns and keeps the default list when redactUrlParams mixes in non-strings', async () => {
+    // ['email', 42] out of data-options JSON: without the per-element check this fell through to
+    // configureUrlRedaction, whose String(p) coercion silently turned "reject the malformed list"
+    // into "redact a param named 42" — with the default list gone.
+    const { init } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, redactUrlParams: ['email', 42] as never })
+    expect(logSpies.warn).toHaveBeenCalledWith(
+      'redactUrlParams must be an array of strings or `false`; using the default redaction list.',
+    )
+    expect(scrubUrl('https://x.com/?token=abc')).toBe('https://x.com/?token=redacted')
+  })
+
+  it('does not re-warm client hints when consent is re-asserted', async () => {
+    const { init, setTrackingConsent } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, trackingConsent: 'granted' })
+    vi.mocked(initUserAgentData).mockClear()
+    // initUserAgentData clears the hint cache synchronously and refills it asynchronously, so a CMP
+    // restating a state it already holds would drop $osVersion/$device from every event in between.
+    setTrackingConsent('granted')
+    expect(initUserAgentData).not.toHaveBeenCalled()
+  })
+
+  it('wires redactUrlParams through to the scrubber', async () => {
+    const { init } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, redactUrlParams: ['orderid'] })
+    expect(scrubUrl('https://x.com/?orderId=7&token=abc')).toBe('https://x.com/?orderId=redacted&token=abc')
+  })
+
+  it('captures URLs verbatim when redactUrlParams is false', async () => {
+    const { init } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, redactUrlParams: false })
+    expect(scrubUrl('https://x.com/?token=abc')).toBe('https://x.com/?token=abc')
+  })
+
+  it('warns and keeps the default list when redactUrlParams is empty', async () => {
+    // An empty list matches nothing, so it silently disables redaction exactly like `false` — and
+    // `userList.filter(...)` coming up empty is how you reach it without meaning to.
+    const { init } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, redactUrlParams: [] })
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('redactUrlParams is empty'))
+    expect(scrubUrl('https://x.com/?token=abc')).toBe('https://x.com/?token=redacted')
+  })
+
+  it('restores the default redaction list on destroy()', async () => {
+    const { init, destroy } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, redactUrlParams: false })
+    destroy()
+    expect(scrubUrl('https://x.com/?token=abc')).toBe('https://x.com/?token=redacted')
   })
 })
 
@@ -879,8 +974,20 @@ describe('crossSubdomainTracking wiring', () => {
     // no cookie layer, so writes go to localStorage only, never document.cookie.
     store.setItem('__pug_wiring_probe__', 'v')
     expect(document.cookie).not.toContain('__pug_wiring_probe__')
-    expect(localStorage.getItem('__pug_wiring_probe__')).toBe('v')
+    expect(storedValue(localStorage.getItem('__pug_wiring_probe__'))).toBe('v')
     expect(store.crossSubdomain).toBe(false)
+  })
+
+  it('forwards maxAgeDays to the store', async () => {
+    // persistence.test.ts covers what the store does with it; nothing checked that init() hands it
+    // over, so a site setting 390 for CNIL's 13 months would silently get 365.
+    const { init } = await importPug()
+    init('project-id', { apiKey: 'api-key', autoCapture: false, maxAgeDays: 30 })
+
+    capturedStore().setItem('__pug_maxage_probe__', 'v')
+    const ttl = (expiryOf(localStorage.getItem('__pug_maxage_probe__')) ?? 0) - Date.now()
+    expect(ttl).toBeLessThanOrEqual(30 * 24 * 60 * 60 * 1000)
+    expect(ttl).toBeGreaterThan(29 * 24 * 60 * 60 * 1000)
   })
 
   it('threads the store into consent so a persisted opt-out rides the cookie when enabled', async () => {
@@ -895,7 +1002,9 @@ describe('crossSubdomainTracking wiring', () => {
     })
     optOutTracking()
 
-    expect(document.cookie).toContain(`${CONSENT_KEY}=denied`)
+    // Tied to its key, not just present somewhere in the jar; the expiry separator is
+    // percent-encoded in a cookie value.
+    expect(document.cookie).toMatch(new RegExp(`${CONSENT_KEY}=\\d+%7Cdenied`))
   })
 
   it('crossSubdomainTracking: false builds a store without a cookie layer', async () => {
@@ -906,7 +1015,7 @@ describe('crossSubdomainTracking wiring', () => {
     const store = capturedStore()
     store.setItem('__pug_wiring_probe__', 'v')
     expect(document.cookie).not.toContain('__pug_wiring_probe__')
-    expect(localStorage.getItem('__pug_wiring_probe__')).toBe('v')
+    expect(storedValue(localStorage.getItem('__pug_wiring_probe__'))).toBe('v')
   })
 
   it('passes an explicit { domain } through to the cookie layer', async () => {
@@ -998,6 +1107,28 @@ describe('cookieless mode', () => {
     setTrackingConsent('cookieless')
     expect(trackerSpies.pageView).toHaveBeenCalled()
   })
+
+  it('does not purge the queue on a transition that arms capture, so the transition page_view survives', async () => {
+    // The real page-view tracker fires its initial page_view synchronously inside setup, and the
+    // transport enqueues synchronously. Two eras of the same protection: originally the purge ran
+    // on every non-granted resolve, so it had to run *before* apply() or it destroyed exactly that
+    // event. The drop predicate now scopes the purge to consent reductions (leaving granted, or
+    // landing on denied) — and no reduction arms a tracker, so on this transition the purge must
+    // not run at all, which protects the same event more strongly than ordering did.
+    const { init, setTrackingConsent } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied', autoCapture: true })
+    trackerSpies.pageView.mockImplementationOnce(track => {
+      ;(track as (kind: string) => void)('page_view')
+      return cleanupSpies.pageView
+    })
+    transportSpies.purgeQueue.mockClear()
+    transportSpies.send.mockClear()
+
+    setTrackingConsent('cookieless')
+
+    expect(transportSpies.send).toHaveBeenCalled()
+    expect(transportSpies.purgeQueue).not.toHaveBeenCalled()
+  })
 })
 
 describe('respectGpc wiring', () => {
@@ -1034,6 +1165,20 @@ describe('respectGpc wiring', () => {
     expect(transportSpies.purgeQueue).toHaveBeenCalled()
   })
 
+  it('reports at error level when the init-time identity purge does not land', async () => {
+    // init() returns void, so this log is the only signal anywhere that an authoritative purge
+    // failed — a later optInTracking() would resume the pre-existing identity while
+    // getTrackingConsent() reports the new state as though it fully applied. A refactor calling
+    // purgePersistedIdentity() bare (dropping the `if (!…)`) leaves every other test green.
+    withGpc(true)
+    vi.mocked(clearProfile).mockReturnValueOnce(false)
+    const { init } = await importPug()
+
+    init('proj', { apiKey: 'k', autoCapture: false, trackingConsent: { respectGpc: true } })
+
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('Could not fully remove stored identity'))
+  })
+
   it('keeps events flowing identity-free when onReject is cookieless', async () => {
     withGpc(true)
     const { init, track, getTrackingConsent } = await importPug()
@@ -1048,7 +1193,7 @@ describe('respectGpc wiring', () => {
 
   it('does not override a stored opt-in from this site', async () => {
     withGpc(true)
-    localStorage.setItem(makeStorageKey('proj', 'consent'), 'granted')
+    localStorage.setItem(makeStorageKey('proj', 'consent'), persisted('granted'))
     const { init, getTrackingConsent } = await importPug()
 
     init('proj', { apiKey: 'k', autoCapture: false, trackingConsent: { respectGpc: true, persist: true } })
@@ -1058,13 +1203,35 @@ describe('respectGpc wiring', () => {
 })
 
 describe('consent teardown contract', () => {
-  it('purges the persisted event queue when leaving granted', async () => {
+  it('purges the persisted event queue when leaving granted, without transmitting it', async () => {
     const { init, optOutTracking } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })
     transportSpies.purgeQueue.mockClear()
 
     expect(optOutTracking()).toBe(true)
-    expect(transportSpies.purgeQueue).toHaveBeenCalled()
+    // Beaconing after the user chose Reject would be a fresh transmission of what they withdrew.
+    expect(transportSpies.purgeQueue).toHaveBeenCalledWith({ send: false })
+  })
+
+  it('sends the queue one last time on reset(), which is a logout rather than a withdrawal', async () => {
+    const { init, reset } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+    transportSpies.purgeQueue.mockClear()
+
+    reset()
+    // Consent is unchanged, so events collected while signed in were agreed to — the asymmetry the
+    // flag exists for.
+    expect(transportSpies.purgeQueue).toHaveBeenCalledWith({ send: true })
+  })
+
+  it('mentions the routine queue drop at debug on a non-authoritative non-granted init', async () => {
+    // The drop itself is deliberate policy (identified payloads must not sit on a device whose
+    // consent is not granted), but an integrator on the README's placeholder-denied CMP flow
+    // wondering where a hard-killed granted session's events went had nothing to find, even with
+    // debug on.
+    const { init } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    expect(logSpies.debug).toHaveBeenCalledWith(expect.stringContaining('queued events'))
   })
 
   // The boolean exists so a withdrawal that did not fully land is detectable rather than

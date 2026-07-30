@@ -1,4 +1,5 @@
 import { log } from './logger.js'
+import { decodeStored, type StoredEnvelope } from './utils.js'
 
 /**
  * Controls whether identity (anonymous ID, external ID, session state, persisted consent) is shared
@@ -9,17 +10,16 @@ import { log } from './logger.js'
  * - `{ domain }` — pin an explicit cookie domain, e.g. to scope narrower than the registrable
  *   domain (`app.acme.com` instead of `.acme.com`) or to a tenant slug on a multi-tenant platform.
  *   Falls back to a host-only cookie with a warning when the browser rejects the domain.
- * - `{ maxAgeDays }` — cookie lifetime, default 365. Omit `domain` to keep auto-discovery.
+ *
+ * Cookie lifetime comes from the top-level `maxAgeDays` init option, not from here.
  */
-/** Cookie lifetime in days, default 365. Refreshed on every write, so it runs from last visit. */
-type MaxAgeDays = number
-
-// Split so at least one field is required: `{}` would otherwise opt into cross-subdomain identity
-// without stating it, which a config builder spreading unset optionals produces by accident.
-export type CrossSubdomainConfig =
-  | boolean
-  | { readonly domain: string; readonly maxAgeDays?: MaxAgeDays }
-  | { readonly domain?: string; readonly maxAgeDays: MaxAgeDays }
+// `domain` is required, so `{}` cannot opt into cross-subdomain identity without stating it — which
+// a config builder spreading unset optionals produces by accident. `maxAgeDays?: never` closes the
+// removed lifetime arm for variables and spreads too (excess-property checks guard only fresh
+// literals — the EventIdentity pattern): held in a config builder, the old documented shape
+// otherwise compiled while resolveIntent silently swapped its shortened lifetime for the 365-day
+// default.
+export type CrossSubdomainConfig = boolean | { readonly domain: string; readonly maxAgeDays?: never }
 
 /** Minimal document surface the cookie layer needs — injectable so tests can target other origins. */
 export interface CookieDocument {
@@ -29,38 +29,37 @@ export interface CookieDocument {
 
 export interface CookieLayer {
   get(name: string): string | null
-  /** Returns true only when the write verifiably landed (read-back matches). */
-  set(name: string, value: string): boolean
+  /**
+   * Returns true only when the write verifiably landed (read-back matches). `maxAgeSeconds` is the
+   * value's remaining lifetime, so the cookie disappears on the same deadline as its contents.
+   *
+   * Required, not optional: the store owns retention, and a defaulted argument would silently give
+   * a cookie a lifetime nobody chose — the same silent-default shape the `isGranted` gates were made
+   * required to close. No write site in this module defaults it either.
+   *
+   * `value` is the *enveloped* stored string (`StoredEnvelope`, minted by `encodeStored`), never a
+   * bare value: reads prefer this layer, and a bare value written here reads as undecodable and is
+   * deleted by the store's next getItem — silent identity loss the brand makes a compile error.
+   */
+  set(name: string, value: StoredEnvelope, maxAgeSeconds: number): boolean
   /** Returns true only when the key is verifiably gone (read-back is null). */
   remove(name: string): boolean
   /** True when the cookie is scoped to a shared domain and therefore visible across subdomains. */
   readonly crossSubdomain: boolean
 }
 
-const SECONDS_PER_DAY = 24 * 60 * 60
-
-const DEFAULT_COOKIE_MAX_AGE_DAYS = 365
-
-/** Chromium silently shortens anything past this. */
-const BROWSER_MAX_AGE_CAP_DAYS = 400
-
-// Untrusted: the one-tag install feeds this from `data-options` JSON.
-const resolveMaxAgeSeconds = (maxAgeDays: unknown): number => {
-  if (maxAgeDays === undefined) {
-    return DEFAULT_COOKIE_MAX_AGE_DAYS * SECONDS_PER_DAY
+/**
+ * Seconds left on a stored value's own retention deadline, or null when it has none left — or none
+ * at all, which means a pre-envelope value. Used by the twin migration, the one write that has no
+ * caller-supplied lifetime to pass on.
+ */
+const remainingSeconds = (raw: string): number | null => {
+  const stored = decodeStored(raw)
+  if (!stored) {
+    return null
   }
-  if (typeof maxAgeDays !== 'number' || !Number.isFinite(maxAgeDays) || maxAgeDays <= 0) {
-    log.warn(
-      `crossSubdomainTracking.maxAgeDays ${JSON.stringify(maxAgeDays)} must be a number greater than 0; using the ${DEFAULT_COOKIE_MAX_AGE_DAYS}-day default.`,
-    )
-    return DEFAULT_COOKIE_MAX_AGE_DAYS * SECONDS_PER_DAY
-  }
-  if (maxAgeDays > BROWSER_MAX_AGE_CAP_DAYS) {
-    log.warn(
-      `crossSubdomainTracking.maxAgeDays ${maxAgeDays} exceeds the ${BROWSER_MAX_AGE_CAP_DAYS}-day cap Chromium enforces; the browser will shorten it.`,
-    )
-  }
-  return Math.round(maxAgeDays * SECONDS_PER_DAY)
+  const seconds = Math.round((stored.expiresAt - Date.now()) / 1000)
+  return seconds > 0 ? seconds : null
 }
 
 /** Browsers cap a cookie (name + value + attributes) around 4096 bytes; refuse oversized writes early. */
@@ -125,6 +124,53 @@ export const seekRegistrableDomain = (doc: CookieDocument): string => {
   return ''
 }
 
+/**
+ * What the config actually asked for. `'off'` covers every shape that did not state an opt-in — the
+ * type rules those out for npm consumers, but the one-tag install supplies this as untyped
+ * `data-options` JSON that no compiler ever sees.
+ *
+ * Three reachable shapes used to auto-discover: `{}` (a config builder spreading unset optionals),
+ * `{ maxAgeDays: 30 }` left by an upgrade from the removed lifetime arm, and a stringly-typed
+ * `"true"`/`"false"` from an HTML template — where `"false"` therefore *enabled* it. Resolving "no
+ * domain" to the widest settable one infers exactly the opt-in the threat model's §7 requires to be
+ * stated, so only a literal `true` reaches the probe.
+ */
+type CrossSubdomainIntent =
+  | { readonly kind: 'off' }
+  | { readonly kind: 'discover' }
+  | { readonly kind: 'pin'; readonly domain: string }
+
+const resolveIntent = (config: CrossSubdomainConfig): CrossSubdomainIntent => {
+  if (config === true) {
+    return { kind: 'discover' }
+  }
+  if (config === false || config === null || config === undefined) {
+    return { kind: 'off' }
+  }
+  const domain = typeof config === 'object' ? (config as { domain?: unknown }).domain : undefined
+  if (typeof domain === 'string' && domain !== '') {
+    // The stated domain carries the opt-in, so extra keys do not disable it — but they must not be
+    // silent either: `{ domain, maxAgeDays }` is the documented pre-hoist shape, and swallowing the
+    // key replaced a deliberately shortened lifetime with the 365-day default. Keys holding
+    // `undefined` are exempt: a builder spreading an unset legacy optional produces
+    // `{ domain, maxAgeDays: undefined }`, which configures nothing worth warning about.
+    const extras = Object.keys(config as object).filter(
+      key => key !== 'domain' && (config as Record<string, unknown>)[key] !== undefined,
+    )
+    if (extras.length > 0) {
+      const lifetimeHint = extras.includes('maxAgeDays')
+        ? ' Cookie lifetime moved to the top-level maxAgeDays init option.'
+        : ''
+      log.warn(`crossSubdomainTracking ignores ${JSON.stringify(extras)}; the domain pin still applies.${lifetimeHint}`)
+    }
+    return { kind: 'pin', domain }
+  }
+  log.warn(
+    `crossSubdomainTracking ${JSON.stringify(config)} does not state a domain; identity stays origin-scoped. Pass true to discover the registrable domain, or { domain: 'example.com' } to pin one.`,
+  )
+  return { kind: 'off' }
+}
+
 const resolveExplicitDomain = (doc: CookieDocument, requested: string): string => {
   const domain = requested.replace(/^\./, '').toLowerCase()
   const hostname = doc.location.hostname.toLowerCase()
@@ -147,7 +193,9 @@ export const createCookieLayer = (
   config: CrossSubdomainConfig,
   doc: CookieDocument | null = typeof document === 'undefined' ? null : document,
 ): CookieLayer | null => {
-  if (config === false || !doc) {
+  // Resolved before the availability probe: an unusable config needs no test cookie written.
+  const intent = resolveIntent(config)
+  if (intent.kind === 'off' || !doc) {
     return null
   }
 
@@ -168,16 +216,10 @@ export const createCookieLayer = (
     return null
   }
 
-  const options: { readonly domain?: string; readonly maxAgeDays?: MaxAgeDays } =
-    typeof config === 'object' ? config : {}
-  const maxAgeSeconds = resolveMaxAgeSeconds(options.maxAgeDays)
-  const explicitDomain = options.domain
-
   const hostname = doc.location.hostname
   let domain = ''
-  // An object without `domain` still auto-discovers — it is the `{ maxAgeDays }`-only form.
-  if (explicitDomain !== undefined) {
-    domain = resolveExplicitDomain(doc, explicitDomain)
+  if (intent.kind === 'pin') {
+    domain = resolveExplicitDomain(doc, intent.domain)
   } else if (hostname && hostname !== 'localhost' && !isIpAddress(hostname)) {
     // Multi-tenant PaaS hosts (herokuapp.com, vercel.app, …) need no special-casing: their shared
     // suffix is a public suffix the browser rejects, so the widest-first probe lands on the
@@ -188,10 +230,16 @@ export const createCookieLayer = (
   const domainAttr = domain ? `; domain=.${domain}` : ''
   const secureAttr = doc.location.protocol === 'https:' ? '; secure' : ''
   const attrs = `; SameSite=Lax; path=/${domainAttr}${secureAttr}`
+  // For the twin restore: host-only scope, everything else intact — a bare write dropped SameSite
+  // and secure, handing a previously-Secure identity cookie to plain http on the same host.
+  const hostOnlyAttrs = `; SameSite=Lax; path=/${secureAttr}`
   // Keys already reconciled against a stale host-only twin this page load (see reconcileTwin).
   const reconciledKeys = new Set<string>()
+  // Keys whose reconciliation failure was already reported — the retry is per access, the warn is
+  // not, or a persistently blocked cookie store would warn on every read of every event.
+  const twinWarnedKeys = new Set<string>()
 
-  const writeCookie = (key: string, value: string): boolean => {
+  const writeCookie = (key: string, value: string, maxAgeSeconds: number): boolean => {
     try {
       // encodeURIComponent stays inside the try — it throws on malformed UTF-16 (lone surrogates),
       // and callers must never throw.
@@ -208,15 +256,11 @@ export const createCookieLayer = (
     }
   }
 
-  // In cross-subdomain mode a same-named host-only cookie (a leftover twin from an earlier
-  // host-only config, or a sibling that fell back to host-only) is indistinguishable by name from
-  // the shared domain cookie in document.cookie and can sort ahead of it on reads. Left in place it
-  // shadows the shared value — and worse, a read-then-refresh (getAnonymousId, session activity)
-  // would copy the stale twin onto the shared domain cookie, corrupting identity for every
-  // subdomain. Reconcile once per key on first access (read or write): expire the host-only twin,
-  // then see what remains. A surviving value is the shared cookie and is authoritative; if nothing
-  // remains the twin was the only value (a genuine host-only → shared migration) so re-promote it.
-  // No-op in host-only mode (no shared cookie, so no twin risk).
+  // A same-named host-only cookie is indistinguishable by name from the shared one in
+  // document.cookie and can sort ahead of it, so it shadows the shared value — and a read-then-
+  // refresh (getAnonymousId, session activity) would copy the stale twin onto the shared cookie and
+  // corrupt identity site-wide. Once per key on first access: expire the twin, then see what
+  // remains. No-op in host-only mode, where there is no shared cookie to shadow.
   const reconcileTwin = (key: string): void => {
     if (!domainAttr || reconciledKeys.has(key)) {
       return
@@ -232,15 +276,36 @@ export const createCookieLayer = (
         return // a shared cookie survives the host-only expiry and is authoritative — leave it
       }
       // Nothing remains: `before` was a lone host-only twin (a genuine host-only → shared
-      // migration), so promote it to the shared cookie. If that write fails, restore the host-only
-      // twin rather than leave the value gone entirely — cross-subdomain reads don't fall back to
-      // localStorage, and the next page load will retry the promotion.
-      if (!writeCookie(key, before)) {
-        doc.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(before)}; path=/; max-age=${maxAgeSeconds}`
+      // migration), so promote it with the lifetime it has left — a fresh full-length one would
+      // outlive its contents. A value that does not decode predates the envelope and is unreadable
+      // to the store, so it is dropped rather than widened to the whole registrable domain.
+      const remaining = remainingSeconds(before)
+      if (remaining === null) {
+        return
+      }
+      // On a failed promotion, restore the twin rather than lose the value: cross-subdomain reads
+      // don't fall back to localStorage, and the next page load retries. Read-back-verified — the
+      // twin is already expired at this point, so a restore that also fails destroys the sole copy.
+      if (!writeCookie(key, before, remaining)) {
+        doc.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(before)}${hostOnlyAttrs}; max-age=${remaining}`
+        if (readCookie(doc, key) !== before) {
+          log.warn(
+            `Could not restore the host-only "${key}" cookie after a failed promotion; its value may be lost on this device.`,
+          )
+        }
       }
     } catch (err) {
-      // Sandboxed frame or malformed key — nothing to reconcile; reads fall through to what exists.
-      log.debug(`Cookie twin reconciliation for "${key}" threw:`, err)
+      // Un-latch so the next access retries: latched as done, a stale twin kept shadowing the
+      // shared cookie for the whole page load — the exact condition this function exists to
+      // prevent. Warn (every install sees it), not debug, and once per key rather than per access.
+      reconciledKeys.delete(key)
+      if (!twinWarnedKeys.has(key)) {
+        twinWarnedKeys.add(key)
+        log.warn(
+          `Cookie twin reconciliation for "${key}" threw; a stale host-only cookie may shadow the shared identity until it succeeds:`,
+          err,
+        )
+      }
     }
   }
 
@@ -250,9 +315,9 @@ export const createCookieLayer = (
       reconcileTwin(key)
       return readCookie(doc, key)
     },
-    set: (key, value) => {
+    set: (key, value, maxAgeSeconds) => {
       reconcileTwin(key)
-      return writeCookie(key, value)
+      return writeCookie(key, value, maxAgeSeconds)
     },
     remove: key => {
       // After an explicit remove there is no twin left worth reconciling on a later access.
@@ -268,11 +333,9 @@ export const createCookieLayer = (
         // otherwise silently fail and let the shared identity cookie resurface on the next read.
         return readCookie(doc, key) === null
       } catch (err) {
-        // Error, not debug: the comment always said this must be surfaced, but `log.debug` is off
-        // unless the integrator already set `debug: true` — so the reason was invisible to exactly
-        // the person diagnosing a failed opt-out. The whole teardown boolean chain (removeItem →
-        // clearProfile/clearSession → purgePersistedIdentity → setTrackingConsent) now rests on this
-        // return value, and a surviving identity cookie on the registrable domain is the outcome.
+        // Error, not debug: `log.debug` is off unless the integrator already set `debug: true`, so
+        // the reason was invisible to exactly the person diagnosing a failed opt-out. The whole
+        // teardown boolean chain rests on this return value.
         log.error(`Failed to remove the "${key}" cookie during teardown; the identity may resurface:`, err)
         return false
       }

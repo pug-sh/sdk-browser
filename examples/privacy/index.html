@@ -46,8 +46,9 @@
   <body>
     <h1>Pug SDK — Privacy Controls</h1>
     <p class="desc">
-      Demonstrates the two integrator-owned PII controls: the <code>data-pug-no-capture</code> attribute and the
-      <code>beforeSend</code> init hook. The SDK runs in <code>dryRun</code> mode here, so nothing is sent.
+      Demonstrates the integrator-owned PII controls — the <code>data-pug-no-capture</code> attribute and the
+      <code>beforeSend</code> init hook — layered over the redaction the SDK does on its own. The SDK runs in
+      <code>dryRun</code> mode here, so nothing is sent.
     </p>
 
     <h2>1. <code>data-pug-no-capture</code> — redact element text</h2>
@@ -75,6 +76,23 @@
     </p>
     <table>
       <tbody id="url-table"></tbody>
+    </table>
+
+    <h2>3. <code>redactUrlParams</code> — what the SDK redacts before you see it</h2>
+    <p class="desc">
+      On by default, so <code>beforeSend</code> receives a URL that has already had known-sensitive query
+      <em>and fragment</em> params replaced with <code>redacted</code>. The fragment matters on its own: an OAuth
+      implicit-flow <code>#access_token=…</code> is never sent to a server <em>except</em> through analytics.
+      Below is the real <code>$url</code> this page's own events carry, captured inside <code>beforeSend</code>.
+    </p>
+    <p class="desc">
+      <a id="demo-link" href="?token=s3cr3t&amp;email=jane@example.com&amp;plan=pro#access_token=abc&amp;state=/dashboard">
+        Reload this page with sensitive params →
+      </a>
+      (then check the rows below; <a href="./">clear them</a>)
+    </p>
+    <table>
+      <tbody id="redaction-table"></tbody>
     </table>
 
     <!-- Load the SDK as its single self-contained bundle: one request that installs window.pug,

@@ -37,6 +37,11 @@ const okResponse = (accepted: number) => create(BatchCreateResponseSchema, { acc
 // A fresh project id per transport keeps each test's localStorage queue isolated.
 const freshProject = () => `proj-${projectCounter++}`
 
+// `Event` in this module is the protobuf message type (type-only import, erased at runtime), so a
+// bare `new Event('pagehide')` calls a shadowed identifier with no runtime value — it works only via
+// that erasure, and CodeQL reads it as invoking undefined. `window.Event` names the DOM constructor.
+const firePagehide = () => window.dispatchEvent(new window.Event('pagehide'))
+
 beforeEach(() => {
   vi.useFakeTimers()
   localStorage.clear()
@@ -165,7 +170,7 @@ describe('cookieless queue routing', () => {
     const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 10, maxWaitMs: 60_000 })
     await t.send(consentedEvt('a'))
     await t.send(cookielessEvt('c'))
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
     // Content-addressed rather than positional: find the call that carries our events instead of
     // assuming ours is last, so the assertion does not depend on listener registration order.
     const ourCall = (beacon.mock.calls as Array<[Event[]]>).find(([events]) =>
@@ -252,7 +257,7 @@ describe('cookieless loss reporting and flush fairness', () => {
     // unless restored, so an unscoped one also sees other transports' teardown output.
     errSpy.mockClear()
     warnSpy.mockClear()
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
 
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('2 cookieless events'))
     // The consented queue contributed nothing, so nothing should claim to be recoverable.
@@ -270,7 +275,7 @@ describe('cookieless loss reporting and flush fairness', () => {
 
     errSpy.mockClear()
     warnSpy.mockClear()
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 events'))
     expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining('cookieless'))
@@ -303,22 +308,110 @@ describe('cookieless loss reporting and flush fairness', () => {
     expect(attempted).toContain('c0')
   })
 
-  // R2-C2: purgeQueue() was the third beacon call site and the only one that discarded the result.
-  // Its boolean reflects storage removal, never delivery — so a blocked sendBeacon (routine with
-  // analytics blockers, and the payload here is the whole unlocked queue, so the ~64KB cap applies
-  // too) destroyed everything collected under valid consent, returned true, and logged nothing.
-  // README promises a withdrawal drops the queue "without discarding data the user had agreed to".
-  it('reports a blocked beacon when purging the queue on consent withdrawal', async () => {
+  // purgeQueue()'s boolean answers one question: did the queues leave the device? The farewell
+  // beacon (send: true is reset()-only — a logout; consent teardowns pass false) reports its own
+  // loss through reportBeaconLoss but must not flip the return: beacons fail routinely under
+  // analytics blockers, so folding delivery in made reset() "fail" on blocker-equipped browsers
+  // whose devices were verifiably clean — and the README's recipe shows that false to the user as
+  // "your data may remain".
+  it('reports a blocked beacon during reset() without failing the storage purge', async () => {
     const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
     const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
     await t.send(evt('consented'))
     await t.send(cookielessEvt('ck'))
     beacon.mockReturnValue(false)
 
-    expect(t.purgeQueue()).toBe(false)
+    expect(t.purgeQueue({ send: true })).toBe(true)
     // The cookieless queue is memory-only, so its loss is permanent — error, not warn.
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('cookieless'))
     errSpy.mockRestore()
+  })
+
+  it('beacons the pending events on a reset purge before dropping them', async () => {
+    // The happy path of { send: true }: a logout delivers what was collected under unchanged
+    // consent before the queues leave the device. The blocked-beacon test above proves the call
+    // only transitively (reportBeaconLoss cannot fire without it); this pins the payload going out
+    // and the device ending clean.
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('a'))
+    await t.send(evt('b'))
+
+    expect(t.purgeQueue({ send: true })).toBe(true)
+
+    expect(beacon).toHaveBeenCalledTimes(1)
+    expect((beacon.mock.calls[0] as unknown as [Event[]])[0].map(e => e.kind)).toEqual(['a', 'b'])
+    // Nothing left to send: a later page hide carries nothing.
+    firePagehide()
+    expect(beacon).toHaveBeenCalledTimes(1)
+  })
+
+  it('persists the debounced tail before reporting a blocked beacon during an in-flight flush', async () => {
+    // beaconFlush's in-flight branch: the flush owns the locked batch, so only the unlocked tail
+    // is beaconed. When that beacon is blocked, sync() must flush the queue's 1s persist debounce
+    // first — the tail is younger than the debounce, so without the sync "remain in the persisted
+    // queue" was false for exactly the click that triggered the navigation.
+    let resolveFlush: (v: unknown) => void = () => {}
+    sendBatch.mockImplementation(() => new Promise(resolve => (resolveFlush = resolve)))
+    const p = freshProject()
+    const queueKey = `__pug_${p}_queue__`
+    const t = createBatchedTransport(ENDPOINT, KEY, p, { maxSize: 1, maxWaitMs: 60_000 })
+
+    await t.send(evt('a')) // maxSize 1 → flush() → in flight, lock held on 'a'
+    await t.send(evt('b')) // the tail: buffered, persist debounced — memory-only right now
+    expect(localStorage.getItem(queueKey) ?? '').not.toContain('"b"')
+
+    beacon.mockReturnValue(false)
+    firePagehide()
+
+    expect(localStorage.getItem(queueKey) ?? '').toContain('"b"') // on disk before the debounce fired
+    resolveFlush(okResponse(1))
+  })
+
+  it('reports a surviving queue key at error level and returns false', async () => {
+    // The last-signal path: pug.ts deliberately logs nothing when purgeQueue() is false, on the
+    // strength of this site reporting. A revert to `return true` after removeItem leaves a logout
+    // on a shared device with the previous user's identified payloads on disk and nothing logged.
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('consented'))
+    await vi.advanceTimersByTimeAsync(1100) // let the debounce write the key to disk
+    const removeSpy = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+
+    expect(t.purgeQueue({ send: false })).toBe(false)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('sessionId and distinctId'))
+    removeSpy.mockRestore()
+    errSpy.mockRestore()
+  })
+
+  it('reports a throwing queue removal at error level with the consequence', async () => {
+    // Same outcome as the silent no-op — the key survives on the device — so the same level and the
+    // same consequence sentence. At warn, the one description of what the failure *means* vanished
+    // the moment pug.ts stopped adding its own error.
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('consented'))
+    await vi.advanceTimersByTimeAsync(1100)
+    const removeSpy = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('locked')
+    })
+
+    expect(t.purgeQueue({ send: false })).toBe(false)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('sessionId and distinctId'), expect.any(Error))
+    removeSpy.mockRestore()
+    errSpy.mockRestore()
+    warnSpy.mockRestore()
+  })
+
+  it('does not transmit the queue when purging without send', async () => {
+    // Consent teardown: beaconing after the user withdrew consent would be a fresh transmission of
+    // exactly the data they refused.
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('consented'))
+    await t.send(cookielessEvt('ck'))
+
+    expect(t.purgeQueue({ send: false })).toBe(true)
+    expect(beacon).not.toHaveBeenCalled()
   })
 
   // R2-S18: the !isStorageAvailable() arm of reportBeaconLoss was dead to the suite — making it
@@ -328,18 +421,61 @@ describe('cookieless loss reporting and flush fairness', () => {
     const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
     // Spying on the *instance*, not Storage.prototype: a prototype spy never fires in this jsdom
     // environment, so isStorageAvailable() would keep returning true and the branch stay unreached.
-    const setSpy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+    // Once-scoped: mockRestore() does not reliably heal an instance spy over jsdom's Storage proxy,
+    // and a permanently broken setItem leaks into every later test in the file.
+    const setSpy = vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => {
       throw new Error('blocked')
     })
     const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
     await t.send(evt('consented'))
     beacon.mockReturnValue(false)
 
-    window.dispatchEvent(new Event('pagehide'))
+    firePagehide()
 
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('cannot be recovered'))
+    beacon.mockReturnValue(true) // afterEach destroy() delivers the leftover queue silently
     setSpy.mockRestore()
     errSpy.mockRestore()
+  })
+
+  it('persists the fresh tail when the page-hide beacon fails', async () => {
+    // Events younger than the 1s persist debounce exist only in memory, and the debounce timer dies
+    // with the page — so with the beacon blocked, reportBeaconLoss promised they "remain in the
+    // persisted queue" while they were about to vanish. The failure path must flush them to disk.
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const project = freshProject()
+    const t = createBatchedTransport(ENDPOINT, KEY, project, { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('fresh'))
+    beacon.mockReturnValue(false)
+
+    firePagehide()
+
+    expect(localStorage.getItem(`__pug_${project}_queue__`)).toContain('fresh')
+    beacon.mockReturnValue(true) // afterEach destroy() delivers the leftover queue silently
+    warnSpy.mockRestore()
+  })
+
+  it('reports a consented beacon loss as permanent when the queue is memory-backed, even if storage probes fine at report time', async () => {
+    // Recoverability is a property of the queue actually in use, not of a probe at report time: a
+    // transport built while storage was unavailable keeps its memory queue for life, so a probe
+    // that later passes produced "will retry on next init()" about events dying with the page.
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    // Once-scoped so the availability probe fails at creation only; later probes see real storage.
+    const setSpy = vi.spyOn(localStorage, 'setItem').mockImplementationOnce(() => {
+      throw new Error('blocked')
+    })
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('consented'))
+    beacon.mockReturnValue(false)
+
+    firePagehide()
+
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('cannot be recovered'))
+    beacon.mockReturnValue(true) // afterEach destroy() delivers the leftover queue silently
+    setSpy.mockRestore()
+    errSpy.mockRestore()
+    warnSpy.mockRestore()
   })
 })
 
@@ -361,7 +497,7 @@ describe('rollback messaging after a concurrent purge', () => {
     await t.send(evt('a')) // hits maxSize -> flush() -> in flight
     await vi.advanceTimersByTimeAsync(0)
 
-    t.purgeQueue() // empties the buffer under the in-flight batch
+    t.purgeQueue({ send: false }) // empties the buffer under the in-flight batch
     rejectSend(new RpcError('down', GrpcCode.Unavailable))
     await vi.advanceTimersByTimeAsync(10)
 

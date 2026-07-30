@@ -4,6 +4,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GrpcCode, RpcError } from './rpc.js'
+import { persisted, storedValue } from './storage-envelope.test-utils.js'
 import { makeStorageKey } from './utils.js'
 
 // Only the wire is mocked — everything between track() and the transport
@@ -16,7 +17,8 @@ const { sendBatch, send, beacon } = vi.hoisted(() => ({
 }))
 vi.mock('./transport.js', () => ({ createTransport: () => ({ send, sendBatch, beacon }) }))
 
-const { init, track, destroy, setTrackingConsent, optOutTracking, optInTracking, reset } = await import('./pug.js')
+const { init, track, destroy, setTrackingConsent, optOutTracking, optInTracking, reset, getTrackingConsent } =
+  await import('./pug.js')
 const { rotate } = await import('./session.js')
 
 /**
@@ -100,7 +102,27 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+// Persisted values carry an absolute expiry: `<epoch ms>|<value>`.
+
 describe('cookieless storage silence', () => {
+  // The default seed, not a configured one: an install that never mentions consent must still not
+  // store an identifier before the user has answered. This is the whole point of defaulting to
+  // 'cookieless' — flipping it back to 'granted' fails here.
+  it('an install that configures no consent at all writes nothing to the device', async () => {
+    vi.useFakeTimers()
+    const { writes } = recordDeviceWrites()
+    init('proj-default', { apiKey: 'k', crossSubdomainTracking: true })
+    track('purchase', { amount: 1 })
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(getTrackingConsent()).toBe('cookieless')
+    expect(writes).toEqual([])
+    expect(storedKeys()).toEqual([])
+    expect(document.cookie).toBe('')
+    // Auto-capture still runs, so the events are real — silence is not achieved by tracking nothing.
+    expect(sentEvents().length).toBeGreaterThan(0)
+  })
+
   it('a full cookieless session writes nothing to the device, even transiently', async () => {
     vi.useFakeTimers()
     const { writes } = recordDeviceWrites()
@@ -188,7 +210,7 @@ describe('cookieless storage silence', () => {
     expect(writes).toEqual([])
 
     setTrackingConsent('cookieless')
-    expect(localStorage.getItem(consentKey)).toBe('cookieless')
+    expect(storedValue(localStorage.getItem(consentKey))).toBe('cookieless')
     expect(storedKeys()).toEqual([consentKey])
   })
 
@@ -209,7 +231,7 @@ describe('cookieless storage silence', () => {
     // directly rather than via setTrackingConsent, so this tests init()'s purge specifically — the
     // state a returning visitor lands in when an earlier purge was incomplete or the identity
     // predates the consent config.
-    localStorage.setItem(makeStorageKey(p, 'consent'), 'cookieless')
+    localStorage.setItem(makeStorageKey(p, 'consent'), persisted('cookieless'))
 
     init(p, { apiKey: 'k', trackingConsent: { initial: 'granted', persist: true } })
 
@@ -226,8 +248,8 @@ describe('cookieless storage silence', () => {
   // and reports success. A prior tab killed without pagehide leaves the key behind for this to find.
   it('purges a tab registry this page never armed', () => {
     const p = 'proj-stale-tabs'
-    localStorage.setItem(makeStorageKey(p, 'consent'), 'denied')
-    localStorage.setItem(makeStorageKey(p, 'profile'), 'anon-0190abc')
+    localStorage.setItem(makeStorageKey(p, 'consent'), persisted('denied'))
+    localStorage.setItem(makeStorageKey(p, 'profile'), persisted('anon-0190abc'))
     localStorage.setItem(makeStorageKey(p, 'tabs'), JSON.stringify({ deadtab: Date.now() }))
 
     init(p, { apiKey: 'k', trackingConsent: { initial: 'granted', persist: true } })
@@ -301,9 +323,49 @@ describe('cookieless storage silence', () => {
     expect(storedKeys()).toEqual([])
   })
 
-  // Withdrawal is forward-looking: events already collected under valid consent get one best-effort
-  // send on the way out. What must not happen is them staying on the device.
-  it('makes a final send attempt for events collected while consent was valid', async () => {
+  // The queue drop is scoped to transitions that actually reduce consent. A re-assert of an
+  // unchanged non-granted state — a CMP restating its state on every load, or optOutTracking()
+  // under onReject: 'cookieless' from an already-cookieless session — used to purge the cookieless
+  // queue unsent: identity-free events, destroyed for no privacy gain, and under the cookieless
+  // default the first casualty was the pre-banner page_view of every mid-page session. The tell was
+  // the asymmetry: a granted→granted re-assert preserved its queue while cookieless→cookieless
+  // destroyed one.
+  it('keeps the cookieless queue across a consent re-assert that changes nothing', () => {
+    vi.useFakeTimers()
+    init('proj-reassert-keep', { apiKey: 'k', autoCapture: false, batch: { maxSize: 100, maxWaitMs: 60_000 } })
+    track('custom_probe')
+
+    expect(setTrackingConsent('cookieless')).toBe(true) // same state, changes nothing
+
+    destroy() // drains the queues via beacon — the event must still be there to drain
+    const delivered = [...beacon.mock.calls, ...sendBatch.mock.calls].flatMap(
+      call => (call as unknown as [unknown[]])[0] ?? [],
+    )
+    expect(delivered.length).toBe(1)
+  })
+
+  it('still drops the cookieless queue unsent when consent is withdrawn to denied', () => {
+    // The second clause of the drop predicate: landing on 'denied' must always purge, because a
+    // kept cookieless queue would be beaconed by the next pagehide — transmitting after a full
+    // reject, which is worse than the loss the re-assert fix prevents.
+    vi.useFakeTimers()
+    init('proj-reassert-deny', { apiKey: 'k', autoCapture: false, batch: { maxSize: 100, maxWaitMs: 60_000 } })
+    track('custom_probe')
+
+    expect(setTrackingConsent('denied')).toBe(true)
+
+    window.dispatchEvent(new Event('pagehide'))
+    destroy()
+    const delivered = [...beacon.mock.calls, ...sendBatch.mock.calls].flatMap(
+      call => (call as unknown as [unknown[]])[0] ?? [],
+    )
+    expect(delivered).toEqual([])
+  })
+
+  // Withdrawal drops the queue without transmitting: Art. 7(3) protects the *prior* collection, not
+  // a later send, so beaconing after the user clicked Reject would be a fresh act of processing on
+  // data they just withdrew. The events must neither go out nor stay on the device.
+  it('drops queued events on opt-out without transmitting them', async () => {
     vi.useFakeTimers()
     const p = 'proj-queue-flush'
     await bufferOneConsentedEvent(p)
@@ -312,11 +374,13 @@ describe('cookieless storage silence', () => {
 
     optOutTracking()
 
+    // Art. 7(3) protects what was already collected, but sending it after the user clicked Reject is
+    // a fresh transmission of the data they just refused. reset() (a logout) still sends first.
     const delivered = [...beacon.mock.calls, ...sendBatch.mock.calls].flatMap(
       call => (call as unknown as [unknown[]])[0] ?? [],
     )
-    expect(delivered).toHaveLength(1)
-    expect((delivered[0] as { kind: string }).kind).toBe('purchase')
+    expect(delivered).toEqual([])
+    expect(localStorage.getItem(makeStorageKey(p, 'queue'))).toBeNull()
   })
 
   // The leak had a second act: a later page load hydrated the surviving queue and beaconed it on
@@ -369,19 +433,19 @@ describe('cookieless storage silence', () => {
     expect(localStorage.getItem(makeStorageKey(p, 'queue'))).toBeNull()
   })
 
-  // The leftover queue gets ONE best-effort send at init — purgeQueue()'s documented contract, and
-  // the same forward-looking rule the transition path applies: withdrawal does not retroactively
-  // make already-collected events unlawful to process, so dropping them unsent would lose data the
-  // user had agreed to. What must not happen is the pre-fix behaviour: the queue surviving on the
-  // device and being re-transmitted on every navigation, and again on every later visit.
-  it('sends a leftover consented queue at most once, then never again', async () => {
+  // The leftover queue leaves the device unsent — purgeQueue({ send: false })'s documented contract
+  // for every consent-driven purge (`send: true` is reset()-only, a logout where consent is
+  // unchanged): a device whose consent is not 'granted' must neither hold nor transmit identified
+  // payloads. What must not happen is the pre-fix behaviour: the queue surviving on the device and
+  // being re-transmitted on every navigation, and again on every later visit.
+  it('drops a leftover consented queue without transmitting it', async () => {
     vi.useFakeTimers()
     const p = 'proj-leftover-transmit'
     await leaveQueueOnDevice(p)
 
     init(p, { apiKey: 'k', trackingConsent: 'denied', autoCapture: false })
     const afterInit = beacon.mock.calls.flatMap(c => (c as unknown as [unknown[]])[0] ?? []).length
-    expect(afterInit).toBeGreaterThan(0) // the one lawful send happened
+    expect(afterInit).toBe(0) // consent says no: the payloads leave the device unsent
     expect(localStorage.getItem(makeStorageKey(p, 'queue'))).toBeNull()
 
     // Every subsequent navigation must carry nothing — pre-fix, each one re-sent the whole queue.

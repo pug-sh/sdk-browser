@@ -45,8 +45,15 @@ import {
   type TrackingConsent,
   type TrackingConsentConfig,
   type TrackingConsentController,
+  type TrackingGate,
 } from './tracking-consent.js'
-import { DEFAULT_ENDPOINT, DEVICE_ID_KEY, RESERVED_DISTINCT_ID_PREFIX } from './utils.js'
+import {
+  configureUrlRedaction,
+  DEFAULT_ENDPOINT,
+  DEVICE_ID_KEY,
+  RESERVED_DISTINCT_ID_PREFIX,
+  safeStringify,
+} from './utils.js'
 
 export interface PugConfig {
   readonly endpoint: string
@@ -54,10 +61,10 @@ export interface PugConfig {
 }
 
 export interface InitOptions {
-  readonly endpoint?: string
+  readonly endpoint?: string | undefined
   readonly apiKey: string
-  readonly batch?: Partial<BatchConfig>
-  readonly dryRun?: boolean
+  readonly batch?: Partial<BatchConfig> | undefined
+  readonly dryRun?: boolean | undefined
   /**
    * Logs the SDK's internal activity to `console.debug`. Off by default.
    *
@@ -70,10 +77,18 @@ export interface InitOptions {
    * regardless: a call before `init()` and a bad config warn, and an event too malformed to encode
    * errors. This flag can only widen what you see, never narrow it.
    */
-  readonly debug?: boolean
-  readonly session?: SessionConfig
-  readonly autoCapture?: AutoCaptureConfig
-  readonly trackingConsent?: TrackingConsent | TrackingConsentConfig
+  readonly debug?: boolean | undefined
+  readonly session?: SessionConfig | undefined
+  readonly autoCapture?: AutoCaptureConfig | undefined
+  /**
+   * The consent state to start from, or a `TrackingConsentConfig` (`initial`, `onReject`,
+   * `persist`, `respectGpc`). **Defaults to `'cookieless'`**: events flow, but no identifier is
+   * written to the device until the user actually answers — pass `'granted'` to opt into full
+   * identity from the first event, or `'denied'` to capture nothing at all. A bare string is a
+   * per-load seed; use the config form with `persist: true` to record the user's choice across
+   * reloads.
+   */
+  readonly trackingConsent?: TrackingConsent | TrackingConsentConfig | undefined
   /**
    * Shares identity (anonymous ID, external ID, session state, persisted consent) across subdomains
    * of the same site via a first-party cookie on the registrable domain (e.g. `.example.com`).
@@ -93,16 +108,53 @@ export interface InitOptions {
    *   an explicit `{ domain }` in that topology.
    * - `{ domain }` — pin an explicit cookie domain (falls back to a host-only cookie with a warning
    *   when the browser rejects it or it does not cover the current host).
-   * - `{ maxAgeDays }` — cookie lifetime in days, default 365. Omit `domain` to keep auto-discovery.
+   *
+   * Cookie lifetime comes from the top-level `maxAgeDays`, which bounds every storage mode.
    *
    * With cross-subdomain sessions, the "rotate when all tabs closed" heuristic is disabled — sessions
    * end by idle/max timeout only, since tab liveness is unknowable across subdomains.
    */
-  readonly crossSubdomainTracking?: CrossSubdomainConfig
+  readonly crossSubdomainTracking?: CrossSubdomainConfig | undefined
+  /**
+   * How long the SDK's stored identifiers are kept, in days. Default 365; pass 390 for CNIL's
+   * 13 months.
+   *
+   * The deadline is absolute — stamped when a value is first written, never extended by later
+   * writes — so a returning visitor's identifiers age out on schedule rather than being renewed on
+   * every visit. It covers the anonymous ID, any `identify()`ed external ID, session state and the
+   * persisted consent choice, in both `localStorage` and cross-subdomain cookie modes. When the
+   * consent record lapses, `isConsentPending()` is true again and your banner is shown afresh.
+   *
+   * Lowering it applies to existing visitors too: a stored deadline is clamped to the current
+   * window on the next write, so tightening retention reaches the population that matters.
+   *
+   * Not covered: the outbound event queue and the tab-liveness registry, which stay on raw
+   * `localStorage`. Both are cleared by every consent teardown, so neither is a path identity
+   * survives a withdrawal on; `reset()` additionally sends-and-drops the queue but leaves the
+   * registry, which holds per-tab timestamps and no identifiers (and whose stale entries are pruned
+   * by their own idle timeout). A queue that cannot reach the network is bounded by
+   * `batch.maxQueueSize`, not by this deadline. Nor is `pug_device_id`, the push module's device
+   * identifier — it has no deadline and no teardown clears it (push is not currently exported, so
+   * nothing writes it yet).
+   */
+  readonly maxAgeDays?: number | undefined
+  /**
+   * Query and fragment params whose values are replaced with `redacted` in `$url`, `$referrer` and a
+   * form's `action`. Defaults to a built-in list of credentials and direct identifiers (`token`,
+   * `access_token`, `code`, `email`, `password`, …) plus any param ending in `_token`, which covers
+   * framework reset-link names like `reset_password_token`. Pass an array to replace that list
+   * (exact match only — the `_token` suffix rule rides the default list, never a replacement), or
+   * `false` to disable redaction and capture URLs verbatim. An empty array warns and keeps the
+   * default list — it would otherwise disable redaction exactly like `false`, but silently.
+   *
+   * Applied before `beforeSend`, so a hook can still mask more.
+   */
+  readonly redactUrlParams?: readonly string[] | false | undefined
   /**
    * Redacts, rewrites or drops each event before it is sent. Mutate `autoProperties` /
    * `customProperties` in place and return the event, `null` to drop it, or nothing at all.
-   * `$url`, `$referrer` and a form's `action` arrive raw — masking them is this hook's job.
+   * `$url`, `$referrer` and a form's `action` arrive with `redactUrlParams` already applied; any
+   * further masking (path segments, whole URLs) is this hook's job.
    *
    * Runs synchronously on every event, so keep it cheap. Fails closed: a throw, a malformed return
    * or a non-function value drops the event (or every event) rather than sending it unredacted.
@@ -110,7 +162,7 @@ export interface InitOptions {
    * not exposed. Unavailable on the one-tag install — `data-options` is JSON, which holds no
    * functions.
    */
-  readonly beforeSend?: BeforeSendFn
+  readonly beforeSend?: BeforeSendFn | undefined
 }
 
 export type {
@@ -137,17 +189,63 @@ let state: PugState | null = null
 let cookielessIdentifyWarned = false
 
 /**
- * Compile-time exhaustiveness marker. Reaching it with a non-`never` argument is a type error at the
- * call site, so widening a union forces every dispatch over it to be revisited.
+ * Compile-time exhaustiveness marker: reaching it with a non-`never` argument is a type error, so
+ * widening a union forces every dispatch over it to be revisited.
  *
- * Deliberately does NOT throw, unlike the usual `assertNever` — but not because a throw could
- * escape: the only call site is inside `track()`'s outer try/catch, which would swallow and log it.
- * The reason is diagnostic quality. The caller's own `else` branch already fails closed and logs the
- * offending state by name; throwing here would replace that precise message with a generic
- * "Unexpected error in track()" and lose the one detail worth having. This only moves the diagnosis
- * to compile time.
+ * Deliberately does not throw. The caller's `else` branch already fails closed and logs the offending
+ * state by name; a throw would be swallowed by track()'s own try/catch and replace that with a
+ * generic message.
  */
 const unreachable = (_state: never): void => {}
+
+// Untrusted: the one-tag install feeds this from `data-options` JSON, where `"redactUrlParams":
+// "token"` is the obvious mistake. Falling back to the default list keeps redaction on.
+const resolveRedactUrlParams = (params: unknown): readonly string[] | false | undefined => {
+  if (params === undefined || params === false) {
+    return params
+  }
+  if (!Array.isArray(params) || params.some(p => typeof p !== 'string')) {
+    log.warn('redactUrlParams must be an array of strings or `false`; using the default redaction list.')
+    return undefined
+  }
+  // An empty list matches nothing, so it disables redaction exactly like `false` but silently —
+  // and `userList.filter(...)` coming up empty reaches it without anyone meaning to.
+  if (params.length === 0) {
+    log.warn(
+      'redactUrlParams is empty, which would disable URL redaction; using the default list. Pass `false` to disable it deliberately.',
+    )
+    return undefined
+  }
+  return params
+}
+
+// High-entropy client hints are themselves a device read, so skip them for an untracked user. Takes
+// the branded gate: passing `isGranted` here would silently stop warming hints in cookieless mode,
+// and both are `() => boolean`, so only the brand makes that a compile error.
+const warmUserAgentData = (isTracking: TrackingGate): void => {
+  if (!isTracking()) {
+    return
+  }
+  try {
+    initUserAgentData()
+  } catch (err) {
+    log.warn('Failed to initialize user agent data:', err)
+  }
+}
+
+// Events carry URLs, referrers and identifiers; over http they cross the network in the clear.
+// A warning, not a refusal — a self-hosted collector on localhost is a legitimate dev setup.
+const warnOnInsecureEndpoint = (endpoint: string): void => {
+  try {
+    const { protocol, hostname } = new URL(endpoint)
+    const localhost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+    if (protocol !== 'https:' && !localhost) {
+      log.warn(`endpoint "${endpoint}" is not https — events will be sent unencrypted.`)
+    }
+  } catch {
+    log.warn(`endpoint "${endpoint}" is not a valid URL.`)
+  }
+}
 
 export const init = (projectId: string, options: InitOptions) => {
   if (typeof window === 'undefined') {
@@ -172,17 +270,20 @@ export const init = (projectId: string, options: InitOptions) => {
   setDebugLogging(options.debug ?? false)
 
   const config: PugConfig = { endpoint: options.endpoint || DEFAULT_ENDPOINT, projectId }
+  warnOnInsecureEndpoint(config.endpoint)
 
   let store: PersistentStore | null = null
   try {
-    store = createPersistentStore(createCookieLayer(options.crossSubdomainTracking ?? false))
+    // The cookie probes (availability + domain discovery) run before consent is read: the consent
+    // record itself may ride the shared cookie, so the layer cannot wait on the answer. They are
+    // capability checks — random names, max-age ≤ 3s, deleted on the spot — never identifiers.
+    store = createPersistentStore(createCookieLayer(options.crossSubdomainTracking ?? false), options.maxAgeDays)
   } catch (err) {
     log.warn('Failed to initialize persistence:', err)
   }
 
-  // Create consent before configuring identity so the init-time expiry refresh in configureProfile
-  // is gated on it — no identity cookie write while consent is denied (constraint #6 of the
-  // cross-domain threat model, which lives in the backend `pug` repo).
+  // Before configureProfile, so its init-time expiry refresh can be gated on consent — no identity
+  // cookie write while denied (threat model constraint #6, in the backend `pug` repo).
   const trackingConsent = createTrackingConsent(projectId, options.trackingConsent, store)
 
   try {
@@ -197,18 +298,17 @@ export const init = (projectId: string, options: InitOptions) => {
     log.warn('Failed to configure profile:', err)
   }
 
-  try {
-    initUserAgentData()
-  } catch (err) {
-    log.warn('Failed to initialize user agent data:', err)
-  }
+  warmUserAgentData(trackingConsent.isTracking)
 
-  // No compiler protects a JS or one-tag install, and a silently ignored sanitizer means URLs the
-  // integrator believes are masked start going out raw.
+  // No compiler protects a JS or one-tag install, so a silently ignored sanitizer means URLs the
+  // integrator believes are masked lose that masking.
   if ('sanitizeUrl' in options) {
-    log.warn('sanitizeUrl was removed and is ignored; URLs are now sent raw. Use beforeSend instead.')
+    log.warn(
+      'sanitizeUrl was removed and is ignored. Known-sensitive query and fragment params are redacted by default (see redactUrlParams); any further masking belongs in beforeSend.',
+    )
   }
   configureBeforeSend(options.beforeSend)
+  configureUrlRedaction(resolveRedactUrlParams(options.redactUrlParams))
 
   const transport = createBatchedTransport(config.endpoint, options.apiKey, projectId, options.batch)
   const autoCapture = createAutoCaptureController(track, trackingConsent.isTracking)
@@ -234,40 +334,43 @@ export const init = (projectId: string, options: InitOptions) => {
     log.debug('Cookieless mode: events flow without stored identity; identify() is disabled until consent is granted.')
   }
 
-  // Entering a non-granted state via config must leave the device in the same condition as entering
-  // it via setTrackingConsent(), or a visitor whose CMP now says "reject" keeps a prior consented
-  // visit's 365-day identifiers — and the documented "granting later mints a fresh identity" breaks,
-  // since a later grant would resolve the *pre-existing* session and anonymous ID.
+  // Entering a non-granted state via config must leave the device as setTrackingConsent() would, or
+  // a visitor whose CMP now says "reject" keeps a prior consented visit's identifiers and a later
+  // grant resolves the *pre-existing* session and anonymous ID.
   //
-  // Gated on isAuthoritative() so this only fires when consent is persisted and the resolved state
-  // is therefore the user's own recorded choice. Without persistence the initial value is whatever
-  // the caller passed on this load — for an async CMP typically a placeholder 'denied' corrected by
-  // a later optInTracking() — and purging on that would mint a new identity on every page load.
+  // Gated on isAuthoritative(), so it only fires when the resolved state is the user's own recorded
+  // choice. Without persistence the value is the caller's per-load placeholder — typically a
+  // 'denied' an async CMP corrects later — and purging on that mints a new identity every load.
   if (!state.trackingConsent.isGranted()) {
-    // Unconditional, unlike the identity purge below: the queue is an outbound buffer of events
-    // already collected, not an identifier a later grant could resolve. Withholding it here left a
-    // prior consented visit's identified payloads on the device for every non-authoritative
-    // non-granted init — the bare-string form the README's CMP recipe produces — to be transmitted
-    // on the next pagehide while consent read 'denied', and re-persisted while it read 'cookieless'.
-    purgeQueuedEvents()
-
     if (state.trackingConsent.isAuthoritative()) {
-      // init() returns void, so this outcome has nowhere structured to go — but it must not be
-      // inferred from the individual per-key errors either. A purge that did not land means a later
-      // optInTracking() resolves the PRE-EXISTING identity, quietly falsifying the documented
-      // "granting later mints a fresh identity", while getTrackingConsent() reports the new state as
-      // though it fully applied. Name that consequence once, at the point it becomes true.
-      if (!purgePersistedIdentity()) {
+      // purgePersistedIdentity() drops the queue first, so it is not purged separately here.
+      //
+      // init() returns void, so this outcome has nowhere structured to go and must not be left to
+      // be inferred from the per-key errors: a purge that did not land means a later
+      // optInTracking() resumes the PRE-EXISTING identity while getTrackingConsent() reports the
+      // new state as though it fully applied.
+      if (!purgePersistedIdentity({ dropQueue: true })) {
         log.error(
           'Could not fully remove stored identity for a non-granted consent state. Identifiers may survive on this device, and granting consent later may resume the previous identity rather than minting a fresh one.',
         )
       }
     } else {
-      // Deliberately skipped — see isAuthoritative(). Say so, or an integrator passing a bare
-      // 'cookieless'/'denied' has no way to tell the documented purge did not run and that a prior
-      // visit's identifiers are still present (inert, but there).
+      // The queue goes either way, unlike identity: it is an outbound buffer of events already
+      // collected, not an identifier a later grant could resolve. Withholding it here left a prior
+      // consented visit's identified payloads on the device for every non-authoritative non-granted
+      // init — the bare-string form the README's CMP recipe produces.
+      const queueDropped = purgeQueuedEvents({ send: false })
+      // Identity is deliberately skipped — see isAuthoritative(). Say so, or an integrator passing a
+      // bare 'cookieless'/'denied' cannot tell the documented purge did not run — and name the queue
+      // drop, which is where a hard-killed granted session's events went. The phrase is conditioned
+      // on the result: on a failed purge the queue's own error already says the key survived, and an
+      // unconditional "were dropped" here contradicted it.
       log.debug(
-        'Consent is not granted but was not restored from storage, so it is a config seed rather than a recorded choice — stored identity was left in place. Use trackingConsent.persist to record the choice.',
+        `Consent is not granted but was not restored from storage, so it is a config seed rather than a recorded choice — ${
+          queueDropped
+            ? 'any queued events from a prior visit were dropped'
+            : 'the queued-events purge did not fully land (see the error above)'
+        }, and stored identity was left in place. Use trackingConsent.persist to record the choice.`,
       )
     }
   }
@@ -292,6 +395,33 @@ export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
 }
 
 /**
+ * Drops the queued events off the device. `send: false` on every consent teardown — beaconing after
+ * a withdrawal is a fresh transmission of the data just refused; `reset()` (a logout, consent
+ * unchanged) sends first.
+ *
+ * Split from the identity purge because the two answer to different gates: the queue is an outbound
+ * buffer, not an identifier anything reads back, so purging it can never mint a new identity and
+ * `isAuthoritative()` does not apply. Folded together, it left a prior consented visit's identified
+ * payloads on the device through every non-authoritative non-granted init.
+ */
+const purgeQueuedEvents = ({ send }: { send: boolean }): boolean => {
+  // A null state means the transport was never built, so the queue was not purged. Report that
+  // rather than defaulting to success inside a privacy teardown.
+  if (!state) {
+    return false
+  }
+  try {
+    // A false means a queue key survived on the device, and the queue's own purge() reports that at
+    // its site with the cause in hand; a dropped farewell beacon reports through reportBeaconLoss
+    // and does not affect the return. Adding a message here would only guess at either.
+    return state.transport.purgeQueue({ send })
+  } catch (err) {
+    log.error('Failed to purge queued events:', err)
+    return false
+  }
+}
+
+/**
  * Drops every persisted identifier: anonymous ID, external ID, session, and the tab registry —
  * including the shared cookie in cross-subdomain mode, so the purge propagates to sibling
  * subdomains. Returns false when any removal could not be confirmed, which in cross-subdomain
@@ -299,44 +429,15 @@ export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
  *
  * Idempotent in end state but not side-effect-free: it issues removals (cookie deletions when
  * cross-subdomain) and may log an error on an unconfirmed removal even when nothing was stored.
- */
-/**
- * Drops the queued events: one best-effort send of what was collected under valid consent, then
- * both queues off the device.
  *
- * Split out from the identity purge because the two answer to different gates. The queue is an
- * **outbound buffer**, not an identifier anything reads back — purging it can never mint a new
- * identity, so `isAuthoritative()`'s reasoning (don't destroy identity on the strength of a
- * pre-banner seed) does not transfer to it. Folding the two together gave the queue that gate and
- * left a prior consented visit's identified payloads on the device through any non-authoritative
- * non-granted init, to be transmitted on the next pagehide and re-persisted while cookieless.
+ * `dropQueue` is the caller's statement that this purge accompanies a consent *reduction* (or
+ * init()'s authoritative restore, where there is no previous state) — the identity removals are
+ * end-state no-ops on a re-assert, but the queue drop is not: it destroys queued events, so it
+ * must not run when nothing actually changed.
  */
-const purgeQueuedEvents = (): boolean => {
-  // A null state means the transport was never built, so the queue was not purged. Report that
-  // rather than defaulting to success inside a privacy teardown.
-  if (!state) {
-    return false
-  }
-  try {
-    if (state.transport.purgeQueue()) {
-      return true
-    }
-    // The only teardown leg that could fail with no diagnostic at all: the queue's own purge()
-    // returns false without logging when removeItem no-ops (a Storage shim, an extension proxy, a
-    // quota-locked store). Both sibling legs log internally; this one has to be logged here.
-    log.error(
-      'Failed to drop the persisted event queue — queued events carry sessionId and distinctId, and may be sent on a later visit.',
-    )
-    return false
-  } catch (err) {
-    log.error('Failed to purge queued events:', err)
-    return false
-  }
-}
-
-const purgePersistedIdentity = (): boolean => {
+const purgePersistedIdentity = ({ dropQueue }: { dropQueue: boolean }): boolean => {
   // Runs first, while those events still exist.
-  let purged = purgeQueuedEvents()
+  let purged = dropQueue ? purgeQueuedEvents({ send: false }) : true
   try {
     purged = clearProfile() && purged
   } catch (err) {
@@ -362,38 +463,54 @@ const purgePersistedIdentity = (): boolean => {
  * Granting later mints a fresh identity lazily on the next event; pre-consent events
  * stay permanently anonymous (no retroactive linking).
  *
- * Returns **false** when the change did not fully take effect: it was called before `init()` (in
- * which case nothing happened at all), the value was not a valid consent state (consent then fails
- * closed to `'denied'`, matching init()), the choice could not be persisted (so it will not survive
- * a reload), or a persisted identifier could not be removed.
- *
- * Once `init()` has run, a valid state is always applied in memory, so `false` then means "applied,
- * but not fully durable" rather than "ignored" — and a caller acting on a withdrawal should surface
- * it rather than assume the device is clean. Before `init()` it does mean ignored, which is the case
- * a consent banner racing initialization is most likely to hit.
+ * Returns **false** when the change did not fully take effect: called before `init()`, an invalid
+ * state (consent then fails closed to `'denied'`), a choice that could not be persisted, or an
+ * identifier that could not be removed. After `init()` a valid state is always applied in memory, so
+ * `false` means "applied, not fully durable" rather than "ignored" — only the pre-`init()` case is
+ * genuinely ignored, which a banner racing initialization is most likely to hit.
  */
 export const setTrackingConsent = (consent: TrackingConsent): boolean => {
   if (!state) {
     log.warn('setTrackingConsent() called before init().')
     return false
   }
+  const wasTracking = state.trackingConsent.isTracking()
+  const wasGranted = state.trackingConsent.isGranted()
   let ok = state.trackingConsent.set(consent)
   const resolved = state.trackingConsent.getConsent()
-  state.autoCapture.apply()
+  // Consent side effects run before apply(), matching init(). The order is defense in depth: the
+  // drop predicate below never purges on a transition that arms a tracker, but if that invariant
+  // ever loosens, purging after apply() would destroy the newly-armed tracker's synchronous
+  // page_view — the first event of every mid-page cookieless session — unsent.
   if (resolved === 'granted') {
-    // Re-arm the origin-local tab-liveness registry, which configureSession() skipped while consent
-    // withheld it. Without this the "all tabs closed → rotate" heuristic stays dead for the rest of
-    // the page's life — and under the consent-first flow the README recommends, init() always runs
-    // before the banner is answered, so it would never arm at all.
+    // Re-arm the tab-liveness registry configureSession() skipped while consent withheld it.
+    // Without this the "all tabs closed → rotate" heuristic stays dead for the page's life — and
+    // under the README's consent-first flow it would never arm at all.
     try {
       onConsentGranted()
     } catch (err) {
       log.warn('Failed to re-arm tab tracking after consent was granted:', err)
     }
   } else {
-    // Required when leaving 'granted'. From another non-granted state it is a no-op in end state,
-    // though not free: it still issues removals and may log on an unconfirmed one.
-    ok = purgePersistedIdentity() && ok
+    // Identity removals run on every non-granted resolve — required when leaving 'granted', and
+    // from another non-granted state a no-op in end state, though not free: they still issue
+    // removals and may log on an unconfirmed one. The queue drop is scoped tighter, to transitions
+    // that actually reduce consent: leaving 'granted' (the consented queue holds identified
+    // payloads the user just withdrew consent for), or landing on 'denied' (a kept cookieless
+    // queue would be beaconed by the next pagehide — transmission after a full reject). A
+    // re-assert of an unchanged non-granted state — a CMP restating its state on every load —
+    // keeps the cookieless queue: those events are identity-free by construction, and purging
+    // them destroyed the pre-banner page_view of every mid-page cookieless session for no
+    // privacy gain, while a granted→granted re-assert kept its queue untouched.
+    const dropQueue = resolved === 'denied' || wasGranted
+    ok = purgePersistedIdentity({ dropQueue }) && ok
+  }
+  state.autoCapture.apply()
+  // Only on the transition *into* tracking: initUserAgentData() clears the hint cache synchronously
+  // and refills it asynchronously, so a re-assert would drop $osVersion/$device from every event
+  // until the new request resolved.
+  if (!wasTracking) {
+    warmUserAgentData(state.trackingConsent.isTracking)
   }
   log.debug(`Tracking consent set to "${resolved}".`)
   return ok
@@ -423,31 +540,22 @@ export const optOutTracking = (): boolean => {
 }
 
 /**
- * Whether events are being tracked right now. Reflects tracking consent only — independent of
- * `dryRun`, which suppresses delivery without changing consent. `false` before `init()` is accurate
- * rather than a placeholder: nothing is being tracked yet.
- *
- * To read the user's *recorded choice* instead — which may be a persisted `'granted'` that this
- * returns `false` for simply because `init()` has not run — use `getTrackingConsent()` **after
- * `init()`**. Before then neither getter can see a persisted choice: it is only read from storage
- * during `init()`, so `getTrackingConsent()` answers `undefined` rather than guessing.
+ * Whether events are being tracked right now — true for granted **and** cookieless; use
+ * `getTrackingConsent()` to distinguish them. Reflects consent only, independent of `dryRun`.
+ * `false` before `init()` is accurate rather than a placeholder: nothing is being tracked yet.
  */
 export const isTrackingEnabled = (): boolean => {
   if (!state) {
     log.warn('isTrackingEnabled() called before init().')
     return false
   }
-  // True whenever events flow — full consent OR cookieless mode. Use
-  // getTrackingConsent() to distinguish the two.
   return state.trackingConsent.isTracking()
 }
 
 /**
- * The user's recorded consent choice, or `undefined` before `init()`.
- *
- * A persisted choice is only read from storage during `init()`, so before then there is genuinely no
- * answer to give. It reports `undefined` rather than `'denied'` because those mean different things:
- * a consent banner gated on a pre-init `'denied'` would prompt a user who had already opted in.
+ * The consent state the SDK is acting on, or `undefined` before `init()` — a persisted choice is only
+ * read from storage during `init()`, so before then there is genuinely no answer. `undefined` rather
+ * than `'denied'`, which a banner would read as a real opt-out and re-prompt someone who opted in.
  */
 export const getTrackingConsent = (): TrackingConsent | undefined => {
   if (!state) {
@@ -460,13 +568,9 @@ export const getTrackingConsent = (): TrackingConsent | undefined => {
 }
 
 /**
- * Whether the user has yet to make a choice — the banner gate.
- *
- * `getTrackingConsent()` reports the state the SDK is *acting on*, which before any answer is the
- * `trackingConsent.initial` seed, so a seeded `'granted'` and a chosen `'granted'` read identically
- * and a banner keyed on it re-prompts users who already opted in.
- *
- * `true` before `init()`: nothing has been read from storage yet, so no choice is known.
+ * Whether the user has yet to make a choice — the banner gate. `getTrackingConsent()` cannot answer
+ * this: before any answer it reports the `initial` seed, so a seeded state and a chosen one read
+ * identically. `true` before `init()`, since nothing has been read from storage yet.
  */
 export const isConsentPending = (): boolean => {
   if (!state) {
@@ -497,12 +601,25 @@ export const destroy = () => {
   destroySession()
   destroyProfile()
   configureBeforeSend(undefined)
+  configureUrlRedaction(undefined)
   setDebugLogging(false)
 
   cookielessIdentifyWarned = false
   state = null
 }
 
+/**
+ * Clears the current user's identity for a logout or account switch: a fresh session and device ID,
+ * queued events beaconed once and then dropped off the device (consent is unchanged here, so they
+ * were agreed to at collection time), and the stored profile removed — the next person on a shared
+ * device must not inherit any of it. Not a consent change; that is optOutTracking()/
+ * setTrackingConsent().
+ *
+ * Returns **false** when an identifier or queue key could not be verifiably removed — with
+ * `crossSubdomainTracking` that means an identity cookie survived on the registrable domain. A
+ * dropped farewell beacon logs at its own site but does not fail the reset: this boolean answers
+ * for the device, and beacons fail routinely under content blockers.
+ */
 export const reset = (): boolean => {
   if (typeof window === 'undefined') {
     return false
@@ -514,24 +631,16 @@ export const reset = (): boolean => {
   let ok = true
   try {
     // Aggregated, not merely called: resetIdentity()'s failure arms log and return rather than
-    // throwing, so a catch-only guard reported success while the previous user's session and device
-    // id were still on the device.
+    // throw, so a catch-only guard reported success with the previous user's ids still on the device.
     ok = resetIdentity() && ok
   } catch (err) {
     log.error('Failed to reset identity:', err)
     ok = false
   }
-  // The queue holds the outgoing user's events, and after identify() their distinctId is that user's
-  // externalId — on a shared device the next person must not inherit them. purgeQueue() makes one
-  // best-effort send first, so events collected while they were signed in are not simply discarded.
-  try {
-    if (!state.transport.purgeQueue()) {
-      ok = false
-    }
-  } catch (err) {
-    log.error('Failed to purge queued events:', err)
-    ok = false
-  }
+  // After identify() the queued events' distinctId is the outgoing user's externalId, so on a shared
+  // device the next person must not inherit them. Sent once first — consent is unchanged here, so
+  // they were agreed to at collection time.
+  ok = purgeQueuedEvents({ send: true }) && ok
   try {
     ok = clearProfile() && ok
   } catch (err) {
@@ -560,11 +669,10 @@ export const identify = async (externalId: string, traits?: Record<string, JsonV
       log.error('identify() requires a non-empty externalId string.')
       return
     }
-    // The server reserves this prefix for the ids it derives for cookieless events, and enforces it
-    // with a message-level CEL rule over the whole BatchCreateRequest. Accepting one here would
-    // persist it as the externalId, making it the distinctId on every later event — so every batch
-    // containing this user would be rejected wholesale (InvalidArgument, classified permanent, so
-    // the batch is committed and dropped) with nothing pointing back at the identify() that did it.
+    // The server reserves this prefix for cookieless-derived ids and enforces it with a CEL rule over
+    // the whole BatchCreateRequest. Accepting one would persist it as the externalId — the distinctId
+    // on every later event — so every batch containing this user would be rejected wholesale, with
+    // nothing pointing back at the identify() that caused it.
     if (externalId.startsWith(RESERVED_DISTINCT_ID_PREFIX)) {
       log.error(
         `identify() rejected: externalId must not start with the reserved "${RESERVED_DISTINCT_ID_PREFIX}" prefix, which the server uses for cookieless identities.`,
@@ -573,11 +681,10 @@ export const identify = async (externalId: string, traits?: Record<string, JsonV
     }
     if (!state.trackingConsent.isGranted()) {
       if (state.trackingConsent.getConsent() === 'cookieless') {
-        // Warn rather than debug, once per init(): isTrackingEnabled() returns true in cookieless,
-        // so `if (isTrackingEnabled()) await identify(id)` — the pre-flight check the README used to
-        // recommend — takes the branch, resolves cleanly, and identifies nobody. A debug-gated
-        // message is invisible to exactly the integrator who needs it. Once per init() because a
-        // cookieless site may call identify() on every page.
+        // Warn, not debug: isTrackingEnabled() is true in cookieless, so the obvious pre-flight
+        // check takes the branch, resolves cleanly and identifies nobody — and a debug-gated message
+        // is invisible to exactly the integrator debugging that. Once per init(), since a cookieless
+        // site may call identify() on every page.
         if (!cookielessIdentifyWarned) {
           cookielessIdentifyWarned = true
           log.warn(
@@ -615,10 +722,8 @@ export const identify = async (externalId: string, traits?: Record<string, JsonV
       await unaryCall(state.config.endpoint, state.apiKey, ProfilesSDKService.method.identify, req, ONE_SHOT_TIMEOUT_MS)
       markIdentified(externalId)
     } catch (err) {
-      // The server is the sole validator (the SDK does no client-side field checks by design), so a
-      // rejection here is the only signal that a trait or externalId was invalid. Surface the error
-      // as-is: an RpcError carries the server's message plus a gRPC code with whatever field-level
-      // detail the server chose to include.
+      // The server is the sole validator by design, so a rejection here is the only signal that a
+      // trait or externalId was invalid. Surfaced as-is, since RpcError carries the server's message.
       log.error('Failed to identify:', err)
     }
   } catch (err) {
@@ -641,17 +746,13 @@ export const track: TrackFn = (kind: string, props?: Record<string, unknown>, op
 
     const consent = state.trackingConsent.getConsent()
 
-    // Allow-list, not a deny-check. Written as `if (consent === 'denied') return` plus a binary
-    // ternary, every state that was not explicitly handled fell through to the full-identity arm —
-    // so a fourth state added later meaning "more restrictive than granted" would silently get full
-    // tracking *and* a persisted session, deviceId and anonymous ID, with neither the compiler nor
-    // the suite objecting. Here an unhandled state resolves to null and the event drops, and
-    // `unreachable` makes widening TrackingConsent a compile error at this dispatch — the one place
-    // that has to make the decision.
+    // An allow-list, not a deny-check: written the other way an unhandled state fell through to the
+    // full-identity arm, so a fourth state meaning "more restrictive than granted" would silently
+    // get full tracking plus persisted identifiers. Here it drops, and `unreachable` makes widening
+    // TrackingConsent a compile error at this dispatch — the one place that must decide.
     //
-    // Cookieless: the server derives identity. That arm never touches the identity modules, so their
-    // lazy-create/refresh paths cannot write anything — scoped to track() deliberately, since init()
-    // and setTrackingConsent() do reach them (to restore into memory and to purge).
+    // The cookieless arm never touches the identity modules, so their lazy-create/refresh paths
+    // cannot write anything. Scoped to track(): init() and setTrackingConsent() do reach them.
     let identity: EventIdentity | null = null
     if (consent === 'granted') {
       identity = { sessionId: resolveSessionId(), distinctId: resolveDistinctId() }
@@ -661,7 +762,7 @@ export const track: TrackFn = (kind: string, props?: Record<string, unknown>, op
       log.debug(`track("${kind}") dropped because tracking consent is denied.`)
     } else {
       unreachable(consent)
-      log.error(`track("${kind}") dropped: unhandled tracking consent state ${JSON.stringify(consent)}.`)
+      log.error(`track("${kind}") dropped: unhandled tracking consent state ${safeStringify(consent)}.`)
     }
     if (!identity) {
       return
