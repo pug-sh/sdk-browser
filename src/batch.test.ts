@@ -691,6 +691,10 @@ describe('batch config validation against untrusted input', () => {
   it('still applies the valid members alongside an unrecognized one', () => {
     // Warn and carry on, not fail closed: unlike trackingConsent a mis-sized buffer has no privacy
     // dimension, so answering one typo by disabling batching would be worse than the typo.
+    // Required because this test drives a real size-triggered flush: beforeEach's mockReset() leaves
+    // sendBatch returning undefined, and flush() calls .then() on it, so the run reports an
+    // unhandled rejection while every test still passes.
+    sendBatch.mockResolvedValue(okResponse(2))
     const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
     const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 2, bogus: 9 } as never)
     warn.mockRestore()
