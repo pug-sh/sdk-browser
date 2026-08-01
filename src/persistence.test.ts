@@ -576,6 +576,49 @@ describe('retention', () => {
     expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
   })
 
+  it('reports a throwing mirror sweep once per key, not once per read', () => {
+    // The suppression half of sweepWarnedKeys, which its release test below cannot see: each of the
+    // other sweep tests throws exactly once per phase, so removing the `!sweepWarnedKeys.has(key)`
+    // guard left them all green. It is not cosmetic — the catch un-latches sweptKeys so the next
+    // read retries, and readItem runs on every tracked event, so an unguarded report is one
+    // log.error per event for the life of the page against a persistently proxied Storage.
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'v')
+
+    jar.delete('k')
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('proxied Storage')
+    })
+    store?.getItem('k')
+    store?.getItem('k')
+    store?.getItem('k')
+
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('stale localStorage mirror'))).toHaveLength(1)
+  })
+
+  it('sweeps the mirror once per miss episode rather than on every read', () => {
+    // sweptKeys' suppression half — the second of the two "pinned in all three phases" claims that
+    // was not actually true, since both *releases* are pinned twice over while neither suppression
+    // was pinned at all. Counting removeItem calls cannot see it: the sweep's own
+    // `local.getItem(key) !== null` guard means a repeat sweep finds nothing and skips the removal,
+    // so the count is 1 either way. Re-seeding the mirror between reads is what distinguishes them.
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'v')
+
+    jar.delete('k')
+    store?.getItem('k') // the miss episode opens; the sweep runs and clears the mirror
+    localStorage.setItem('k', 'reseeded')
+
+    store?.getItem('k')
+    store?.getItem('k')
+
+    // Latched for the episode, so the re-seeded value is left alone; the release is a landed cookie
+    // write, pinned separately. Unlatched, every subsequent read re-sweeps.
+    expect(localStorage.getItem('k')).toBe('reseeded')
+  })
+
   // The other half of the throwing-sweep contract: the un-latch. Latched as done, one throwing
   // sweep left an identify()ed mirror unreachable for the rest of the page load — every later miss
   // skipped the sweep, and the value sat outside every deadline until the next full page load.
@@ -613,10 +656,11 @@ describe('retention', () => {
     expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds'))).toHaveLength(1)
   })
 
-  // The three remaining latches in this module, each pinned in the same three phases as the
+  // The four remaining latches in this module, each pinned in the same three phases as the
   // residue-latch case above: report, recover, report again. Held for the page they became "report
   // once, then never" — and the recovery in phase 2 is exactly what makes phase 3 a *different*
-  // fault rather than a repeat of the one already announced.
+  // fault rather than a repeat of the one already announced. The count is what a future reader uses
+  // to check the set is still complete when a sixth latch appears, so keep it in step.
   it('reports a failed retention drop again after the store recovers in between', () => {
     // The worst of the three. In cross-subdomain mode reportResidue is unreachable (it lives inside
     // `if (local)`, where the mirror is *swept* rather than removed), so this line is the only

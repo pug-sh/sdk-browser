@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BatchCreateResponseSchema, type Event, EventSchema } from './gen/sdk/events/v1/events_pb.js'
 import { log } from './logger.js'
 import { GrpcCode, RpcError } from './rpc.js'
+import { makeStorageKey } from './utils.js'
 
 // A controllable stand-in for the inner RPC transport so we can drive batch.ts's flush routing
 // (permanent → drop, transient → retain+retry) directly, without a real fetch. vi.hoisted lets
@@ -393,6 +394,43 @@ describe('cookieless loss reporting and flush fairness', () => {
     errSpy.mockRestore()
   })
 
+  it('puts the debounced tail on disk before purging, so "will retry" is true when it prints', async () => {
+    // The case above debounces the key to disk by hand before failing the removal. Without that
+    // step the freshest events — the click that triggered the navigation — exist only in the
+    // buffer, and purge() clears the buffer and cancels the pending persist. The warning still
+    // said they "remain in the persisted queue and will retry on next init()", which was false for
+    // exactly those events: they were destroyed, and `destroyed` counts 0 for a surviving key, so
+    // the one line that would have said so does not print either.
+    //
+    // beaconFlush() already syncs before reporting for this reason ("To disk before the report");
+    // this call site is the one that could not, because it is about to purge. Syncing first makes
+    // the message true rather than rewording it: on a failed purge the key really does survive
+    // holding the tail.
+    const project = freshProject()
+    const key = makeStorageKey(project, 'queue')
+    const t = createBatchedTransport(ENDPOINT, KEY, project, { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('older'))
+    await vi.advanceTimersByTimeAsync(1100) // on disk, so the failed removal below leaves a key
+    await t.send(evt('navigation-click')) // memory only — the 1s debounce has not fired
+    expect(localStorage.getItem(key)).not.toContain('navigation-click')
+    beacon.mockReturnValue(false)
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    const removeSpy = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+
+    expect(t.purgeQueue({ send: true }).ok).toBe(false)
+
+    // The surviving key means the report takes the non-terminal arm and promises a retry for both.
+    expect(warnSpy.mock.calls.map(c => String(c[0])).some(m => m.includes('will retry'))).toBe(true)
+    // Which is only true if the tail went to disk first: unsynced, purge() cleared the buffer and
+    // cancelled the pending persist, so this event was destroyed while the message promised it back.
+    expect(localStorage.getItem(key)).toContain('navigation-click')
+    expect(localStorage.getItem(key)).toContain('older')
+    removeSpy.mockRestore()
+    warnSpy.mockRestore()
+    errSpy.mockRestore()
+  })
+
   it('beacons the pending events on a reset purge before dropping them', async () => {
     // The happy path of { send: true }: a logout delivers what was collected under unchanged
     // consent before the queues leave the device. The blocked-beacon test above proves the call
@@ -622,18 +660,65 @@ describe('batch config validation against untrusted input', () => {
     return messages
   }
 
+  // The other half of the KNOWN_CONSENT_KEYS pattern. BATCH_RULES made a fourth knob a compile
+  // error until it had a rule, but nothing looked at the keys actually *supplied* — so every shape
+  // below reached `partialConfig?.[name]`, yielded undefined, read as "not supplied" and took the
+  // default in silence. `data-options` JSON is where a casing typo happens and it is exactly where
+  // no compiler is watching.
+  it('names batch keys it does not recognize instead of silently defaulting', () => {
+    const messages = warnFor({ maxsize: 1, maxWaitMS: 3, bogus: 9 }).join()
+    expect(messages).toContain('maxsize')
+    expect(messages).toContain('maxWaitMS')
+    expect(messages).toContain('bogus')
+    // Names what it expected, so the casing slip is visible rather than merely reported as unknown.
+    expect(messages).toContain('maxSize')
+  })
+
+  it('names a batch config that is not an object at all', () => {
+    // A string or a number discards the integrator's entire batch configuration, not one member.
+    expect(warnFor('oops').join()).toContain('oops')
+    expect(warnFor(7).join()).toContain('7')
+  })
+
+  it('stays silent for the shapes that legitimately configure nothing', () => {
+    // null/undefined are the documented "no batch options" case, and an empty object embeds no
+    // misconception — the same reasoning that keeps `{}` silent in resolveAutoCapture.
+    expect(warnFor(undefined)).toEqual([])
+    expect(warnFor(null)).toEqual([])
+    expect(warnFor({})).toEqual([])
+  })
+
+  it('still applies the valid members alongside an unrecognized one', () => {
+    // Warn and carry on, not fail closed: unlike trackingConsent a mis-sized buffer has no privacy
+    // dimension, so answering one typo by disabling batching would be worse than the typo.
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 2, bogus: 9 } as never)
+    warn.mockRestore()
+    void t.send(evt('a'))
+    void t.send(evt('b'))
+    // maxSize: 2 was honored despite the unknown sibling — a flush went out at the second event.
+    expect(sendBatch).toHaveBeenCalledTimes(1)
+    t.destroy()
+  })
+
   it('rejects Infinity, which JSON.parse yields for 1e999', () => {
     // Infinity >= 1 is true, so this passed: `buffer.length >= maxQueueSize` never fires and the
     // persisted queue grows until QuotaExceededError — maxAgeDays does not bound the queue either.
     expect(warnFor({ maxQueueSize: Number.POSITIVE_INFINITY }).join()).toContain('maxQueueSize')
     // And on maxSize it disables size-triggered flushing outright.
     expect(warnFor({ maxSize: Number.POSITIVE_INFINITY }).join()).toContain('maxSize')
+    // Named, not rendered as "null": JSON.stringify maps the non-finite numbers to the string
+    // "null", so the warning for the case this test exists for reported the value as the *other*
+    // documented rejection below, and an integrator went looking for a null they never wrote.
+    expect(warnFor({ maxSize: Number.POSITIVE_INFINITY }).join()).toContain('Infinity')
   })
 
   it('rejects null, which passes a bare >= check', () => {
     // `null >= 0` is true, and setTimeout(fn, null) fires immediately — batching becomes one
     // request per event.
     expect(warnFor({ maxWaitMs: null }).join()).toContain('maxWaitMs')
+    // Still distinguishable from the Infinity case above, which is what makes either report useful.
+    expect(warnFor({ maxWaitMs: null }).join()).toContain('null')
   })
 
   it('rounds a fractional event count down while still allowing a fractional wait', () => {

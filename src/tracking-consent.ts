@@ -83,8 +83,14 @@ const isGpcEnabled = (): boolean => {
  *
  * The member is **required**: optional, it could be laundered off by `const f: () => boolean = g` or
  * a `() => g()` wrapper. Producers add it with the `as` casts below.
+ *
+ * Deliberately **not exported** — only the two instantiations below are. Exported, a module could
+ * write `type Gate = ConsentGate<'granted'>` and then `fn as Gate`, which renames the brand out of
+ * every rule in consent-gate-containment.test.ts (`as Gate` matches none of them) without ever
+ * looking like a cast to the brand. Nothing outside this module needs the generic; `GrantedGate` and
+ * `TrackingGate` are the only instantiations that exist.
  */
-export type ConsentGate<K extends string> = (() => boolean) & { readonly __gate: K }
+type ConsentGate<K extends string> = (() => boolean) & { readonly __gate: K }
 /** May we write identity to the device? Full consent only. */
 export type GrantedGate = ConsentGate<'granted'>
 /** Are events flowing at all? Granted **or** cookieless. */

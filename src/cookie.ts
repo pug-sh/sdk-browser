@@ -43,8 +43,19 @@ export interface CookieLayer {
    * deleted by the store's next getItem — silent identity loss the brand makes a compile error.
    */
   set(name: string, value: StoredEnvelope, maxAgeSeconds: number): boolean
-  /** Returns true only when the key is verifiably gone (read-back is null). */
-  remove(name: string): boolean
+  /**
+   * Returns true only when the key is verifiably gone (read-back is null).
+   *
+   * `intent` picks who reports a failure, not what is attempted. A `'teardown'` (the default —
+   * opt-out, reset, a retention drop) is the privacy case: this layer reports at error and latches
+   * once per key, because callers surface remove() only as an aggregate boolean that can name
+   * neither the key nor the layer. A `'write'` is persistence.setItem() clearing a stale cookie its
+   * own failed write left shadowing the localStorage value; that caller already warns with the
+   * consequence in hand ("shadows the stored value"), and reporting it here spent the key's one
+   * teardown diagnostic on a write — permanently, since the release requires a confirmed removal
+   * that the still-blocked jar cannot give.
+   */
+  remove(name: string, intent?: 'teardown' | 'write'): boolean
   /** True when the cookie is scoped to a shared domain and therefore visible across subdomains. */
   readonly crossSubdomain: boolean
 }
@@ -511,7 +522,7 @@ export const createCookieLayer = (
       reconcileTwin(key)
       return writeCookie(key, value, maxAgeSeconds)
     },
-    remove: key => {
+    remove: (key, intent = 'teardown') => {
       try {
         doc.cookie = `${encodeURIComponent(key)}=; path=/${domainAttr}; max-age=0`
         // Also clear a host-only twin so a removed key cannot resurrect from an older scope.
@@ -542,17 +553,24 @@ export const createCookieLayer = (
         // throwing. Silent, this was the one teardown failure with no diagnostic anywhere: callers
         // surface remove() only as an aggregate boolean (clearProfile, clearSession, the store's
         // removeItem), none of which can name the key or say which layer kept the value.
-        reportRemoveFailure(key, `The "${key}" cookie survived removal during teardown; the identity may resurface.`)
+        //
+        // Gated on the intent so the write path cannot spend it: see the `intent` docs on
+        // CookieLayer.remove. The return value is unaffected either way.
+        if (intent === 'teardown') {
+          reportRemoveFailure(key, `The "${key}" cookie survived removal during teardown; the identity may resurface.`)
+        }
         return false
       } catch (err) {
         // Error, not debug: `log.debug` is off unless the integrator already set `debug: true`, so
         // the reason was invisible to exactly the person diagnosing a failed opt-out. The whole
         // teardown boolean chain rests on this return value.
-        reportRemoveFailure(
-          key,
-          `Failed to remove the "${key}" cookie during teardown; the identity may resurface:`,
-          err,
-        )
+        if (intent === 'teardown') {
+          reportRemoveFailure(
+            key,
+            `Failed to remove the "${key}" cookie during teardown; the identity may resurface:`,
+            err,
+          )
+        }
         return false
       }
     },

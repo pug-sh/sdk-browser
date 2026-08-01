@@ -45,7 +45,13 @@ export type StoredEnvelope = string & { readonly __envelope: true }
  * its own spies.
  */
 export const encodeStored = (value: string, expiresAt: number): StoredEnvelope =>
-  `${expiresAt}|${value}` as StoredEnvelope
+  // Clamped so the brand cannot outrun the decoder. A non-finite deadline stamps `NaN|v` or
+  // `Infinity|v` — branded, and rejected by decodeStored — which readItem then reads as a
+  // *pre-envelope* value, so getItemOrLegacy would hand a corrupt write back as a recorded consent
+  // choice. 0 rather than a throw or a silent skip: this module imports nothing (no logger), the
+  // callers promise not to throw, and an already-expired stamp is dropped on the next read, which
+  // is what the undecodable value did anyway. The unsafe direction would be never expiring.
+  `${Number.isFinite(expiresAt) ? expiresAt : 0}|${value}` as StoredEnvelope
 
 /** Unwraps `encodeStored`'s envelope; null for a bare pre-envelope value or a malformed one. */
 export const decodeStored = (raw: string | null): { value: string; expiresAt: number } | null => {
@@ -280,6 +286,14 @@ export const urlBase64ToUint8Array = (base64String: string): Uint8Array<ArrayBuf
  * through to String() rather than interpolating as the literal text "undefined" of a missing value.
  */
 export const safeStringify = (value: unknown): string => {
+  // Ahead of JSON.stringify, which maps these to the *string* "null" rather than to undefined, so
+  // the fallback below never saw them. Every caller is interpolating a value it is rejecting, and
+  // `Infinity` — what JSON.parse gives for a `1e999` in data-options JSON — is named by hand in
+  // batch's validator as the value that disabled the queue bound. Reported as "null" it named the
+  // other documented rejection instead.
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    return String(value)
+  }
   try {
     return JSON.stringify(value) ?? String(value)
   } catch {

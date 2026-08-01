@@ -1387,3 +1387,73 @@ describe('teardown failures surface in the returned boolean', () => {
     expect(reset()).toBe(true)
   })
 })
+
+// The three gated factories throw a TypeError at the head on a non-function gate, deliberately, to
+// fail loud for untyped callers. What makes that loud rather than fatal is init()'s handling, and
+// nothing pinned it: every guard test calls its factory directly, so neither the routing nor the
+// containment was covered. Reverting reportInitFailure to a single log.warn — the exact state the
+// split was added to fix — left the whole suite green.
+describe('init() handling of a throwing gated factory', () => {
+  it('survives the throw instead of taking the host application down with it', async () => {
+    const { init } = await importPug()
+    vi.mocked(configureSession).mockImplementationOnce(() => {
+      throw new TypeError('configureSession requires an isGranted gate')
+    })
+
+    expect(() => init('proj', { apiKey: 'k', trackingConsent: 'granted' })).not.toThrow()
+  })
+
+  it('names a wiring fault as one rather than reporting it like a blocked cookie store', async () => {
+    const { init } = await importPug()
+    vi.mocked(configureProfile).mockImplementationOnce(() => {
+      throw new TypeError('configureProfile requires an isGranted gate')
+    })
+
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('wiring error'), expect.any(TypeError))
+    // And not as an environment failure, which is the level it used to arrive at.
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('wiring error'), expect.anything())
+  })
+
+  it('still reports a genuine environment failure at warn', async () => {
+    // The other half of the split: a blocked cookie store is not the integrator's bug, and routing
+    // everything to error would make the loud channel meaningless for the case it was added for.
+    const { init } = await importPug()
+    vi.mocked(configureSession).mockImplementationOnce(() => {
+      throw new Error('SecurityError: cookies are blocked')
+    })
+
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to'), expect.any(Error))
+    expect(logSpies.error).not.toHaveBeenCalledWith(expect.stringContaining('wiring error'), expect.anything())
+  })
+})
+
+describe('the identity-retained warning on a non-authoritative init', () => {
+  // The non-authoritative branch explains itself at log.debug because it is a no-op on every default
+  // install — which is also why that message can never reach the case it exists for, debug being off
+  // by default. This warn is the entire fix: a returning visitor whose previous identify() left an
+  // externalId keeps it under a state the integrator spelled as non-granted. Deleting the whole
+  // `if (isIdentified())` block left all 736 tests green.
+  it('warns when a previous identify()s externalId is kept under a config-seeded non-granted state', async () => {
+    const { init } = await importPug()
+    vi.mocked(isIdentified).mockReturnValue(true)
+
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('NOT removed'))
+  })
+
+  it('stays silent on a device that was never identified', async () => {
+    // Keyed on isIdentified(), not on the branch: the branch runs on every default install, so
+    // warning there would be a console line on every page load of every unconfigured site.
+    const { init } = await importPug()
+    vi.mocked(isIdentified).mockReturnValue(false)
+
+    init('proj', { apiKey: 'k' })
+
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('NOT removed'))
+  })
+})

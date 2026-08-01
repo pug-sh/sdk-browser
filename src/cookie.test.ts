@@ -416,6 +416,40 @@ describe('createCookieLayer', () => {
     expect(survived()).toHaveLength(1)
   })
 
+  it('does not spend the teardown report on a failed write-path clear', () => {
+    // persistence.setItem() reaches remove() through dropCookie when a cookie write did not land, to
+    // stop the stale cookie shadowing the localStorage value. That is a *write*, not a teardown, and
+    // reporting it here spent the key's one layer-level diagnostic on it — permanently, since the
+    // release requires a *confirmed* removal and the jar that failed the write is still blocked. The
+    // genuine opt-out that followed then named neither the key nor the layer, which is exactly the
+    // gap reportRemoveFailure was added to close. The store already warns for the shadow case
+    // ("shadows the stored value"), so the diagnostic is not lost, only correctly attributed.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        if (value.includes('max-age=0')) return // deletes blocked all the way through
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    const survived = () => logSpies.error.mock.calls.filter(c => String(c[0]).includes('survived removal'))
+
+    const layer = grantedLayer(true, doc)
+    expect(layer?.set(KEY, 'anon-123', TTL)).toBe(true)
+
+    // The write path's clear-the-shadow call: still returns false, but says nothing here.
+    expect(layer?.remove(KEY, 'write')).toBe(false)
+    expect(survived()).toHaveLength(0)
+
+    // ...so the teardown that follows still gets its diagnostic, naming the key and the layer.
+    expect(layer?.remove(KEY)).toBe(false)
+    expect(survived()).toHaveLength(1)
+  })
+
   // remove() latches reconciledKeys / consumes the preservedTwins registration only on a CONFIRMED
   // removal. Both directions of the up-front spelling regress quietly, so each gets its own pin.
   it('a later landed set() still reports success after a removal that did not land', () => {
@@ -778,14 +812,18 @@ describe('restoring a twin whose registration a failed write consumed', () => {
     // carries, contradicting CookieLayer.set's "the cookie expires with the value it holds" on the
     // one path that also widens scope. Not a data leak — the envelope still governs what the store
     // reads — but the physical cookie sits on the device past its own deadline.
-    const twin = withPreservedTwin(600_000)
+    // 900s preserved, 300s elapsed, so ~600s expected — deliberately NOT 300, which is
+    // LEGACY_TWIN_RESTORE_SECONDS. At the old 600/300 figures the expected value and the legacy
+    // constant coincided, so collapsing the ternary that picks between them (giving *every* twin the
+    // legacy lifetime, decodable or not) passed this test.
+    const twin = withPreservedTwin(900_000)
     try {
       twin.advance(300_000)
       expect(twin.failingSet()).toBe(false)
 
       const maxAge = maxAgeOf(twin.restore())
-      expect(maxAge).toBeGreaterThan(250)
-      expect(maxAge).toBeLessThanOrEqual(300)
+      expect(maxAge).toBeGreaterThan(550)
+      expect(maxAge).toBeLessThanOrEqual(600)
     } finally {
       twin.done()
     }

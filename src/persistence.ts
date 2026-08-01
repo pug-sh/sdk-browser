@@ -117,11 +117,12 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
   // Keys whose stale localStorage mirror was already swept after a shared-cookie miss this load.
   const sweptKeys = new Set<string>()
   // Two independent once-per-key latches, deliberately not shared. They describe the same residue
-  // but answer to different callers: shared, one throwing sweep *would* permanently suppress the
-  // teardown report below, which is the only signal anywhere that an opt-out left an identifier on
-  // the device (removeItem's return value excludes this layer in cross-subdomain mode). Stated as a
-  // counterfactual because it is one — no committed build shared them; persistence.test.ts pins it.
-  // Both are released once their key's residue is verifiably gone.
+  // but answer to different callers: shared, one throwing sweep *would* suppress the teardown report
+  // below — the only signal anywhere that an opt-out left an identifier on the device, since
+  // removeItem's return value excludes this layer in cross-subdomain mode — until whichever release
+  // happened to fire first, which is not the same fact. Stated as a counterfactual because it is one
+  // — no committed build shared them; persistence.test.ts pins it. Both are released once their
+  // key's residue is verifiably gone.
   const sweepWarnedKeys = new Set<string>()
   const residueWarnedKeys = new Set<string>()
   // Once per key per episode, like the two above, and released by the next landed write for the same
@@ -210,13 +211,18 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
   /**
    * Drops `key`'s cookie without throwing; true when it is verifiably gone — including when there
    * is no cookie layer to hold one. `what` is the verb phrase the failure log reads with.
+   *
+   * `intent` is passed straight through to the layer and decides only who reports a failure — a
+   * teardown gets the layer's own once-per-key error naming the key; a write-path shadow clear is
+   * reported by setItem below, which has the consequence in hand ("shadows the stored value"). See
+   * CookieLayer.remove.
    */
-  const dropCookie = (key: string, what: string): boolean => {
+  const dropCookie = (key: string, what: string, intent: 'teardown' | 'write' = 'teardown'): boolean => {
     if (!cookies) {
       return true
     }
     try {
-      return cookies.remove(key)
+      return cookies.remove(key, intent)
     } catch (err) {
       log.warn(`Failed to ${what} "${key}" cookie:`, err)
       return false
@@ -325,10 +331,12 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
     if (removeItem(key)) {
       // Re-arm, like removeItem's own residue latch: a latch may outlive one episode but never the
       // residue it describes, and this key's is verifiably gone. Held for the page, this was the
-      // worst of the three: in cross-subdomain mode reportResidue is unreachable (it sits inside
-      // `if (local)`, and the mirror is swept, not removed, there), so this line is the *only*
-      // signal anywhere that an expired identifier — routinely an identify()ed email — outlived its
-      // retention deadline. Latched permanently, retention enforcement went silent for that key.
+      // worst of the three: in cross-subdomain mode removeItem's return value is `cookieRemoved`
+      // alone, so a *cookie* that refuses to leave is reported only here — reportResidue answers for
+      // the localStorage layer, which that boolean already excludes. The two cover different layers
+      // and neither stands in for the other, so latched permanently this was the only signal
+      // anywhere that an expired identifier — routinely an identify()ed email — outlived its
+      // retention deadline.
       dropFailedKeys.delete(key)
       return
     }
@@ -394,7 +402,7 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
       }
       // A cookie surviving a failed write shadows the value below on reads — clear it in host-only
       // mode, where reads fall back to localStorage; a shared one has no fallback and must stay.
-      const shadowCleared = cookiePersisted || crossSubdomain || dropCookie(key, 'clear the stale')
+      const shadowCleared = cookiePersisted || crossSubdomain || dropCookie(key, 'clear the stale', 'write')
       const localPersisted = writeLocal(key, raw)
       // In cross-subdomain mode reads never fall back to localStorage, so a localStorage-only
       // success is not persistence; nor is one a stale cookie we could not clear still shadows.

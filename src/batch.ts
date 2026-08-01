@@ -281,6 +281,19 @@ const BATCH_RULES = {
   maxQueueSize: { kind: 'whole', min: 1 },
 } satisfies Record<keyof BatchConfig, { readonly kind: 'whole' | 'finite'; readonly min: number }>
 
+/** Derived from the rules, so a knob cannot be validated but unrecognized, or the reverse. */
+const KNOWN_BATCH_KEYS: ReadonlySet<string> = new Set(Object.keys(BATCH_RULES))
+
+/**
+ * A number that came back from `validated()`. Nominal, so the config literal below can demand one
+ * per member and nothing else will do — `satisfies BatchConfig` alone required each member to be
+ * *present*, not to have been *checked*, which let a fourth knob ship rule-carrying, documented and
+ * inert (`maxRetries: partialConfig?.maxRetries ?? DEFAULT.maxRetries` typechecks clean against a
+ * bare `number`). That is the same shape as the hole BATCH_RULES itself was added to close, one
+ * step further along, and the one the untrusted-JSON caller walks straight into.
+ */
+type Validated = number & { readonly __validated: unique symbol }
+
 /**
  * What `purgeQueue()` reports. `ok` answers exactly one question — did the queues leave the
  * device; `destroyed` is how many events that cost. One shape shared with `purgeQueuedEvents` in
@@ -335,6 +348,31 @@ export const createBatchedTransport = (
   projectId: string,
   partialConfig?: BatchOptions,
 ) => {
+  // Shape and key check ahead of the per-member reads — the half of the KNOWN_CONSENT_KEYS pattern
+  // BATCH_RULES did not port. The rules make a fourth knob a compile error until it has one, but
+  // nothing inspected the keys actually *supplied*, so `batch: 'oops'` and `{ maxsize: 1 }` alike
+  // reached `partialConfig?.[name]`, yielded undefined, read as "not supplied" and took every
+  // default in silence — on the one-tag install, where the value is data-options JSON no compiler
+  // sees and a casing slip is the likeliest mistake.
+  //
+  // Warn and carry on, deliberately unlike trackingConsent's fail-closed: a mis-sized buffer has no
+  // privacy dimension, so answering one typo by disabling batching would cost more than the typo.
+  // Same posture as resolveIntent, and for the same reason.
+  const rawConfig: unknown = partialConfig
+  if (rawConfig != null) {
+    if (typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+      log.warn(`Invalid batch config ${safeStringify(rawConfig)}; expected an object. Using defaults for every member.`)
+    } else {
+      const unknownKeys = Object.keys(rawConfig).filter(key => !KNOWN_BATCH_KEYS.has(key))
+      if (unknownKeys.length > 0) {
+        log.warn(
+          `Unknown batch key(s) ${JSON.stringify(unknownKeys)}; expected ${[...KNOWN_BATCH_KEYS]
+            .map(k => `'${k}'`)
+            .join(', ')}. Those members keep their defaults.`,
+        )
+      }
+    }
+  }
   // Read per member with an explicit `=== undefined` check — not a spread, which lets an explicit
   // `undefined` (the config-builder spelling) replace the default, and not `??`, which would
   // silently coalesce the `null` the warning below exists to name.
@@ -342,7 +380,7 @@ export const createBatchedTransport = (
   // compiler sees, and a bare `value >= min` accepted every shape JSON.parse can produce. `Infinity`
   // (from `1e999`) passed, disabling the queue bound and size-triggered flushing outright; `null`
   // passed too (`null >= 0`), turning maxWaitMs into `setTimeout(fn, 0)` — one request per event.
-  const validated = (name: keyof BatchConfig): number => {
+  const resolve = (name: keyof BatchConfig): number => {
     const { kind, min } = BATCH_RULES[name]
     const fallback = DEFAULT_BATCH_CONFIG[name]
     const value: unknown = partialConfig?.[name]
@@ -363,16 +401,22 @@ export const createBatchedTransport = (
     return value
   }
 
-  // Destructured off a `satisfies BatchConfig` literal, not three loose consts. BATCH_RULES makes a
-  // fourth knob a compile error until it has a *rule*; nothing made it a compile error until it was
-  // actually *validated*, so a member could be settable through `init({ batch })`, documented, and
-  // inert — the mirror of the hole BATCH_RULES itself was added to close. `satisfies` requires every
-  // member of BatchConfig to be present here, which is the missing half.
+  /** The sole mint for `Validated` — one cast, so the brand means "resolve() checked this". */
+  const validated = (name: keyof BatchConfig): Validated => resolve(name) as Validated
+
+  // Destructured off a `satisfies Record<keyof BatchConfig, Validated>` literal, not three loose
+  // consts, and the two halves of that annotation do different jobs. `keyof BatchConfig` requires
+  // every member to be *present* — BATCH_RULES already made a fourth knob a compile error until it
+  // had a rule, but a member could still be settable through `init({ batch })`, documented, and
+  // inert. `Validated` requires each one to have come back from `validated()`, which is the half
+  // `satisfies BatchConfig` could not state: against a bare `number`, writing the new member as
+  // `partialConfig?.maxRetries ?? DEFAULT_BATCH_CONFIG.maxRetries` typechecked clean and shipped
+  // unchecked to the untrusted-JSON caller this whole apparatus exists for.
   const { maxSize, maxWaitMs, maxQueueSize } = {
     maxSize: validated('maxSize'),
     maxWaitMs: validated('maxWaitMs'),
     maxQueueSize: validated('maxQueueSize'),
-  } satisfies BatchConfig
+  } satisfies Record<keyof BatchConfig, Validated>
   const storageKey = makeStorageKey(projectId, 'queue')
 
   const inner = createTransport(endpoint, apiKey)
@@ -469,7 +513,9 @@ export const createBatchedTransport = (
     // forever. When the two floors cannot both fit the queues alternate; any fixed split degenerates
     // there, and only alternation is correct at every maxSize.
     const cookielessPending = cookielessStorage.size
-    let consentedBudget = maxSize
+    // Annotated `number`, not left to infer `Validated` off maxSize: what the brand marks is "this
+    // came back from the validator", and a budget derived by arithmetic below is not that.
+    let consentedBudget: number = maxSize
     if (cookielessPending > 0) {
       const cookielessReserve = Math.min(cookielessPending, Math.max(1, Math.floor(maxSize / 2)))
       consentedBudget = maxSize - cookielessReserve
@@ -674,11 +720,27 @@ export const createBatchedTransport = (
           beaconLoss = { consented: consentedTail.length, cookieless: cookielessTail.length }
         }
       }
+      // To disk before purging, the same move beaconFlush() makes before *reporting* and for the
+      // same reason: events younger than the 1s persist debounce live only in the buffer, and
+      // purge() clears the buffer and cancels the pending persist. Unsynced, a purge that failed to
+      // remove the key destroyed exactly that tail while the surviving key made every report claim
+      // it back — the farewell beacon's "remain in the persisted queue and will retry on next
+      // init()", and `destroyed` counting 0 for the whole queue. Syncing first makes both true
+      // instead of rewording them: the key that survives now genuinely holds the tail.
+      //
+      // Gated on `send`, which is true only for reset(): a logout leaves consent untouched, so
+      // writing the tail down before removing it is a write the user already agreed to. Every
+      // consent teardown passes false and must not reach this — a rewrite-then-remove is still a
+      // device write, and under the cookieless default the SDK promises none at all (pinned by
+      // "writes nothing to the device when a leftover queue meets a cookieless init"). That path
+      // has no farewell beacon to be truthful about either, so the sync would buy nothing.
+      if (send) {
+        storage.sync()
+      }
       // Each queue counts its own buffer, in-flight locked batch included — see purge(). An
-      // in-flight batch may still be delivered, so `destroyed` can overstate; the undercount runs
-      // the other way — on a failed consented purge, events younger than the persist debounce were
-      // destroyed with the buffer (never on disk, memory now cleared) yet count 0 along with the
-      // rest of the surviving key. Approximate in both directions, never an audit.
+      // in-flight batch may still be delivered, so `destroyed` can overstate. Under `send` it no
+      // longer undercounts, the sync above having put every event it counts 0 for on the device;
+      // on the consent teardown the undercount stands, deliberately, for the reason given there.
       const consented = storage.purge()
       const cookieless = cookielessStorage.purge()
       if (beaconLoss) {

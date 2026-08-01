@@ -37,9 +37,23 @@ const shippedSources = (prefix = ''): string[] =>
 const BRAND_OWNER = 'tracking-consent.ts'
 
 /**
- * Every spelling of "produce a branded gate here". Each is a way *around* the one before it, which
- * is the whole risk with a source-text rule: the discipline is only as good as its evasions are
- * closed, and a rule that names one syntax reads as complete while three others sail past.
+ * The spellings of "produce a branded gate here" that a source-text rule can see. Each is a way
+ * *around* the one before it, which is the whole risk with this kind of rule: the discipline is only
+ * as good as its evasions are closed, and a rule that names one syntax reads as complete while the
+ * others sail past.
+ *
+ * This set is a speed bump, NOT a proof. Two evasions are known-open and cannot be closed by
+ * scanning, because they produce a *genuinely* branded gate with no cast and no phantom member to
+ * grep for:
+ *
+ *   1. Borrowing a controller's own gate — `createTrackingConsent('x', 'granted').isGranted` — which
+ *      is a real gate answering to a controller the calling module invented.
+ *   2. Deriving the type without naming the brand — `ReturnType<typeof createTrackingConsent>
+ *      ['isGranted']` — then casting to that alias.
+ *
+ * What actually contains those is that both entry points are internal (absent from index.ts), so a
+ * new call site is a reviewable addition in this repo rather than something a consumer can reach.
+ * The rules below exist to catch the *accidental* swap, which is what the brand was built for.
  *
  * Type-position uses (`isGranted: GrantedGate`, `import type { GrantedGate }`) are deliberately not
  * matched — naming the brand is how consumers are *supposed* to use it.
@@ -62,10 +76,18 @@ const MINT_PATTERNS: readonly RegExp[] = [
 /**
  * The cast-free evasion: `deferredGrantedGate` is exported, so any module could call it with its own
  * `() => controller` and get a real branded gate answering to a controller it chose — no cast, no
- * phantom member, nothing for the rules above to match. It is exported because the wiring genuinely
- * spans two modules (the controller needs the store, the store needs the cookie layer), and that is
- * the single call site.
+ * phantom member, nothing for the mint rules above to match. It is exported because the wiring
+ * genuinely spans two modules (the controller needs the store, the store needs the cookie layer).
+ *
+ * Two patterns, for the reason the mint set has four: the bare call, and the call *aliased at the
+ * import*. Aliasing is closed for the brand (mint pattern 4) but was open here — the identical move
+ * against the other half of the discipline. `import { deferredGrantedGate as mint }` renames every
+ * call to `mint(`, and the mint rules never fired either, since their `\b` cannot match inside
+ * `deferredGrantedGate`.
  */
+const FACTORY_PATTERNS: readonly RegExp[] = [/deferredGrantedGate\s*\(/, /\bdeferredGrantedGate\s+as\s+\w/]
+
+/** The owner plus pug.ts, the single wiring site — the owner is listed because it defines the factory. */
 const GATE_FACTORY_CALLERS = new Set([BRAND_OWNER, 'pug.ts'])
 
 describe('consent gate mint containment', () => {
@@ -83,8 +105,23 @@ describe('consent gate mint containment', () => {
     // A comment naming deferredGrantedGate (session.ts has one) is not a mint; a *call* is.
     const offenders = shippedSources()
       .filter(rel => !GATE_FACTORY_CALLERS.has(rel))
-      .filter(rel => /deferredGrantedGate\s*\(/.test(readFileSync(srcUrl(rel), 'utf8')))
+      .filter(rel => FACTORY_PATTERNS.some(pattern => pattern.test(readFileSync(srcUrl(rel), 'utf8'))))
     expect(offenders).toEqual([])
+  })
+
+  it('every factory pattern actually matches the evasion it names', () => {
+    // The brand rules close import-aliasing (pattern 4); the factory rule did not, which is the
+    // identical move against the other half of the discipline. `import { deferredGrantedGate as
+    // mint }` renames the call to `mint(`, and the `\b` in the brand rules does not fire inside
+    // `deferredGrantedGate` (the G is preceded by a word character), so nothing matched at all.
+    const evasions = [
+      'const g = deferredGrantedGate(() => controller)',
+      "import { deferredGrantedGate as mint } from './tracking-consent.js'",
+    ]
+    for (const [i, evasion] of evasions.entries()) {
+      expect(FACTORY_PATTERNS.some(pattern => pattern.test(evasion))).toBe(true)
+      expect(FACTORY_PATTERNS[i]?.test(evasion)).toBe(true)
+    }
   })
 
   it('the discipline has something to guard (the owner really does mint, and the walk works)', () => {
