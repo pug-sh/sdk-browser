@@ -72,9 +72,15 @@ export const configureSession = (
   // for callers typecheck never sees.
   isGranted: GrantedGate,
 ): void => {
-  // Fail loud at the head, uniformly with configureProfile and createCookieLayer: an omitted gate
-  // used to read as quietly withheld — no throw, no log — so granted-mode installs silently lost
-  // the tab registry and rotate()/resetIdentity() persistence for the page's life.
+  // Assigned before the head guard, not after: resolveSessionId() falls back to this id, so a throw
+  // between here and the assignment would leave it '' and stamp an empty sessionId on every event —
+  // which the proto's `string.uuid` rule rejects as InvalidArgument, classified permanent, so whole
+  // batches are committed and dropped. Nothing below depends on the guard having run first.
+  fallbackSessionId = uuidv7()
+  // Fail loud at the head, uniformly with configureProfile and createCookieLayer. Measured against
+  // main, where `mayWriteToDevice()` read an absent gate as *permitted* (`?? true`): an omitted
+  // argument silently wrote identity to the device with nothing in the types to say so. This branch
+  // now makes that unreachable, and the `?? false` below makes it fail closed if it ever is.
   if (typeof isGranted !== 'function') {
     throw new TypeError('configureSession requires the isGranted consent gate')
   }
@@ -82,7 +88,6 @@ export const configureSession = (
   if (!store) {
     log.warn('Storage unavailable; session state will not persist.')
   }
-  fallbackSessionId = uuidv7()
   sessionProjectId = projectId
   isGrantedFn = isGranted
   config.storageKey = makeStorageKey(projectId, 'session')

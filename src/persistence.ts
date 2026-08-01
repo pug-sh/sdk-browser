@@ -115,11 +115,17 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
   // Keys whose stale localStorage mirror was already swept after a shared-cookie miss this load.
   const sweptKeys = new Set<string>()
   // Two independent once-per-key latches, deliberately not shared. They describe the same residue
-  // but answer to different callers: sharing them let one throwing sweep permanently suppress the
+  // but answer to different callers: shared, one throwing sweep *would* permanently suppress the
   // teardown report below, which is the only signal anywhere that an opt-out left an identifier on
-  // the device (removeItem's return value excludes this layer in cross-subdomain mode).
+  // the device (removeItem's return value excludes this layer in cross-subdomain mode). Stated as a
+  // counterfactual because it is one — no committed build shared them; persistence.test.ts pins it.
   const sweepWarnedKeys = new Set<string>()
   const residueWarnedKeys = new Set<string>()
+  // Once per key per episode, like the two above, and released by the next landed write for the same
+  // reason: writeLocal() sits on the per-event session write, so an unlatched warn there is one
+  // console line per event for the life of the page on a quota-exhausted store — drowning the single
+  // actionable message setItem() logs.
+  const writeFailedKeys = new Set<string>()
 
   /**
    * Deletes this origin's localStorage mirror of a key whose shared cookie is gone. Reads never
@@ -209,6 +215,29 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
     }
   }
 
+  /**
+   * One residue report per key per *episode*, not per page. Both of removeItem's failure arms report
+   * the same fact — an identifier survived a teardown — so they share a latch deliberately; what
+   * they must not share is a latch that outlives the fact. Released by the next confirmed removal
+   * below, mirroring sweptKeys' un-latch in sweepLocalMirror: held for the page, one mechanism's
+   * report silenced every later one for that key, including the other mechanism's, and in
+   * cross-subdomain mode (where the return value excludes this layer) that report is the only signal
+   * anywhere that the identifier is still on the device.
+   */
+  const reportResidue = (key: string, message: string, err?: unknown): void => {
+    if (residueWarnedKeys.has(key)) {
+      return
+    }
+    residueWarnedKeys.add(key)
+    // Error, matching how clearProfile() reports the same outcome on the cookie layer. The mechanism
+    // of failure does not pick the severity — a no-op and a throw leave the same identifier behind.
+    if (err === undefined) {
+      log.error(message)
+    } else {
+      log.error(message, err)
+    }
+  }
+
   const removeItem = (key: string): boolean => {
     const cookieRemoved = dropCookie(key, 'remove the')
     // An absent layer can't hold a stale value, so it defaults to "removed".
@@ -219,24 +248,17 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
         // Read back like the cookie layer does: a shimmed or quota-locked store no-ops the removal
         // without throwing, and the teardown booleans rest on this answer.
         localRemoved = local.getItem(key) === null
-        // In cross-subdomain mode the return value below deliberately excludes this layer, so this
-        // is the only signal anywhere that the residue exists — and the residue is an identifier
-        // outliving a teardown that reported success. Error, matching how clearProfile() reports the
-        // same outcome on the cookie layer.
-        if (!localRemoved && !residueWarnedKeys.has(key)) {
-          residueWarnedKeys.add(key)
-          log.error(`localStorage still holds "${key}" after removal; residue remains on this device.`)
+        if (!localRemoved) {
+          reportResidue(key, `localStorage still holds "${key}" after removal; residue remains on this device.`)
         }
       } catch (err) {
-        // Same outcome as the no-op above — the identifier survives the teardown — so the same
-        // level, the same consequence sentence, and the same latch: the mechanism of failure does
-        // not pick the severity, and the residue is one fact per key however it came about.
         localRemoved = false
-        if (!residueWarnedKeys.has(key)) {
-          residueWarnedKeys.add(key)
-          log.error(`Failed to remove "${key}" from localStorage; residue remains on this device:`, err)
-        }
+        reportResidue(key, `Failed to remove "${key}" from localStorage; residue remains on this device:`, err)
       }
+    }
+    if (localRemoved) {
+      // Re-arm. A latch may only outlive the residue it describes, and this key no longer has any.
+      residueWarnedKeys.delete(key)
     }
     knownExpiry.delete(key)
     // A subsequent getItem returns null only when every layer it would consult is cleared: the
@@ -262,9 +284,16 @@ export const createPersistentStore = (cookies: CookieLayer | null, maxAgeDays?: 
     }
     try {
       local.setItem(key, raw)
+      // Re-arm, like removeItem's residue latch: the next genuine failure must report again.
+      writeFailedKeys.delete(key)
       return true
     } catch (err) {
-      log.warn(`Failed to write "${key}" to localStorage:`, err)
+      // Latched: this runs on the per-event session write, so an unlatched warn is one console line
+      // per event. setItem()'s own warnedKeys message carries the actionable half.
+      if (!writeFailedKeys.has(key)) {
+        writeFailedKeys.add(key)
+        log.warn(`Failed to write "${key}" to localStorage:`, err)
+      }
       return false
     }
   }

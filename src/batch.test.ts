@@ -368,6 +368,31 @@ describe('cookieless loss reporting and flush fairness', () => {
     errSpy.mockRestore()
   })
 
+  it('does not claim a terminal drop when the persisted purge did not land', async () => {
+    // The inverse of the case above, and why the farewell report has to run *after* the purge rather
+    // than before it: announced first, it asserted an outcome only the purge knows. With a blocked
+    // beacon *and* a surviving key, the console carried "dropped unsent — the queue is removed" one
+    // line above purge()'s own "may be sent on a later visit", and the second is the true one — the
+    // events really do hydrate and send on the next init(). Claiming destruction is the wrong
+    // direction for a privacy-relevant message: it says data is gone while it is still on the device.
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 99, maxWaitMs: 99_999 })
+    await t.send(evt('consented'))
+    await vi.advanceTimersByTimeAsync(1100) // debounce the key to disk so a failed removal leaves it
+    beacon.mockReturnValue(false)
+    const removeSpy = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+
+    expect(t.purgeQueue({ send: true }).ok).toBe(false)
+
+    const claims = [...warnSpy.mock.calls, ...errSpy.mock.calls].map(c => String(c[0]))
+    expect(claims.some(m => m.includes('dropped unsent'))).toBe(false)
+    expect(claims.some(m => m.includes('will retry'))).toBe(true)
+    removeSpy.mockRestore()
+    warnSpy.mockRestore()
+    errSpy.mockRestore()
+  })
+
   it('beacons the pending events on a reset purge before dropping them', async () => {
     // The happy path of { send: true }: a logout delivers what was collected under unchanged
     // consent before the queues leave the device. The blocked-beacon test above proves the call

@@ -248,6 +248,26 @@ export const DEFAULT_BATCH_CONFIG: BatchConfig = {
 }
 
 /**
+ * How each knob is validated, derived from `BatchConfig` by `satisfies` for the same reason
+ * `KNOWN_CONSENT_KEYS` is derived from `TrackingConsentConfig`: a fourth member becomes a compile
+ * error here until it has a rule. That closes the one asymmetry `BatchOptions` leaves open — the
+ * mapped type makes a new member *settable* through `init({ batch })`, but nothing made it
+ * *validated*, which is the mirror image of the hole the mapped type was introduced to fix.
+ *
+ * Keeping `kind` and `min` beside the name also stops the pairing being respelled at each call site,
+ * where `validated('maxWaitMs', 'whole', 0)` — rounding a `setTimeout` duration that is fine
+ * fractional — and `validated('maxSize', 'finite', 0)` — admitting the `lock(0)`-forever config the
+ * floor exists to reject — both compiled clean.
+ */
+const BATCH_RULES = {
+  // Whole because lock() reserves a count of events; floored at 1 so a flush always draws one.
+  maxSize: { kind: 'whole', min: 1 },
+  // Finite, not whole: a setTimeout duration is fine fractional. 0 means "flush on the next tick".
+  maxWaitMs: { kind: 'finite', min: 0 },
+  maxQueueSize: { kind: 'whole', min: 1 },
+} satisfies Record<keyof BatchConfig, { readonly kind: 'whole' | 'finite'; readonly min: number }>
+
+/**
  * What `purgeQueue()` reports. `ok` answers exactly one question — did the queues leave the
  * device; `destroyed` is how many events that cost. One shape shared with `purgeQueuedEvents` in
  * pug.ts, so the aggregate cannot be re-spelled narrower there and silently hide a new field.
@@ -308,7 +328,8 @@ export const createBatchedTransport = (
   // compiler sees, and a bare `value >= min` accepted every shape JSON.parse can produce. `Infinity`
   // (from `1e999`) passed, disabling the queue bound and size-triggered flushing outright; `null`
   // passed too (`null >= 0`), turning maxWaitMs into `setTimeout(fn, 0)` — one request per event.
-  const validated = (name: keyof BatchConfig, kind: 'whole' | 'finite', min: number): number => {
+  const validated = (name: keyof BatchConfig): number => {
+    const { kind, min } = BATCH_RULES[name]
     const fallback = DEFAULT_BATCH_CONFIG[name]
     const value: unknown = partialConfig?.[name]
     if (value === undefined) {
@@ -328,9 +349,9 @@ export const createBatchedTransport = (
     return value
   }
 
-  const maxSize = validated('maxSize', 'whole', 1)
-  const maxWaitMs = validated('maxWaitMs', 'finite', 0)
-  const maxQueueSize = validated('maxQueueSize', 'whole', 1)
+  const maxSize = validated('maxSize')
+  const maxWaitMs = validated('maxWaitMs')
+  const maxQueueSize = validated('maxQueueSize')
   const storageKey = makeStorageKey(projectId, 'queue')
 
   const inner = createTransport(endpoint, apiKey)
@@ -361,9 +382,11 @@ export const createBatchedTransport = (
    * consented queue is localStorage-backed and recovers on the next `init()`; the cookieless queue
    * dies with the page, so reporting both as "they remain queued" was wrong for half of them.
    *
-   * `terminal` is the reset() farewell: purgeQueue() destroys both queues on the statement after
-   * this report, so "will retry on next init()" is false there — the beacon was the events' one
-   * chance, and the loss is permanent regardless of which queue held them.
+   * `terminal` is the reset() farewell *once the purge has confirmed the queues left the device*:
+   * the beacon was those events' one chance and the loss is permanent, so "will retry on next
+   * init()" is false. The caller must therefore report after purging, not before — a consented purge
+   * that fails leaves the key on disk and the events really do retry, which is why `terminal` is
+   * passed `consented.ok` rather than a literal true.
    */
   const reportBeaconLoss = (consentedCount: number, cookielessCount: number, phase: string, terminal = false): void => {
     if (consentedCount > 0) {
@@ -613,6 +636,12 @@ export const createBatchedTransport = (
      * batch, whose later commit/rollback lands on an emptied buffer and is a harmless no-op.
      */
     purgeQueue: ({ send }: { send: boolean }): PurgeResult => {
+      // Held, not reported, until the purge below has run. The counts are captured here because
+      // purge() empties the buffers, but the *message* depends on whether the queues actually left
+      // the device: announced first, a failed consented purge printed "dropped unsent — the queue is
+      // removed" one line above purge()'s own "may be sent on a later visit", and the second is the
+      // true one. Same reasoning that keys purgeQueuedEvents' warning on `destroyed`.
+      let beaconLoss: { readonly consented: number; readonly cookieless: number } | null = null
       if (send && state !== 'destroyed') {
         const consentedTail = storage.peekUnlocked()
         const cookielessTail = cookielessStorage.peekUnlocked()
@@ -620,9 +649,8 @@ export const createBatchedTransport = (
         // The third beacon call site, and the only one that discarded this result — so a blocked
         // sendBeacon destroyed everything collected under valid consent, returned true, and said
         // nothing. Both other sites (beaconFlush, destroy) already report through reportBeaconLoss.
-        // The counts are captured before the call because purge() empties the buffers below.
         if (pending.length > 0 && !inner.beacon?.(pending)) {
-          reportBeaconLoss(consentedTail.length, cookielessTail.length, 'during reset', true)
+          beaconLoss = { consented: consentedTail.length, cookieless: cookielessTail.length }
         }
       }
       // Each queue counts its own buffer, in-flight locked batch included — see purge(). An
@@ -632,6 +660,11 @@ export const createBatchedTransport = (
       // rest of the surviving key. Approximate in both directions, never an audit.
       const consented = storage.purge()
       const cookieless = cookielessStorage.purge()
+      if (beaconLoss) {
+        // `terminal` is the purge's answer, not an assumption: a surviving key means those events
+        // really do retry on the next init().
+        reportBeaconLoss(beaconLoss.consented, beaconLoss.cookieless, 'during reset', consented.ok)
+      }
       return {
         ok: consented.ok && cookieless.ok,
         destroyed: (consented.ok ? consented.dropped : 0) + cookieless.dropped,

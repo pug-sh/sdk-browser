@@ -549,6 +549,33 @@ describe('retention', () => {
     expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('still holds "k" after removal'))
   })
 
+  // A latch may report once per *episode*, never once per page: it must not outlive the fact it
+  // describes. Held after the residue is gone, the next genuine one for that key was silent — and in
+  // cross-subdomain mode that report is the only signal anywhere that a teardown left an identifier
+  // behind, since removeItem's return value excludes the localStorage layer there.
+  it('reports residue again after a confirmed removal cleared the previous report', () => {
+    const store = createPersistentStore(null)
+    store?.setItem('k', 'v')
+
+    // 1. Residue: the removal no-ops, so the identifier survives and is reported.
+    const removal = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    store?.removeItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
+
+    // 2. The store recovers and the key genuinely leaves the device — the fact is now false.
+    logSpies.error.mockClear()
+    removal.mockRestore()
+    store?.setItem('k', 'v')
+    store?.removeItem('k')
+    expect(logSpies.error).not.toHaveBeenCalled()
+
+    // 3. Residue again. A latch still holding from step 1 would swallow this.
+    store?.setItem('k', 'v')
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    store?.removeItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
+  })
+
   // The other half of the throwing-sweep contract: the un-latch. Latched as done, one throwing
   // sweep left an identify()ed mirror unreachable for the rest of the page load — every later miss
   // skipped the sweep, and the value sat outside every deadline until the next full page load.

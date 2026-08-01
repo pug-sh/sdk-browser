@@ -210,9 +210,11 @@ export const createCookieLayer = (
   isGranted: GrantedGate,
   doc: CookieDocument | null = typeof document === 'undefined' ? null : document,
 ): CookieLayer | null => {
-  // Fail loud at the head, uniformly with configureProfile and configureSession: an omitted gate
-  // used to throw inside reconcileTwin's try — after the live twin was already expired, so the
-  // misuse destroyed a value and produced only a once-per-key warn.
+  // Fail loud at the head, uniformly with configureProfile and configureSession. At the head rather
+  // than at the point of use because an unguarded gate is first *called* inside reconcileTwin's try,
+  // after the live twin has already been expired — so the misuse destroyed a value and surfaced only
+  // as a once-per-key warn. init() routes the throw through reportInitFailure, which reports a
+  // TypeError at error level rather than as an environment failure.
   if (typeof isGranted !== 'function') {
     throw new TypeError('createCookieLayer requires the isGranted consent gate')
   }
@@ -264,13 +266,18 @@ export const createCookieLayer = (
 
   // Keys whose host-only twin reconcileTwin deliberately left in place (its not-granted arm), with
   // what putting it back requires: a later set() whose replacement write fails must *restore* the
-  // twin, not merely know it existed, so the value and remaining lifetime ride the registration.
-  const preservedTwins = new Map<string, { readonly value: string; readonly maxAgeSeconds: number }>()
+  // twin, not merely know it existed, so the value rides the registration.
+  //
+  // The value alone, not a captured lifetime: the twin's own envelope already states its deadline,
+  // and recomputing from it at restore time is what keeps a restored cookie from outliving the value
+  // it holds. A figure captured when the twin was first preserved goes stale on a long-lived page —
+  // preserved with R seconds left and restored at R−10, it was written back with a fresh max-age=R.
+  const preservedTwins = new Map<string, string>()
 
   const writeCookie = (key: string, value: string, maxAgeSeconds: number): boolean => {
     // Hoisted out of the try so the catch can repair the bookkeeping for a throw that landed
     // between consuming the registration and finishing the write.
-    let expiredTwin: { readonly value: string; readonly maxAgeSeconds: number } | undefined
+    let expiredTwin: string | undefined
     try {
       // encodeURIComponent stays inside the try — it throws on malformed UTF-16 (lone surrogates),
       // and callers must never throw.
@@ -300,7 +307,7 @@ export const createCookieLayer = (
       // first set() after a preserving reconcile — returning false with the twin gone reverted a
       // recorded refusal to the config seed on the next init().
       if (expiredTwin !== undefined) {
-        preserveTwin(key, expiredTwin.value, expiredTwin.maxAgeSeconds)
+        restoreConsumedTwin(key, expiredTwin)
       }
       return false
     } catch (err) {
@@ -311,15 +318,29 @@ export const createCookieLayer = (
       // in preserveTwin too, and a throw escaping this catch would break set()'s never-throws
       // contract. preserveTwin registers before it writes, so even a failed attempt leaves the
       // bookkeeping consistent, and a stale entry costs one harmless extra expiry write later.
+      let twinRecovered = expiredTwin === undefined
       if (expiredTwin !== undefined && !preservedTwins.has(key)) {
         try {
-          preserveTwin(key, expiredTwin.value, expiredTwin.maxAgeSeconds)
+          restoreConsumedTwin(key, expiredTwin)
+          twinRecovered = true
         } catch {
           // Jar still refusing writes; the registration stands and the store's read-back reports
           // the failed persist.
         }
       }
-      log.debug(`Cookie write for "${key}" threw:`, err)
+      if (twinRecovered) {
+        log.debug(`Cookie write for "${key}" threw:`, err)
+      } else {
+        // Warn, not debug: this write expired a preserved twin to make room for itself, so a throw
+        // here can leave the sole copy gone — cross-subdomain reads have no localStorage fallback.
+        // `log.debug` is off unless the integrator already set `debug: true`, making the loss
+        // invisible to exactly the person diagnosing it; the same argument put remove()'s catch at
+        // error. The read-back path's equivalent failure already reports through restoreTwin.
+        log.warn(
+          `Cookie write for "${key}" threw after its host-only twin was expired, and the twin could not be put back; its value may be lost on this device:`,
+          err,
+        )
+      }
       return false
     }
   }
@@ -338,7 +359,12 @@ export const createCookieLayer = (
   const restoreTwin = (key: string, value: string, maxAgeSeconds: number): void => {
     doc.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(value)}${hostOnlyAttrs}; max-age=${maxAgeSeconds}`
     if (readCookie(doc, key) !== value) {
-      log.warn(`Could not restore the host-only "${key}" cookie; its value may be lost on this device.`)
+      // Error, not warn: this only ever runs in cross-subdomain mode, where the twin was the sole
+      // copy and reads have no localStorage fallback to drop to — a confirmed loss, which is how
+      // clearProfile() reports the analogous outcome. Nothing downstream can tell: get() returns
+      // void-typed reconciliation followed by a plain miss, which the store reads as an authoritative
+      // deletion and answers by sweeping the localStorage mirror too.
+      log.error(`Could not restore the host-only "${key}" cookie; its value may be lost on this device.`)
     }
   }
 
@@ -351,8 +377,28 @@ export const createCookieLayer = (
    * fails — can put the twin back rather than merely remember that one existed.
    */
   const preserveTwin = (key: string, value: string, maxAgeSeconds: number): void => {
-    preservedTwins.set(key, { value, maxAgeSeconds })
+    preservedTwins.set(key, value)
     restoreTwin(key, value, maxAgeSeconds)
+  }
+
+  /**
+   * Puts back a twin whose registration `writeCookie` already consumed, recomputing the lifetime from
+   * the twin's own envelope instead of replaying a figure captured when it was first preserved.
+   * Replayed, a twin preserved early in a long-lived page and restored much later got a fresh
+   * full-length `max-age` and outlived the deadline stamped in the value it carries — contradicting
+   * `CookieLayer.set`'s "the cookie expires with the value it holds". Not a leak, since the envelope
+   * still governs what the store reads, but the physical cookie outlived its own deadline.
+   *
+   * A twin whose retention ended in the meantime is deliberately *not* restored: the expiry write
+   * already removed it, which is exactly what its deadline asks for. An undecodable one has no
+   * deadline to recompute and keeps the short fixed window, as when it was first preserved.
+   */
+  const restoreConsumedTwin = (key: string, value: string): void => {
+    const life = twinLifetime(value)
+    if (life === 'expired') {
+      return
+    }
+    preserveTwin(key, value, life === 'undecodable' ? LEGACY_TWIN_RESTORE_SECONDS : life)
   }
 
   const reconcileTwin = (key: string): void => {
@@ -457,8 +503,11 @@ export const createCookieLayer = (
           // After a confirmed remove there is no twin left worth reconciling — or clearing — later.
           // Consumed only on that confirmation: consumed up front, a removal that threw or no-opped
           // left the twin in place but untracked, so a later successful set() failed read-back
-          // against it. Unconsumed, the key stays un-latched and the next access reconciles the
-          // leftover instead.
+          // against it. Unconsumed, a key this call is the first to touch stays un-latched and the
+          // next access reconciles the leftover; a key an earlier read already latched keeps its
+          // preservedTwins registration instead, which writeCookie expires ahead of its own write.
+          // Clearing the registration here is what stops a later failed set() from restoring a twin
+          // this teardown removed — an identifier coming back after opt-out reported success.
           reconciledKeys.add(key)
           preservedTwins.delete(key)
         }

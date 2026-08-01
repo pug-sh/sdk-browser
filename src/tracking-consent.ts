@@ -100,7 +100,9 @@ export type TrackingGate = ConsentGate<'tracking'>
  * anywhere in the gate chain. It costs nothing today — the only value read in that window is the
  * consent record, and the sole thing a withheld gate suppresses is `reconcileTwin`'s *promotion*.
  * The twin is preserved and read normally, and the restore write that follows it is ungated, so a
- * cookie-backed consent record still round-trips and still lands on the registrable domain.
+ * cookie-backed consent record still round-trips and still lands on the registrable domain — the
+ * ungated write being `createTrackingConsent`'s own refresh `setItem`, not `reconcileTwin`'s
+ * `restoreTwin`, which is deliberately host-only and stays that way under a withheld gate.
  *
  * Lives here so the `as GrantedGate` cast stays in the module that owns the brand — minted
  * anywhere else it is indistinguishable from the wrapper-arrow laundering `consent-gate.test-d.ts`

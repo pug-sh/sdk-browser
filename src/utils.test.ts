@@ -380,18 +380,46 @@ describe('isStorageAvailable', () => {
     localStorage.removeItem('__pug___probe__')
   })
 
-  // The cost of per-call keys: a store whose removeItem persistently fails strands a new key per
-  // probe (~3 per init(), accumulating across visits, outside the retention envelope and every
-  // teardown). Later probes sweep the residue — but only keys that are demonstrably stale, because
-  // a fresh sibling may be another tab's probe in flight, and deleting it mid-probe fails that
-  // tab's read-back: the exact memory-only downgrade the per-call key exists to prevent. The
-  // timestamp rides the key, so staleness needs no value read.
+  // Reclaims residue an *earlier* failure stranded, once the store works again — it removes through
+  // the same removeItem, so it can never reclaim anything while removals are still failing (that is
+  // strandedProbeKey's job, below). Only demonstrably stale keys go: a fresh sibling may be another
+  // tab's probe in flight, and deleting it mid-probe fails that tab's read-back, the exact
+  // memory-only downgrade per-call keys exist to prevent. The timestamp rides the key, so staleness
+  // needs no value read.
   it('sweeps stale probe residue left by earlier failed removals', () => {
     localStorage.setItem('__pug___probe_0_stranded__', '1') // stamp 0 — decades stale
     localStorage.setItem('__pug___probe__', '1') // the pre-timestamp fixed key: no stamp, stale
     expect(isStorageAvailable()).toBe(true)
     expect(localStorage.getItem('__pug___probe_0_stranded__')).toBeNull()
     expect(localStorage.getItem('__pug___probe__')).toBeNull()
+  })
+
+  // A fresh key per probe would strand a new one per call on a store whose removeItem never lands
+  // (~2-3 per init(), accumulating across every visit, outside the retention envelope and every
+  // teardown) — and the sweep above cannot reclaim them, because it removes through that same
+  // failing removeItem. Reusing the key this tab already stranded is what actually bounds it: one
+  // key, overwritten in place, as main's fixed key did by accident.
+  it('strands at most one probe key when removals never land', () => {
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    for (let i = 0; i < 6; i++) {
+      expect(isStorageAvailable()).toBe(true)
+    }
+    // Storage's own API, not Object.keys — jsdom's Storage does not expose its keys as own
+    // enumerable properties, so Object.keys() comes back empty and the assertion passes vacuously.
+    const stranded = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(k =>
+      k?.startsWith('__pug___probe_'),
+    )
+    expect(stranded).toHaveLength(1)
+  })
+
+  // The cost of reusing a key: residue now sits where this run writes, so a constant probe value
+  // would read back as this run's own write and report a no-opping setItem as available — the exact
+  // fault the read-back exists to catch. A fresh token per call keeps the two distinguishable.
+  it('is not fooled by its own stranded residue when setItem later no-ops', () => {
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(true) // strands a key holding this run's token
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(false)
   })
 
   it('leaves a fresh concurrent probe key from another tab alone', () => {

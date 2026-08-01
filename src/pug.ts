@@ -252,6 +252,24 @@ const warnOnInsecureEndpoint = (endpoint: string): void => {
   }
 }
 
+/**
+ * Reports a failed `init()` phase without letting it escape — `init()` must not throw into a host
+ * application, and the SDK still runs (degraded) with the phase skipped.
+ *
+ * A `TypeError` here is one of the three consent-gate head guards firing (`createCookieLayer`,
+ * `configureSession`, `configureProfile`), which is an SDK wiring fault rather than a hostile
+ * browser, so it is reported at error and named as such. Without the split every one of those
+ * guards — whose whole purpose is to fail loud — arrived as a warn that reads like a blocked cookie
+ * store, while the SDK silently continued with no session or profile persistence.
+ */
+const reportInitFailure = (what: string, err: unknown): void => {
+  if (err instanceof TypeError) {
+    log.error(`Failed to ${what} — an SDK wiring error, not an environment failure:`, err)
+    return
+  }
+  log.warn(`Failed to ${what}:`, err)
+}
+
 export const init = (projectId: string, options: InitOptions) => {
   if (typeof window === 'undefined') {
     log.warn('init() called in a non-browser environment, skipping.')
@@ -295,7 +313,7 @@ export const init = (projectId: string, options: InitOptions) => {
       options.maxAgeDays,
     )
   } catch (err) {
-    log.warn('Failed to initialize persistence:', err)
+    reportInitFailure('initialize persistence', err)
   }
 
   // Before configureProfile, so its init-time expiry refresh can be gated on consent — no identity
@@ -306,13 +324,13 @@ export const init = (projectId: string, options: InitOptions) => {
   try {
     configureSession(projectId, options.session, store, trackingConsent.isGranted)
   } catch (err) {
-    log.warn('Failed to configure session tracking:', err)
+    reportInitFailure('configure session tracking', err)
   }
 
   try {
     configureProfile(projectId, store, trackingConsent.isGranted)
   } catch (err) {
-    log.warn('Failed to configure profile:', err)
+    reportInitFailure('configure profile', err)
   }
 
   warmUserAgentData(trackingConsent.isTracking)

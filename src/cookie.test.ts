@@ -566,7 +566,7 @@ describe('createCookieLayer', () => {
     expect(restore).toContain('; secure')
   })
 
-  it('warns when neither the promotion nor the restore lands, losing the twin', () => {
+  it('reports at error when neither the promotion nor the restore lands, losing the twin', () => {
     // The restore is the last copy anywhere — cross-subdomain reads have no localStorage fallback —
     // so a restore that also fails must not be silent.
     const jar = new CookieJar()
@@ -585,7 +585,10 @@ describe('createCookieLayer', () => {
     // Seeded through the real document — the dropping setter above must only affect SDK writes.
     real.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
     expect(grantedLayer(true, doc)?.get(KEY)).toBeNull()
-    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('restore'))
+    // Error, not warn: this only runs in cross-subdomain mode, where the twin was the sole copy and
+    // reads have no localStorage fallback — a confirmed loss, reported the way clearProfile()
+    // reports the same outcome.
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('restore'))
   })
 })
 
@@ -775,6 +778,68 @@ describe('consent gate on the twin promotion', () => {
     blockShared = true
     expect(layer?.set(KEY, persisted('anon-next'), 600)).toBe(false)
     expect(layer?.get(KEY)).toBe(stored)
+  })
+
+  it('puts the preserved twin back when the replacement write throws', () => {
+    // The read-back-mismatch path is covered above; a *throwing* jar reaches the same loss by a
+    // different route — the pre-write expiry has already landed, so without the catch's restore the
+    // twin is simply gone, and in cross-subdomain mode it was the sole copy. Deleting that restore
+    // block left the whole suite green before this case existed.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    let throwShared = false
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        // Only the domain-scoped replacement throws: the expiry (max-age=0) must land, or the twin
+        // would never be consumed and there would be nothing to restore.
+        if (throwShared && value.includes('domain=') && !value.includes('max-age=0')) {
+          throw new Error('blocked')
+        }
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    const stored = persisted('anon-legacy')
+    doc.cookie = `${KEY}=${encodeURIComponent(stored)}; path=/`
+    const layer = createCookieLayer(true, DENIED, doc)
+    layer?.get(KEY) // preserves the twin host-only
+
+    throwShared = true
+    expect(layer?.set(KEY, persisted('anon-next'), 600)).toBe(false)
+    expect(layer?.get(KEY)).toBe(stored)
+  })
+
+  it('does not resurrect a removed value through a later failed write', () => {
+    // remove() clears the preserved-twin registration, but only on a *confirmed* removal. Left
+    // behind, the registration outlives the teardown and the failed-write restore above puts the
+    // twin back — returning an identify()ed email to the device after optOutTracking()/reset()
+    // already reported success. Deleting `preservedTwins.delete(key)` left the suite green.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    let blockShared = false
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        if (blockShared && value.includes('domain=') && !value.includes('max-age=0')) return
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    doc.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
+    const layer = createCookieLayer(true, DENIED, doc)
+    layer?.get(KEY) // preserves the twin host-only
+
+    expect(layer?.remove(KEY)).toBe(true)
+    expect(layer?.get(KEY)).toBeNull()
+
+    blockShared = true
+    expect(layer?.set(KEY, persisted('anon-next'), 600)).toBe(false)
+    expect(layer?.get(KEY)).toBeNull() // the teardown holds — nothing came back
   })
 
   // A preserved twin was created before any shared cookie, so RFC 6265 sorts it first in
