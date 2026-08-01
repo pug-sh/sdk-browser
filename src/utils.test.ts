@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   configureUrlRedaction,
   decodeStored,
   encodeStored,
   getSafeElementText,
   isCaptureSuppressed,
+  isStorageAvailable,
   makeStorageKey,
   scrubUrl,
 } from './utils.js'
@@ -25,6 +26,25 @@ describe('the retention envelope', () => {
     expect(decodeStored('anon-legacy')).toBeNull()
     expect(decodeStored('|no-deadline')).toBeNull()
     expect(decodeStored('notanumber|v')).toBeNull()
+  })
+
+  // Everything the brand is cited for assumes an envelope decodes: CookieLayer.set requires it so a
+  // bare value cannot reach the cookie layer, and readItem treats an undecodable value as a
+  // pre-envelope legacy one. A non-finite deadline satisfied the brand and failed decodeStored, so
+  // the two disagreed — and getItemOrLegacy, which exists to *adopt* an undecodable value, would
+  // have handed a corrupt write back as a recorded consent choice. Unreachable today (setItem's
+  // Math.min has finite operands by construction), which is exactly why it needs pinning here
+  // rather than a note that it cannot happen.
+  it('never mints an envelope its own decoder rejects', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(decodeStored(encodeStored('anon-123', bad))).not.toBeNull()
+    }
+  })
+
+  it('stamps an unusable deadline as already expired rather than never expiring', () => {
+    // The safe direction of the clamp: the value is dropped on its next read, which is what an
+    // undecodable one did anyway. Never-expiring would be the failure that outlives every teardown.
+    expect(decodeStored(encodeStored('anon-123', Number.POSITIVE_INFINITY))?.expiresAt).toBe(0)
   })
 })
 
@@ -84,6 +104,29 @@ describe('scrubUrl', () => {
     )
     expect(scrubUrl('https://x.com/cb#id_token=abc&redirect_uri=https://x.com/next')).toBe(
       'https://x.com/cb#id_token=redacted&redirect_uri=https%3A%2F%2Fx.com%2Fnext',
+    )
+  })
+
+  // Query and fragment are redacted by two separate matchers joined by one "unchanged" protocol, and
+  // every case above exercises exactly one of them — so returning early after the first match, or
+  // dropping either call, passed the whole suite. An OIDC callback that carries both is the real
+  // shape: the authorization code in the query, the token in the fragment.
+  it('redacts query and fragment in the same URL', () => {
+    expect(scrubUrl('https://x.com/cb?code=abc&page=2#access_token=xyz&state=ok')).toBe(
+      'https://x.com/cb?code=redacted&page=2#access_token=redacted&state=ok',
+    )
+  })
+
+  it('redacts one side without disturbing an unmatched other side', () => {
+    expect(scrubUrl('https://x.com/cb?page=2#access_token=xyz')).toBe('https://x.com/cb?page=2#access_token=redacted')
+    expect(scrubUrl('https://x.com/cb?token=abc#/orders/42')).toBe('https://x.com/cb?token=redacted#/orders/42')
+  })
+
+  // The same combination on the fail-closed path — scrubOpaque has its own pair of calls, so the
+  // parseable case above pins neither of them.
+  it('redacts query and fragment together when the URL does not parse', () => {
+    expect(scrubUrl('http://ex ample.com/cb?code=abc&page=2#access_token=xyz')).toBe(
+      'http://ex ample.com/cb?code=redacted&page=2#access_token=redacted',
     )
   })
 
@@ -205,6 +248,22 @@ describe('safeStringify', () => {
       }),
     ).toBe('[unrepresentable]') // even String() throwing must not escape a log call
   })
+
+  // JSON.stringify maps the non-finite numbers to the *string* "null", not to undefined, so the
+  // `?? String(value)` fallback never fired for them. Every caller here interpolates a value it is
+  // in the middle of rejecting, and these are the headline rejections: `Infinity` is what
+  // JSON.parse yields for the `1e999` a data-options config can carry, and it is named by hand in
+  // the comment above batch's validator as the value that disabled the queue bound. Reported as
+  // "null" it named the *other* documented case, sending an integrator to look for a null they
+  // never wrote.
+  it('names the non-finite numbers rather than reporting them as null', async () => {
+    const { safeStringify } = await import('./utils.js')
+    expect(safeStringify(Number.POSITIVE_INFINITY)).toBe('Infinity')
+    expect(safeStringify(Number.NEGATIVE_INFINITY)).toBe('-Infinity')
+    expect(safeStringify(Number.NaN)).toBe('NaN')
+    // A real null still reads as null — the two cases are distinguishable again, which is the point.
+    expect(safeStringify(null)).toBe('null')
+  })
 })
 
 describe('makeStorageKey', () => {
@@ -305,5 +364,213 @@ describe('getSafeElementText', () => {
 
   it('treats contenteditable with no value as editable', () => {
     expect(getSafeElementText(el('<div contenteditable=""><p id="t">draft</p></div>'), 50)).toBe('')
+  })
+})
+
+describe('isStorageAvailable', () => {
+  // `strandedProbeKey` is module-level mutable state and this is the only block that drives it, so
+  // without a reset the tests below inherit a key from whichever ran first — and one of them
+  // ("is not fooled by a stale probe value") then passes by a different mechanism than the one its
+  // comment names. Uniquely among the suites that touch localStorage, this block also had no
+  // clear(), while asserting on the device's probe-key contents.
+  beforeEach(() => {
+    localStorage.clear()
+    // Releases any retained stranded key: its residue is gone, so the removal read-back lands and
+    // the module returns to per-call keys. Then clear this probe's own leavings.
+    isStorageAvailable()
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const PROBE_PREFIX = '__pug___probe_'
+  const probeKeys = () =>
+    Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(k => k?.startsWith(PROBE_PREFIX))
+
+  // Instance spies, not Storage.prototype: in this jsdom environment a prototype-level spy never
+  // fires, so the faults below would never be injected — the negative cases would fail against a
+  // healthy store instead of exercising the fault they name, and the positive ones would pass
+  // vacuously.
+  it('reports available for a working store', () => {
+    expect(isStorageAvailable()).toBe(true)
+  })
+
+  it('reports unavailable when the store throws', () => {
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError')
+    })
+    expect(isStorageAvailable()).toBe(false)
+  })
+
+  // The shim adversary: a Storage proxy (privacy extension, a partial polyfill) that accepts every
+  // call and stores nothing. Without the probe reading back, the store treated it as usable and
+  // every later write reported success while nothing survived — and the store's own setItem cannot
+  // afford a per-write read-back, since it is on the per-event session path.
+  it('reports unavailable when the store silently no-ops writes', () => {
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(false)
+  })
+
+  // Deliberately still available: a removal that no-ops is a narrower fault than a write that does
+  // — values still persist — and PersistentStore.removeItem verifies removals per call. Failing the
+  // whole layer here would downgrade the default install to memory-only, i.e. a fresh anonymous ID
+  // and session on every page load, over a teardown defect.
+  it('still reports available when only removals no-op', () => {
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(true)
+  })
+
+  // A fixed probe key let residue from an earlier failed run read back as this run's own write, so
+  // a store that no-ops setItem reported available — the exact fault the read-back exists to catch.
+  // The per-call key closes it by construction: the seeded residue can never be at this run's key.
+  it('is not fooled by a stale probe value left on the device', () => {
+    localStorage.setItem('__pug___probe__', '1')
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(false)
+    localStorage.removeItem('__pug___probe__')
+  })
+
+  // Reclaims residue an *earlier* failure stranded, once the store works again — it removes through
+  // the same removeItem, so it can never reclaim anything while removals are still failing (that is
+  // strandedProbeKey's job, below). Only demonstrably stale keys go: a fresh sibling may be another
+  // tab's probe in flight, and deleting it mid-probe fails that tab's read-back, the exact
+  // memory-only downgrade per-call keys exist to prevent. The timestamp rides the key, so staleness
+  // needs no value read.
+  it('sweeps stale probe residue left by earlier failed removals', () => {
+    localStorage.setItem('__pug___probe_0_stranded__', '1') // stamp 0 — decades stale
+    localStorage.setItem('__pug___probe__', '1') // the pre-timestamp fixed key: no stamp, stale
+    expect(isStorageAvailable()).toBe(true)
+    expect(localStorage.getItem('__pug___probe_0_stranded__')).toBeNull()
+    expect(localStorage.getItem('__pug___probe__')).toBeNull()
+  })
+
+  // A fresh key per probe would strand a new one per call on a store whose removeItem never lands
+  // (~2-3 per init(), accumulating across every visit, outside the retention envelope and every
+  // teardown) — and the sweep above cannot reclaim them, because it removes through that same
+  // failing removeItem. Reusing the key this tab already stranded is what actually bounds it: one
+  // key, overwritten in place, as main's fixed key did by accident.
+  it('strands at most one probe key when removals never land', () => {
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    for (let i = 0; i < 6; i++) {
+      expect(isStorageAvailable()).toBe(true)
+    }
+    // Storage's own API, not Object.keys — jsdom's Storage does not expose its keys as own
+    // enumerable properties, so Object.keys() comes back empty and the assertion passes vacuously.
+    const stranded = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(k =>
+      k?.startsWith('__pug___probe_'),
+    )
+    expect(stranded).toHaveLength(1)
+  })
+
+  // The cost of reusing a key: residue now sits where this run writes, so a constant probe value
+  // would read back as this run's own write and report a no-opping setItem as available — the exact
+  // fault the read-back exists to catch. A fresh token per call keeps the two distinguishable.
+  it('is not fooled by its own stranded residue when setItem later no-ops', () => {
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(true) // strands a key holding this run's token
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {})
+    expect(isStorageAvailable()).toBe(false)
+  })
+
+  it('leaves a fresh concurrent probe key from another tab alone', () => {
+    const rival = `__pug___probe_${Date.now().toString(36)}_rival__`
+    localStorage.setItem(rival, '1')
+    expect(isStorageAvailable()).toBe(true)
+    expect(localStorage.getItem(rival)).toBe('1')
+    localStorage.removeItem(rival)
+  })
+
+  // Every removeItem fixture above is a silent no-op; none throws. That one omission left the whole
+  // throwing-removal half of this function untested — the catch that strands the key, and the
+  // separate try around the sweep.
+  it('strands at most one probe key when removals throw rather than no-op', () => {
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('proxied Storage')
+    })
+    for (let i = 0; i < 4; i++) {
+      expect(isStorageAvailable()).toBe(true)
+    }
+    // The catch's `strandedProbeKey = key`: without it each call mints and abandons a fresh key,
+    // accumulating across every visit outside the retention envelope and every teardown.
+    expect(probeKeys()).toHaveLength(1)
+  })
+
+  it('still sweeps reclaimable residue when its own removal throws', () => {
+    // The sweep sits in its own try deliberately: sharing the removal's meant a throwing removeItem
+    // skipped the sweep entirely — in exactly the failure mode that strands keys for it to reclaim.
+    // Only this probe's own removal throws here, so the sweep's removals can still land.
+    const realRemove = localStorage.removeItem.bind(localStorage)
+    localStorage.setItem(`${PROBE_PREFIX}0_reclaimable__`, '1') // stamp 0 — decades stale
+    vi.spyOn(localStorage, 'removeItem').mockImplementation((k: string) => {
+      if (k.includes('_reclaimable__')) {
+        return realRemove(k)
+      }
+      throw new Error('proxied Storage')
+    })
+
+    expect(isStorageAvailable()).toBe(true)
+
+    expect(localStorage.getItem(`${PROBE_PREFIX}0_reclaimable__`)).toBeNull()
+  })
+
+  it('returns to a fresh key once a removal lands again', () => {
+    // The release half of the reuse: "cleared by the first removal that lands, so a store that
+    // recovers returns to per-call keys". Pinning it stops the reuse quietly becoming permanent,
+    // which would put every later probe back on one shared key — the fixed-key fault the per-call
+    // key exists to close.
+    const realRemove = localStorage.removeItem.bind(localStorage)
+    const setSpy = vi.spyOn(localStorage, 'setItem')
+    const rmSpy = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+
+    isStorageAvailable()
+    isStorageAvailable()
+    const stranded = setSpy.mock.calls[0]?.[0]
+    expect(setSpy.mock.calls[1]?.[0]).toBe(stranded) // reused while removals do not land
+
+    // Heal by swapping the implementation, not mockRestore(): restore does not reliably re-attach
+    // over jsdom's Storage proxy, as persistence.test.ts documents.
+    rmSpy.mockImplementation((k: string) => realRemove(k))
+    isStorageAvailable() // this removal lands and releases the reuse
+    isStorageAvailable()
+
+    expect(setSpy.mock.calls[3]?.[0]).not.toBe(stranded)
+  })
+
+  it('sweeps a probe key just past the staleness window but not one just inside it', () => {
+    // The constant guards a real concurrency hazard — a fresh sibling may be another tab's probe in
+    // flight, and deleting it mid-probe fails that tab's read-back. Both existing cases sit at the
+    // extremes (stamp 0, i.e. decades stale, and Date.now(), i.e. 0ms), so widening PROBE_STALE_MS
+    // by a thousandfold changed nothing anywhere.
+    vi.useFakeTimers()
+    try {
+      const now = 1_700_000_000_000
+      vi.setSystemTime(now)
+      const inside = `${PROBE_PREFIX}${(now - 4_999).toString(36)}_sibling__`
+      const outside = `${PROBE_PREFIX}${(now - 5_001).toString(36)}_abandoned__`
+      localStorage.setItem(inside, '1')
+      localStorage.setItem(outside, '1')
+
+      expect(isStorageAvailable()).toBe(true)
+
+      expect(localStorage.getItem(inside)).toBe('1')
+      expect(localStorage.getItem(outside)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The other fixed-key fault ran in the opposite direction: two tabs probing at once clobbered each
+  // other's value on the shared key and both reported a working store unavailable — memory-only
+  // persistence for both page loads. The rival write below lands where a fixed-key probe would read.
+  it('is not failed by a concurrent probe from another tab', () => {
+    const realSet = localStorage.setItem.bind(localStorage)
+    vi.spyOn(localStorage, 'setItem').mockImplementation((k: string, v: string) => {
+      realSet(k, v)
+      realSet('__pug___probe__', 'other-tab-nonce')
+    })
+    expect(isStorageAvailable()).toBe(true)
+    localStorage.removeItem('__pug___probe__')
   })
 })

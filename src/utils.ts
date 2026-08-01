@@ -25,27 +25,35 @@ export const SECONDS_PER_DAY = 24 * 60 * 60
 export const DEFAULT_MAX_AGE_DAYS = 365
 
 /**
- * The retention envelope every persisted value is wrapped in: `<expiry epoch ms>|<value>`. The
- * deadline is stamped once, at the first write, so refreshing a value cannot extend how long it is
- * kept — localStorage has no expiry of its own, so without this the default install kept identity
- * forever.
- *
- * Lives in this import-free module rather than `persistence.ts`, which owns the layering: the suites
- * that assert against raw storage need to spell the format, and importing it from there would drag
- * `logger.js` into each of them, where a `vi.mock` factory is hoisted above its own spies.
- */
-/**
  * An enveloped stored string, as opposed to a bare value. The brand keeps the two apart at the
- * persistence↔cookie seam: `CookieLayer.set()` accepts only enveloped strings, because a bare value
- * written through it reads as undecodable and is deleted by the store's next `getItem` — silent
- * identity loss with no compile error. Reads stay unbranded (`string`): what comes back off the
- * device is not trustworthy enough to carry the brand.
+ * persistence↔cookie seam: `CookieLayer.set()` and the store's localStorage write accept only
+ * enveloped strings, because a bare value written through either reads as undecodable and is
+ * deleted by the store's next `getItem` — silent identity loss with no compile error. Reads stay
+ * unbranded (`string`): what comes back off the device is not trustworthy enough to carry the brand.
  */
 export type StoredEnvelope = string & { readonly __envelope: true }
 
+/**
+ * Wraps a value in the retention envelope every persisted value carries:
+ * `<expiry epoch ms>|<value>`. The deadline is stamped once, at the first write, so refreshing a
+ * value cannot extend how long it is kept — localStorage has no expiry of its own, so without this
+ * the default install kept identity forever.
+ *
+ * The codec lives in this import-free module rather than in `persistence.ts`, which owns the
+ * layering: the suites that assert against raw storage need to spell the format, and importing it
+ * from there would drag `logger.js` into each of them, where a `vi.mock` factory is hoisted above
+ * its own spies.
+ */
 export const encodeStored = (value: string, expiresAt: number): StoredEnvelope =>
-  `${expiresAt}|${value}` as StoredEnvelope
+  // Clamped so the brand cannot outrun the decoder. A non-finite deadline stamps `NaN|v` or
+  // `Infinity|v` — branded, and rejected by decodeStored — which readItem then reads as a
+  // *pre-envelope* value, so getItemOrLegacy would hand a corrupt write back as a recorded consent
+  // choice. 0 rather than a throw or a silent skip: this module imports nothing (no logger), the
+  // callers promise not to throw, and an already-expired stamp is dropped on the next read, which
+  // is what the undecodable value did anyway. The unsafe direction would be never expiring.
+  `${Number.isFinite(expiresAt) ? expiresAt : 0}|${value}` as StoredEnvelope
 
+/** Unwraps `encodeStored`'s envelope; null for a bare pre-envelope value or a malformed one. */
 export const decodeStored = (raw: string | null): { value: string; expiresAt: number } | null => {
   if (raw === null) {
     return null
@@ -278,6 +286,14 @@ export const urlBase64ToUint8Array = (base64String: string): Uint8Array<ArrayBuf
  * through to String() rather than interpolating as the literal text "undefined" of a missing value.
  */
 export const safeStringify = (value: unknown): string => {
+  // Ahead of JSON.stringify, which maps these to the *string* "null" rather than to undefined, so
+  // the fallback below never saw them. Every caller is interpolating a value it is rejecting, and
+  // `Infinity` — what JSON.parse gives for a `1e999` in data-options JSON — is named by hand in
+  // batch's validator as the value that disabled the queue bound. Reported as "null" it named the
+  // other documented rejection instead.
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    return String(value)
+  }
   try {
     return JSON.stringify(value) ?? String(value)
   } catch {
@@ -289,14 +305,104 @@ export const safeStringify = (value: unknown): string => {
   }
 }
 
+// Shared by the probe-key writer and the sweep below so the two cannot drift; same shape
+// makeStorageKey('_', 'probe_…') produced, stated once. The leading timestamp is what lets the
+// sweep judge staleness without reading a value.
+const PROBE_KEY_PREFIX = '__pug___probe_'
+// Far beyond a probe's real lifetime (sub-millisecond): anything older was stranded by a failed
+// removal, not left by a probe in flight.
+const PROBE_STALE_MS = 5000
+
+/**
+ * The probe key an earlier call wrote and could not remove, reused by every later probe for as long
+ * as it survives. This — not the sweep below — is what bounds probe residue: on a store whose
+ * `removeItem` persistently no-ops, the sweep reclaims nothing, because it removes through that same
+ * failing `removeItem`. The only way not to accumulate keys there is not to mint them, so the one
+ * stranded key gets overwritten in place instead of joined by a fresh one per call (~2-3 per
+ * `init()`, accumulating across every visit, outside the retention envelope and every teardown).
+ *
+ * Reuse cannot collide across tabs: each tab minted its own key before stranding it, so two tabs
+ * hold different ones and neither can clobber the other's probe. What reuse *does* expose is residue
+ * at the same key from this tab's earlier failed removal, which is why the probe writes a fresh
+ * token per call rather than a constant — read back, a stale token is not this run's own write and a
+ * no-opping `setItem` is still caught.
+ *
+ * Cleared by the first removal that lands, so a store that recovers returns to per-call keys.
+ */
+let strandedProbeKey: string | null = null
+
+/**
+ * Reclaims probe keys stranded by earlier failed removals. Effective only *after* a store recovers —
+ * while removals are still failing this sweep's own removals fail identically — which is why
+ * `strandedProbeKey` above, rather than this, is what actually bounds the residue.
+ *
+ * Only demonstrably stale keys are swept: a fresh sibling may be another tab's probe in flight, and
+ * deleting it mid-probe would fail that tab's read-back — the exact memory-only downgrade the
+ * per-call key exists to prevent. A key without a parseable stamp is stale by construction; that is
+ * the fixed `__pug___probe__` key older builds used, and sweeping one mid-probe costs them nothing,
+ * since no shipped build ever read its probe back (all of them returned true unconditionally).
+ */
+const sweepStaleProbeKeys = (currentKey: string): void => {
+  // Backwards: removals shift the indices above them.
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i)
+    if (!k || k === currentKey || !k.startsWith(PROBE_KEY_PREFIX)) {
+      continue
+    }
+    const stamp = Number.parseInt(k.slice(PROBE_KEY_PREFIX.length), 36)
+    if (!Number.isFinite(stamp) || Date.now() - stamp > PROBE_STALE_MS) {
+      try {
+        localStorage.removeItem(k)
+      } catch {
+        // Per key, so one unremovable entry cannot abort the rest of the sweep.
+      }
+    }
+  }
+}
+
 export const isStorageAvailable = (): boolean => {
+  // Freshness rides both the key and the value, and each closes a different fault. The key: two tabs
+  // probing a shared name concurrently would clobber each other's value and both report a working
+  // store unavailable, downgrading two page loads to memory-only. The value: residue from an earlier
+  // failed removal at *this tab's own* key — reachable whenever `strandedProbeKey` is reused — would
+  // otherwise read back as this run's write and report a no-opping `setItem` as available, which is
+  // the exact fault the read-back exists to catch.
+  const token = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`
+  const key = strandedProbeKey ?? `${PROBE_KEY_PREFIX}${token}__`
   try {
     const s = localStorage
-    const key = makeStorageKey('_', 'probe')
-    s.setItem(key, '1')
-    s.removeItem(key)
-    return true
+    s.setItem(key, token)
+    // Verify the write only. A shim that no-ops setItem stores nothing while reporting success, so
+    // every later write would lie; that is a property of the Storage object, not of a key, which is
+    // why it is checked here rather than on the store's per-event write path. A removal that no-ops
+    // is a narrower fault — values still persist — and PersistentStore.removeItem verifies that one
+    // per call, so failing the whole layer on it would turn a teardown defect into total identity
+    // loss: no session, no anonymous ID, a fresh identity every page load.
+    return s.getItem(key) === token
   } catch {
     return false
+  } finally {
+    try {
+      localStorage.removeItem(key)
+      // Learn whether removals land here. A key that survives is reused by the next probe rather
+      // than joined by a fresh one; a removal that lands releases the reuse. Reuse is safe on its
+      // own because freshness rides the *value*: the residue at a reused key is an earlier call's
+      // token, so a store that also starts no-opping setItem still fails the `=== token` read-back
+      // above rather than matching its own leftovers. See the header comment on that read-back —
+      // the per-call key and the per-call token close different faults, and this is the one the
+      // token closes.
+      strandedProbeKey = localStorage.getItem(key) === null ? null : key
+    } catch {
+      // Name it again next time rather than stranding another: a probe that never landed costs
+      // nothing to reuse, and one that did is now the only key this store will accumulate.
+      strandedProbeKey = key
+    }
+    // Its own try, deliberately: sharing the removal's meant a throwing removeItem skipped the
+    // sweep entirely — in exactly the failure mode that strands keys for it to reclaim later.
+    try {
+      sweepStaleProbeKeys(key)
+    } catch {
+      // Opportunistic: a store that is still failing sweeps nothing this time.
+    }
   }
 }

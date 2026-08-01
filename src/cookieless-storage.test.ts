@@ -25,9 +25,11 @@ const { rotate } = await import('./session.js')
  * The write/remove sentinel isStorageAvailable() uses to probe localStorage. It is a capability
  * probe, not data: written and removed synchronously, never carrying a value about the user, and
  * exactly analogous to the cookie layer's `max-age=3` probe. Excluded from the write assertions
- * below on that basis — but excluded *by name*, so anything else the SDK writes still fails.
+ * below on that basis — by shape rather than exact name, since the key carries a per-call nonce
+ * (a fixed key let concurrent tabs clobber each other's probe) — so anything else the SDK writes
+ * still fails.
  */
-const PROBE_KEY = makeStorageKey('_', 'probe')
+const PROBE_KEY_PREFIX = makeStorageKey('_', 'probe').replace(/__$/, '_')
 
 /**
  * Records every localStorage mutation as it happens.
@@ -45,6 +47,9 @@ const PROBE_KEY = makeStorageKey('_', 'probe')
 const recordDeviceWrites = () => {
   const writes: string[] = []
   const removals: string[] = []
+  // The raw `document.cookie` assignment strings, for assertions about *attributes* — jsdom's
+  // read-back strips them, so `domain=` is otherwise unobservable. Same exclusions as `writes`.
+  const cookieWrites: string[] = []
   const realSet = localStorage.setItem.bind(localStorage)
   const realRemove = localStorage.removeItem.bind(localStorage)
 
@@ -61,13 +66,14 @@ const recordDeviceWrites = () => {
       const isDeletion = /max-age=0|expires=Thu, 01 Jan 1970/i.test(value)
       if (!isDeletion && !name.startsWith('__pug_probe_')) {
         writes.push(`cookie:${name}`)
+        cookieWrites.push(String(value))
       }
       set.call(document, value)
     })
     vi.spyOn(document, 'cookie', 'get').mockImplementation(() => get.call(document) as string)
   }
   vi.spyOn(localStorage, 'setItem').mockImplementation((key: string, value: string) => {
-    if (key !== PROBE_KEY) {
+    if (!key.startsWith(PROBE_KEY_PREFIX)) {
       writes.push(key)
     }
     realSet(key, value)
@@ -76,13 +82,13 @@ const recordDeviceWrites = () => {
     removals.push(key)
     realRemove(key)
   })
-  return { writes, removals }
+  return { writes, removals, cookieWrites }
 }
 
 /** jsdom's Storage exposes its methods as own enumerable properties, so Object.keys() is useless here. */
 const storedKeys = (): string[] =>
   Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(
-    (k): k is string => k !== null && k !== PROBE_KEY,
+    (k): k is string => k !== null && !k.startsWith(PROBE_KEY_PREFIX),
   )
 
 const sentEvents = () => sendBatch.mock.calls.flatMap(call => (call as unknown as [unknown[]])[0])
@@ -409,9 +415,10 @@ describe('cookieless storage silence', () => {
   // identity every load / wipe a whole user base on deploy day). It does not transfer: the queue is
   // an outbound buffer, not an identifier anything reads back, so purging it can never mint one.
   //
-  // `persist` defaults to false, so isAuthoritative() is false for the bare-string form the README's
-  // CMP recipe produces — leaving a prior consented visit's queue on the device, to be beaconed on
-  // the next pagehide while consent reads 'denied'.
+  // `persist` defaults to false, so isAuthoritative() is false for any config that omits it — a bare
+  // `'denied'`/`'cookieless'` string, or the `{ initial, persist: false }` form in
+  // examples/cdn/index.html — leaving a prior consented visit's queue on the device, to be beaconed
+  // on the next pagehide while consent reads 'denied'.
   const leaveQueueOnDevice = async (p: string) => {
     await bufferOneConsentedEvent(p)
     // A failing beacon stops destroy() draining the queue itself, which would make this vacuous.
@@ -428,9 +435,15 @@ describe('cookieless storage silence', () => {
     const p = 'proj-leftover-denied'
     await leaveQueueOnDevice(p)
 
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     init(p, { apiKey: 'k', trackingConsent: 'denied', autoCapture: false })
 
     expect(localStorage.getItem(makeStorageKey(p, 'queue'))).toBeNull()
+    // The destruction warning, with the real per-queue count: the (ok, destroyed) × send quadrants
+    // are pinned against a mocked transport in pug.test.ts, so this is the one place the warning
+    // rides the real queue's answer end to end.
+    expect(warnSpy.mock.calls.map(c => c.join(' ')).join('\n')).toContain('Dropped 1 queued event(s)')
+    warnSpy.mockRestore()
   })
 
   // The leftover queue leaves the device unsent — purgeQueue({ send: false })'s documented contract
@@ -562,5 +575,106 @@ describe('tab registry re-arm guard', () => {
 
     optInTracking() // granted -> granted: the guard's only purpose
     expect(Object.keys(JSON.parse(localStorage.getItem(tabsKey) ?? '{}'))).toHaveLength(1)
+  })
+
+  // The mirror of "keeps the cookieless queue across a consent re-assert that changes nothing".
+  // That case pinned the cookieless half; the granted half lived only in its comment, and a
+  // regression making granted->granted run the identity purge + queue drop was invisible to the
+  // entire suite before this test. CMPs re-fire their callback on every page load, so it would
+  // fragment identity and destroy the queued events of every returning consented visitor, silently.
+  it('keeps identity and the queued events across a granted -> granted re-assert', async () => {
+    vi.useFakeTimers()
+    const p = 'proj-reassert-granted'
+    sendBatch.mockRejectedValue(new RpcError('down', GrpcCode.Unavailable))
+    init(p, { apiKey: 'k', trackingConsent: 'granted', autoCapture: false, batch: { maxWaitMs: 100 } })
+    track('purchase', { amount: 42 })
+    await vi.advanceTimersByTimeAsync(1500)
+
+    const profile = localStorage.getItem(makeStorageKey(p, 'profile'))
+    const session = localStorage.getItem(makeStorageKey(p, 'session'))
+    expect(profile).not.toBeNull()
+    expect(localStorage.getItem(makeStorageKey(p, 'queue'))).not.toBeNull()
+
+    expect(optInTracking()).toBe(true) // same state, changes nothing
+
+    expect(storedValue(localStorage.getItem(makeStorageKey(p, 'profile')))).toBe(storedValue(profile))
+    expect(storedValue(localStorage.getItem(makeStorageKey(p, 'session')))).toBe(storedValue(session))
+    expect(localStorage.getItem(makeStorageKey(p, 'queue'))).not.toBeNull()
+  })
+})
+
+describe('cookie-layer consent gate', () => {
+  // reconcileTwin() promotes a lone host-only cookie onto the registrable domain — the one identity
+  // *write* that happens on the read path, and the one the consent gates missed: configureProfile
+  // reads external_id unconditionally (only its refresh write was gated), so a denied or cookieless
+  // init widened an identify()ed email to every sibling subdomain, and a non-authoritative seed
+  // never purged it back off.
+  const seedHostOnlyTwin = (p: string, value: string): void => {
+    const key = makeStorageKey(p, 'external_id')
+    document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(persisted(value))}; path=/; SameSite=Lax; secure; max-age=86400`
+  }
+
+  /** The writes that widen a cookie to the registrable domain — the ones the gate must prevent. */
+  const sharedWrites = (cookieWrites: string[]): string[] => cookieWrites.filter(w => w.includes('domain='))
+
+  it('does not promote a host-only identity twin while consent is not granted', () => {
+    const p = 'proj-twin-gate'
+    seedHostOnlyTwin(p, 'user@example.com')
+
+    const { cookieWrites } = recordDeviceWrites()
+    init(p, { apiKey: 'k', crossSubdomainTracking: true, autoCapture: false })
+
+    expect(sharedWrites(cookieWrites)).toEqual([])
+  })
+
+  // The control: without it the assertion above also passes for a layer that never promotes at
+  // all. It cannot distinguish the promotion from configureProfile's refresh write, though — both
+  // land the value with domain= — so the wiring test below pins the gate through the restore write
+  // instead.
+  it('still promotes it once consent is granted (control)', () => {
+    const p = 'proj-twin-granted'
+    seedHostOnlyTwin(p, 'user@example.com')
+
+    const { cookieWrites } = recordDeviceWrites()
+    init(p, { apiKey: 'k', trackingConsent: 'granted', crossSubdomainTracking: true, autoCapture: false })
+
+    expect(
+      sharedWrites(cookieWrites).some(w => w.includes('user%40example.com') && w.includes('domain=.example.test')),
+    ).toBe(true)
+  })
+
+  // The deferred gate is wired to the live controller by one assignment in init()
+  // (`consentRef = trackingConsent`); severed, it reads not-granted forever and the twin goes back
+  // host-only even under granted consent. The control above cannot see that — configureProfile's
+  // gated refresh write also lands the value with domain=, and it takes the *directly passed*
+  // predicate, not the deferred gate — so the host-only restore write, which exists only on the
+  // not-granted arm, is what distinguishes severed from wired.
+  it('does not restore the twin host-only under granted consent (deferred-gate wiring)', () => {
+    const p = 'proj-twin-wiring'
+    seedHostOnlyTwin(p, 'user@example.com')
+
+    const { cookieWrites } = recordDeviceWrites()
+    init(p, { apiKey: 'k', trackingConsent: 'granted', crossSubdomainTracking: true, autoCapture: false })
+
+    const hostOnlyValueWrites = cookieWrites.filter(w => w.includes('user%40example.com') && !w.includes('domain='))
+    expect(hostOnlyValueWrites).toEqual([])
+  })
+
+  // The gate covers the promotion only. Expiring a stale twin is a *deletion*, and configureProfile
+  // reads external_id once and latches it for the page — so if the gate skipped that too, a stale
+  // twin would win the read and become the distinctId after a mid-page grant.
+  it('still expires a stale twin shadowing the shared cookie while consent is not granted', () => {
+    const p = 'proj-twin-shadow'
+    const key = makeStorageKey(p, 'external_id')
+    // Host-only first so it sorts ahead of the shared cookie in document.cookie.
+    document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(persisted('stale@example.com'))}; path=/; SameSite=Lax; secure; max-age=86400`
+    document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(persisted('current@example.com'))}; path=/; domain=.example.test; SameSite=Lax; secure; max-age=86400`
+
+    const { cookieWrites } = recordDeviceWrites()
+    init(p, { apiKey: 'k', crossSubdomainTracking: true, autoCapture: false })
+
+    expect(sharedWrites(cookieWrites)).toEqual([])
+    expect(document.cookie).not.toContain('stale%40example.com')
+    expect(document.cookie).toContain('current%40example.com')
   })
 })

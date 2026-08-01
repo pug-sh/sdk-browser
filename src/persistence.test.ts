@@ -116,7 +116,7 @@ describe('createPersistentStore', () => {
     expect(storedValue(localStorage.getItem('k'))).toBe('v')
   })
 
-  it('warns when localStorage still holds a value after removal', () => {
+  it('reports an error when localStorage still holds a value after removal', () => {
     // The exact adversary the read-back exists for — a shimmed store that no-ops without throwing.
     // The cross-subdomain return value deliberately excludes this layer, so without a log the
     // residue is invisible everywhere.
@@ -126,7 +126,7 @@ describe('createPersistentStore', () => {
     vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
     expect(store?.removeItem('k')).toBe(true)
     store?.removeItem('k')
-    expect(logSpies.warn.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
   })
 
   it('warns once when a cross-subdomain cookie write is silently dropped', () => {
@@ -207,7 +207,25 @@ describe('createPersistentStore', () => {
       throw new Error('boom')
     })
     expect(store?.removeItem('k')).toBe(false)
-    expect(logSpies.warn).toHaveBeenCalledWith('Failed to remove "k" from localStorage:', expect.any(Error))
+  })
+
+  it('reports a throwing localStorage removal at error level with the residue consequence, once per key', () => {
+    // Same device outcome as the silent no-op case above — the identifier survives the teardown —
+    // so the same level and the same consequence sentence: the mechanism of failure does not pick
+    // the severity (batch.ts's purge states the rule). At warn, the throw arm was the one teardown
+    // failure the codebase reported below error — and in cross-subdomain mode the return value
+    // deliberately excludes this layer, so this log is the only signal anywhere. Once per key, like
+    // its no-op sibling: dropStale runs removeItem on every read of a lapsed value, so a
+    // persistently-throwing store would otherwise re-log per tracked event.
+    const { layer } = createFakeCookieLayer(false)
+    const store = createPersistentStore(layer)
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('SecurityError')
+    })
+    expect(store?.removeItem('k')).toBe(false)
+    store?.removeItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('residue remains'))).toHaveLength(1)
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('Failed to remove "k"'), expect.anything())
   })
 
   it('reports success when only the cookie write lands', () => {
@@ -458,7 +476,7 @@ describe('retention', () => {
     // re-persists it through setItem, which stamps a fresh envelope.
     const store = createPersistentStore(null)
     localStorage.setItem('k', 'denied')
-    expect(store?.getItem('k', { legacy: 'adopt' })).toBe('denied')
+    expect(store?.getItemOrLegacy('k')).toBe('denied')
     expect(localStorage.getItem('k')).toBeNull()
   })
 
@@ -467,14 +485,14 @@ describe('retention', () => {
     // adopt widens only the undecodable arm.
     const store = createPersistentStore(null)
     localStorage.setItem('k', persisted('v', -60_000))
-    expect(store?.getItem('k', { legacy: 'adopt' })).toBeNull()
+    expect(store?.getItemOrLegacy('k')).toBeNull()
     expect(localStorage.getItem('k')).toBeNull()
   })
 
   it('reads a live enveloped value under adopt exactly like a plain read', () => {
     const store = createPersistentStore(null)
     localStorage.setItem('k', persisted('v'))
-    expect(store?.getItem('k', { legacy: 'adopt' })).toBe('v')
+    expect(store?.getItemOrLegacy('k')).toBe('v')
     expect(storedValue(localStorage.getItem('k'))).toBe('v')
   })
 
@@ -506,6 +524,124 @@ describe('retention', () => {
     expect(store?.removeItem('k')).toBe(false)
   })
 
+  // The sweep and the teardown report describe the same residue but answer to different callers, so
+  // they keep independent once-per-key latches. Shared, one throwing sweep permanently suppressed
+  // the teardown report — which in cross-subdomain mode is the only signal anywhere that an opt-out
+  // left an identifier on the device, since removeItem's return value excludes the localStorage
+  // layer there.
+  it('still reports teardown residue after a throwing mirror sweep latched the same key', () => {
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'v')
+
+    // 1. The shared cookie is gone, so a read sweeps the mirror — and the sweep throws.
+    jar.delete('k')
+    const throwOnce = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('proxied Storage')
+    })
+    store?.getItem('k')
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('stale localStorage mirror'), expect.anything())
+
+    // 2. The user opts out. removeItem now no-ops silently, leaving the identifier behind.
+    logSpies.error.mockClear()
+    throwOnce.mockImplementation(() => {})
+    store?.removeItem('k')
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('still holds "k" after removal'))
+  })
+
+  // A latch may report once per *episode*, never once per page: it must not outlive the fact it
+  // describes. Held after the residue is gone, the next genuine one for that key was silent — and in
+  // cross-subdomain mode that report is the only signal anywhere that a teardown left an identifier
+  // behind, since removeItem's return value excludes the localStorage layer there.
+  it('reports residue again after a confirmed removal cleared the previous report', () => {
+    const store = createPersistentStore(null)
+    store?.setItem('k', 'v')
+
+    // 1. Residue: the removal no-ops, so the identifier survives and is reported.
+    const removal = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    store?.removeItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
+
+    // 2. The store recovers and the key genuinely leaves the device — the fact is now false.
+    logSpies.error.mockClear()
+    removal.mockRestore()
+    store?.setItem('k', 'v')
+    store?.removeItem('k')
+    expect(logSpies.error).not.toHaveBeenCalled()
+
+    // 3. Residue again. A latch still holding from step 1 would swallow this.
+    store?.setItem('k', 'v')
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    store?.removeItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds "k"'))).toHaveLength(1)
+  })
+
+  it('reports a throwing mirror sweep once per key, not once per read', () => {
+    // The suppression half of sweepWarnedKeys, which its release test below cannot see: each of the
+    // other sweep tests throws exactly once per phase, so removing the `!sweepWarnedKeys.has(key)`
+    // guard left them all green. It is not cosmetic — the catch un-latches sweptKeys so the next
+    // read retries, and readItem runs on every tracked event, so an unguarded report is one
+    // log.error per event for the life of the page against a persistently proxied Storage.
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'v')
+
+    jar.delete('k')
+    vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('proxied Storage')
+    })
+    store?.getItem('k')
+    store?.getItem('k')
+    store?.getItem('k')
+
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('stale localStorage mirror'))).toHaveLength(1)
+  })
+
+  it('sweeps the mirror once per miss episode rather than on every read', () => {
+    // sweptKeys' suppression half — the second of the two "pinned in all three phases" claims that
+    // was not actually true, since both *releases* are pinned twice over while neither suppression
+    // was pinned at all. Counting removeItem calls cannot see it: the sweep's own
+    // `local.getItem(key) !== null` guard means a repeat sweep finds nothing and skips the removal,
+    // so the count is 1 either way. Re-seeding the mirror between reads is what distinguishes them.
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'v')
+
+    jar.delete('k')
+    store?.getItem('k') // the miss episode opens; the sweep runs and clears the mirror
+    localStorage.setItem('k', 'reseeded')
+
+    store?.getItem('k')
+    store?.getItem('k')
+
+    // Latched for the episode, so the re-seeded value is left alone; the release is a landed cookie
+    // write, pinned separately. Unlatched, every subsequent read re-sweeps.
+    expect(localStorage.getItem('k')).toBe('reseeded')
+  })
+
+  // The other half of the throwing-sweep contract: the un-latch. Latched as done, one throwing
+  // sweep left an identify()ed mirror unreachable for the rest of the page load — every later miss
+  // skipped the sweep, and the value sat outside every deadline until the next full page load.
+  it('retries the mirror sweep on the next miss after a throwing sweep', () => {
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    store?.setItem('k', 'v')
+
+    jar.delete('k')
+    const realRemove = localStorage.removeItem.bind(localStorage)
+    const spy = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('proxied Storage')
+    })
+    store?.getItem('k')
+    expect(localStorage.getItem('k')).not.toBeNull() // the throwing sweep left the mirror behind
+
+    // Heal by swapping the implementation, not mockRestore(): restore does not reliably re-attach
+    // over jsdom's Storage proxy, and a permanently broken removeItem leaks into later tests.
+    spy.mockImplementation((key: string) => realRemove(key))
+    store?.getItem('k')
+    expect(localStorage.getItem('k')).toBeNull()
+  })
+
   it('reports a stale value that cannot be removed once per key, not once per read', () => {
     // The session read runs getItem on every tracked event; against a store whose removeItem no-ops,
     // an unthrottled report here logged an error per event for the life of the page.
@@ -514,7 +650,135 @@ describe('retention', () => {
     vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
     store?.getItem('k')
     store?.getItem('k')
-    expect(logSpies.error).toHaveBeenCalledTimes(1)
+    // Two distinct once-per-key reports — the failed drop, and removeItem's residue read-back —
+    // and neither repeats on the second read, which is the throttle this pins.
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('could not be removed'))).toHaveLength(1)
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('still holds'))).toHaveLength(1)
+  })
+
+  // The four remaining latches in this module, each pinned in the same three phases as the
+  // residue-latch case above: report, recover, report again. Held for the page they became "report
+  // once, then never" — and the recovery in phase 2 is exactly what makes phase 3 a *different*
+  // fault rather than a repeat of the one already announced. The count is what a future reader uses
+  // to check the set is still complete when a sixth latch appears, so keep it in step.
+  it('reports a failed retention drop again after the store recovers in between', () => {
+    // The worst of the three. In cross-subdomain mode reportResidue is unreachable (it lives inside
+    // `if (local)`, where the mirror is *swept* rather than removed), so this line is the only
+    // signal anywhere that a value past its retention deadline — routinely an identify()ed email —
+    // survived on the device. Latched permanently, retention enforcement went quiet for that key.
+    const store = createPersistentStore(null)
+    const realRemove = localStorage.removeItem.bind(localStorage)
+    localStorage.setItem('k', 'pre-envelope')
+    const removal = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {})
+    store?.getItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('could not be removed'))).toHaveLength(1)
+
+    // The store recovers and the stale value genuinely leaves the device — the fact is now false.
+    logSpies.error.mockClear()
+    removal.mockImplementation((key: string) => realRemove(key))
+    store?.getItem('k')
+    expect(localStorage.getItem('k')).toBeNull()
+
+    // A second, distinct retention failure on the same key.
+    localStorage.setItem('k', 'pre-envelope-again')
+    removal.mockImplementation(() => {})
+    store?.getItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('could not be removed'))).toHaveLength(1)
+  })
+
+  it('reports a throwing mirror sweep again after a later sweep lands', () => {
+    const { layer, jar } = createFakeCookieLayer(true)
+    const store = createPersistentStore(layer)
+    const realRemove = localStorage.removeItem.bind(localStorage)
+    store?.setItem('k', 'v')
+
+    jar.delete('k')
+    const removal = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('proxied Storage')
+    })
+    store?.getItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('stale localStorage mirror'))).toHaveLength(1)
+
+    // The throwing sweep un-latched sweptKeys, so the next read retries it — and it lands.
+    logSpies.error.mockClear()
+    removal.mockImplementation((key: string) => realRemove(key))
+    store?.getItem('k')
+    expect(localStorage.getItem('k')).toBeNull()
+
+    // A fresh miss episode: the cookie write lands (which re-arms the sweep), then it is deleted
+    // again — a sibling's opt-out, say — and this time the sweep throws once more.
+    store?.setItem('k', 'v')
+    jar.delete('k')
+    removal.mockImplementation(() => {
+      throw new Error('proxied Storage')
+    })
+    store?.getItem('k')
+    expect(logSpies.error.mock.calls.filter(c => String(c[0]).includes('stale localStorage mirror'))).toHaveLength(1)
+  })
+
+  it('warns once per episode about a throwing localStorage write, then again after one lands', () => {
+    // writeLocal's own latch, one layer below setItem's. It sits on the per-event session write, so
+    // unlatched it is a console line per event for the life of the page on a quota-exhausted store —
+    // drowning the single actionable message setItem() logs. Both halves were free: removing the
+    // latch and removing the release each left the whole suite green.
+    const store = createPersistentStore(null)
+    const realSet = localStorage.setItem.bind(localStorage)
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError')
+    })
+    const failedWrites = () => logSpies.warn.mock.calls.filter(c => String(c[0]).includes('Failed to write "k"'))
+
+    store?.setItem('k', 'v')
+    store?.setItem('k', 'v')
+    expect(failedWrites()).toHaveLength(1)
+
+    // The store recovers and the value lands, so the reported fact no longer holds.
+    logSpies.warn.mockClear()
+    write.mockImplementation((key: string, value: string) => realSet(key, value))
+    expect(store?.setItem('k', 'v')).toBe(true)
+
+    // A second, distinct write failure on the same key.
+    write.mockImplementation(() => {
+      throw new Error('QuotaExceededError')
+    })
+    store?.setItem('k', 'v2')
+    expect(failedWrites()).toHaveLength(1)
+  })
+
+  it('warns again about a value that will not survive a page load after a write lands in between', () => {
+    // This is the latch session.ts leans on when it discards setItem's boolean, citing "the store
+    // already logs the underlying failure" — true of the first episode only, while the write it
+    // describes sits on the per-event session path where recovery and re-failure are routine.
+    const jar = new Map<string, string>()
+    let cookieWrites = true
+    const layer: CookieLayer = {
+      crossSubdomain: true,
+      get: key => jar.get(key) ?? null,
+      set: (key, value) => {
+        if (!cookieWrites) {
+          return false
+        }
+        jar.set(key, value)
+        return true
+      },
+      remove: key => {
+        jar.delete(key)
+        return true
+      },
+    }
+    const store = createPersistentStore(layer)
+
+    cookieWrites = false
+    expect(store?.setItem('k', 'v')).toBe(false)
+    expect(logSpies.warn.mock.calls.filter(c => String(c[0]).includes('did not persist'))).toHaveLength(1)
+
+    logSpies.warn.mockClear()
+    cookieWrites = true
+    expect(store?.setItem('k', 'v')).toBe(true)
+
+    cookieWrites = false
+    expect(store?.setItem('k', 'v2')).toBe(false)
+    expect(logSpies.warn.mock.calls.filter(c => String(c[0]).includes('did not persist'))).toHaveLength(1)
   })
 })
 

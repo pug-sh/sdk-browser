@@ -52,25 +52,44 @@ let isGrantedFn: GrantedGate | null = null
 /**
  * Gates the *deliberate* device writes — rotate(), resetIdentity(), the tab registry. Not every
  * write: resolveSessionId()'s activity persist is ungated, safe only because track() branches on
- * consent first. Absent getter = unguarded (tests, non-init callers).
+ * consent first. An absent gate reads as *withheld*, like everywhere else in the gate chain
+ * (deferredGrantedGate): with the head guard in configureSession, a configured module always holds
+ * a real gate, so the `?? false` covers only the unconfigured windows (before configureSession,
+ * after destroySession) — where the two store-backed sites (rotate's write, resetIdentity's
+ * clear) are inert with `store` null, and the registry site — which writes raw localStorage, not
+ * through the store — is unreachable because onConsentGranted() bails without a configured
+ * storageKey. Defense in depth, not a live gate. The fail-open `?? true` this replaced was the
+ * one place an untyped caller's omitted argument silently wrote identity with full permission.
  */
-const mayWriteToDevice = (): boolean => isGrantedFn?.() ?? true
+const mayWriteToDevice = (): boolean => isGrantedFn?.() ?? false
 
 export const configureSession = (
   projectId: string,
   sessionConfig: SessionConfig | undefined,
   persistentStore: PersistentStore | null | undefined,
-  // Required, not optional: `mayWriteToDevice()` defaults to *permitted* when the gate is absent,
-  // so an omitted argument would write identity to the device with nothing in the types to say so.
+  // Required, not optional: the gate decides device writes. The arity pin in
+  // consent-gate.test-d.ts turns a typed omission into a build failure; the head guard below is
+  // for callers typecheck never sees.
   isGranted: GrantedGate,
 ): void => {
+  // Assigned before the head guard, not after: resolveSessionId() falls back to this id, so a throw
+  // between here and the assignment would leave it '' and stamp an empty sessionId on every event —
+  // which the proto's `string.uuid` rule rejects as InvalidArgument, classified permanent, so whole
+  // batches are committed and dropped. Nothing below depends on the guard having run first.
+  fallbackSessionId = uuidv7()
+  // Fail loud at the head, uniformly with configureProfile and createCookieLayer. Measured against
+  // main, where `mayWriteToDevice()` read an absent gate as *permitted* (`?? true`): an omitted
+  // argument silently wrote identity to the device with nothing in the types to say so. This branch
+  // now makes that unreachable, and the `?? false` below makes it fail closed if it ever is.
+  if (typeof isGranted !== 'function') {
+    throw new TypeError('configureSession requires the isGranted consent gate')
+  }
   store = resolveStore(persistentStore)
   if (!store) {
     log.warn('Storage unavailable; session state will not persist.')
   }
-  fallbackSessionId = uuidv7()
   sessionProjectId = projectId
-  isGrantedFn = isGranted ?? null
+  isGrantedFn = isGranted
   config.storageKey = makeStorageKey(projectId, 'session')
 
   if (sessionConfig?.idleTimeoutMinutes != null) {

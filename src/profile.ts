@@ -13,9 +13,17 @@ let store: PersistentStore | null = null
 export const configureProfile = (
   projectId: string,
   persistentStore: PersistentStore | null | undefined,
-  // Required for the reason given on configureSession: an omitted gate reads as "permitted".
+  // Required, not optional: the gate decides an identity write. The arity pin in
+  // consent-gate.test-d.ts turns a typed omission into a build failure; the head guard below is
+  // for callers typecheck never sees.
   isGranted: GrantedGate,
 ): void => {
+  // Fail loud at the head, uniformly with configureSession and createCookieLayer: an omitted gate
+  // used to surface only on the returning-identified-visitor branch below, deciding an identity
+  // write by accident — every other install configured cleanly and the misuse stayed invisible.
+  if (typeof isGranted !== 'function') {
+    throw new TypeError('configureProfile requires the isGranted consent gate')
+  }
   store = resolveStore(persistentStore)
   if (!store) {
     log.warn('Storage unavailable; anonymous profile ID will not persist across page loads.')
@@ -28,8 +36,8 @@ export const configureProfile = (
   // present up to its stored deadline — the write carries the deadline forward and clamps it, so it
   // can never *extend* retention (see Retention in CLAUDE.md) — but only while consent permits
   // persisting identity: writing here while denied would re-issue an identity cookie (and
-  // re-broadcast it to sibling subdomains) for a user who has not consented. When no getter is
-  // passed (non-init callers, tests) the refresh is unchanged.
+  // re-broadcast it to sibling subdomains) for a user who has not consented. `isGranted()` is
+  // called bare, no fail-open coalesce: the head guard has already rejected a non-function gate.
   const stored = store?.getItem(externalIdKey)
   if (stored) {
     // The reserved prefix belongs to the server's derived cookieless identities. identify() rejects
@@ -52,7 +60,10 @@ export const configureProfile = (
       }
     } else {
       externalId = stored
-      if (isGranted?.() ?? true) {
+      if (isGranted()) {
+        // Result deliberately unchecked: the store reports a dropped write once per key, and a
+        // lost refresh only shortens how long the cookie stays present — unlike markIdentified()
+        // and the consent record's write(), where a lost write changes behavior and is checked.
         store?.setItem(externalIdKey, stored)
       }
     }
@@ -69,7 +80,8 @@ export const getAnonymousId = (): string => {
     if (stored.startsWith('anon-')) {
       anonymousId = stored
       // Re-write so a cookie-backed store keeps the value present up to its deadline — which the
-      // carried-forward stamp means this can never extend.
+      // carried-forward stamp means this can never extend. Result deliberately unchecked: the
+      // store reports a dropped write once per key, and the next mint self-heals the key.
       store?.setItem(storageKey, stored)
       return anonymousId
     }

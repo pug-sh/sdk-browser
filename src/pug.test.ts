@@ -39,7 +39,7 @@ const transportSpies = {
   destroy: vi.fn(),
   // Consent teardown drops the persisted event queue too. Omitting it here made every consent
   // transition in this file throw a swallowed TypeError and silently report failure.
-  purgeQueue: vi.fn(() => true),
+  purgeQueue: vi.fn(() => ({ ok: true, destroyed: 0 })),
 }
 
 const unaryCallSpy = vi.fn(() => Promise.resolve({}))
@@ -1226,12 +1226,58 @@ describe('consent teardown contract', () => {
 
   it('mentions the routine queue drop at debug on a non-authoritative non-granted init', async () => {
     // The drop itself is deliberate policy (identified payloads must not sit on a device whose
-    // consent is not granted), but an integrator on the README's placeholder-denied CMP flow
-    // wondering where a hard-killed granted session's events went had nothing to find, even with
-    // debug on.
+    // consent is not granted), but an integrator on a placeholder-denied CMP flow wondering where a
+    // hard-killed granted session's events went had nothing to find, even with debug on.
     const { init } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'denied' })
-    expect(logSpies.debug).toHaveBeenCalledWith(expect.stringContaining('queued events'))
+    expect(logSpies.debug).toHaveBeenCalledWith(expect.stringContaining('queued-events purge'))
+  })
+
+  it('warns, not debugs, when that purge actually destroyed events', async () => {
+    // The page that queued them said "will retry" at warn level; this is where that breaks. Keyed
+    // on the count so the no-op purge — the overwhelming majority of loads — stays silent, which
+    // the test above pins from the other side.
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: true, destroyed: 3 })
+    const { init } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    // Asserted alongside the message: the negative case below passes just as well against a build
+    // that never purges at all, so the call itself has to be pinned somewhere in the pair.
+    expect(transportSpies.purgeQueue).toHaveBeenCalledWith({ send: false })
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Dropped 3 queued event(s)'))
+  })
+
+  it('does not claim destruction when the purge left the persisted key behind', async () => {
+    // A purge whose key survived destroyed nothing — those events hydrate and send on the next
+    // init() — so a "dropped, unsent" warning would contradict, at a lower level, the error purge()
+    // logs saying they may still be sent.
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, destroyed: 0 })
+    const { init } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    expect(transportSpies.purgeQueue).toHaveBeenCalledWith({ send: false })
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('queued event(s)'))
+  })
+
+  it('still reports cookieless events destroyed by a purge that failed on the consented queue', async () => {
+    // ok is structurally the localStorage queue's answer alone — the memory-only cookieless queue
+    // hardcodes true. Gating the report on it silenced the one loss that is permanent.
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, destroyed: 2 })
+    const { init } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Dropped 2 queued event(s)'))
+  })
+
+  it('does not emit the destruction warning on reset(), which sends first', async () => {
+    // reset() beacons the queue out before dropping it and consent is unchanged, so the
+    // consent-withdrawal message ("must not be held or transmitted once consent is no longer
+    // granted") would be false on every logout with pending events. The !send conjunct in
+    // purgeQueuedEvents is the only thing scoping it to the consent teardowns.
+    const { init, reset } = await importPug()
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: true, destroyed: 2 })
+    logSpies.warn.mockClear()
+
+    expect(reset()).toBe(true)
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('queued event(s)'))
   })
 
   // The boolean exists so a withdrawal that did not fully land is detectable rather than
@@ -1239,7 +1285,7 @@ describe('consent teardown contract', () => {
   it('reports false when a queued-event purge does not land', async () => {
     const { init, optOutTracking } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })
-    transportSpies.purgeQueue.mockReturnValueOnce(false)
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, destroyed: 0 })
 
     expect(optOutTracking()).toBe(false)
   })
@@ -1318,7 +1364,7 @@ describe('teardown failures surface in the returned boolean', () => {
   it('reports false when the queued events could not be purged', async () => {
     const { init, optOutTracking } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })
-    transportSpies.purgeQueue.mockReturnValueOnce(false)
+    transportSpies.purgeQueue.mockReturnValueOnce({ ok: false, destroyed: 0 })
 
     expect(optOutTracking()).toBe(false)
   })
@@ -1339,5 +1385,75 @@ describe('teardown failures surface in the returned boolean', () => {
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })
 
     expect(reset()).toBe(true)
+  })
+})
+
+// The three gated factories throw a TypeError at the head on a non-function gate, deliberately, to
+// fail loud for untyped callers. What makes that loud rather than fatal is init()'s handling, and
+// nothing pinned it: every guard test calls its factory directly, so neither the routing nor the
+// containment was covered. Reverting reportInitFailure to a single log.warn — the exact state the
+// split was added to fix — left the whole suite green.
+describe('init() handling of a throwing gated factory', () => {
+  it('survives the throw instead of taking the host application down with it', async () => {
+    const { init } = await importPug()
+    vi.mocked(configureSession).mockImplementationOnce(() => {
+      throw new TypeError('configureSession requires an isGranted gate')
+    })
+
+    expect(() => init('proj', { apiKey: 'k', trackingConsent: 'granted' })).not.toThrow()
+  })
+
+  it('names a wiring fault as one rather than reporting it like a blocked cookie store', async () => {
+    const { init } = await importPug()
+    vi.mocked(configureProfile).mockImplementationOnce(() => {
+      throw new TypeError('configureProfile requires an isGranted gate')
+    })
+
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('wiring error'), expect.any(TypeError))
+    // And not as an environment failure, which is the level it used to arrive at.
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('wiring error'), expect.anything())
+  })
+
+  it('still reports a genuine environment failure at warn', async () => {
+    // The other half of the split: a blocked cookie store is not the integrator's bug, and routing
+    // everything to error would make the loud channel meaningless for the case it was added for.
+    const { init } = await importPug()
+    vi.mocked(configureSession).mockImplementationOnce(() => {
+      throw new Error('SecurityError: cookies are blocked')
+    })
+
+    init('proj', { apiKey: 'k', trackingConsent: 'granted' })
+
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to'), expect.any(Error))
+    expect(logSpies.error).not.toHaveBeenCalledWith(expect.stringContaining('wiring error'), expect.anything())
+  })
+})
+
+describe('the identity-retained warning on a non-authoritative init', () => {
+  // The non-authoritative branch explains itself at log.debug because it is a no-op on every default
+  // install — which is also why that message can never reach the case it exists for, debug being off
+  // by default. This warn is the entire fix: a returning visitor whose previous identify() left an
+  // externalId keeps it under a state the integrator spelled as non-granted. Deleting the whole
+  // `if (isIdentified())` block left all 736 tests green.
+  it('warns when a previous identify()s externalId is kept under a config-seeded non-granted state', async () => {
+    const { init } = await importPug()
+    vi.mocked(isIdentified).mockReturnValue(true)
+
+    init('proj', { apiKey: 'k', trackingConsent: 'denied' })
+
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('NOT removed'))
+  })
+
+  it('stays silent on a device that was never identified', async () => {
+    // Keyed on isIdentified(), not on the branch: the branch runs on every default install, so
+    // warning there would be a console line on every page load of every unconfigured site.
+    const { init } = await importPug()
+    vi.mocked(isIdentified).mockReturnValue(false)
+
+    init('proj', { apiKey: 'k' })
+
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('NOT removed'))
   })
 })
