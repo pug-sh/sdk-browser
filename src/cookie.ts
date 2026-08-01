@@ -264,6 +264,26 @@ export const createCookieLayer = (
   // not, or a persistently blocked cookie store would warn on every read of every event.
   const twinWarnedKeys = new Set<string>()
 
+  // Keys whose failed removal was already reported. Latched because remove() is not only a teardown
+  // path: the store's dropStale() calls it from readItem(), which the session read runs on every
+  // tracked event, so a value that keeps refusing to leave would report once per event for the life
+  // of the page. Released by the next confirmed removal — once per episode, never outliving the
+  // residue it describes, matching the latches in persistence.ts.
+  const removeFailedKeys = new Set<string>()
+
+  /** One report per key per episode, at error: both arms leave the same identifier on the device. */
+  const reportRemoveFailure = (key: string, message: string, err?: unknown): void => {
+    if (removeFailedKeys.has(key)) {
+      return
+    }
+    removeFailedKeys.add(key)
+    if (err === undefined) {
+      log.error(message)
+    } else {
+      log.error(message, err)
+    }
+  }
+
   // Keys whose host-only twin reconcileTwin deliberately left in place (its not-granted arm), with
   // what putting it back requires: a later set() whose replacement write fails must *restore* the
   // twin, not merely know it existed, so the value rides the registration.
@@ -345,11 +365,6 @@ export const createCookieLayer = (
     }
   }
 
-  // A same-named host-only cookie is indistinguishable by name from the shared one in
-  // document.cookie and can sort ahead of it, so it shadows the shared value — and a read-then-
-  // refresh (getAnonymousId, session activity) would copy the stale twin onto the shared cookie and
-  // corrupt identity site-wide. Once per key on first access: expire the twin, then see what
-  // remains. No-op in host-only mode, where there is no shared cookie to shadow.
   /**
    * Puts an expired twin back at its own host-only scope — `hostOnlyAttrs`, not a bare write, which
    * dropped SameSite and secure and handed a previously-Secure identity cookie to plain http.
@@ -372,9 +387,10 @@ export const createCookieLayer = (
    * Registration and restore travel together: a restored twin predates any later shared write for
    * its key, so RFC 6265 sorts it ahead in document.cookie and writeCookie must know to expire it
    * first — a restore without the registration makes that later write fail read-back against the
-   * twin and report a landed write as lost. The registration carries the twin itself (value and
-   * remaining lifetime), so the reverse move — a consumed registration whose replacement write then
-   * fails — can put the twin back rather than merely remember that one existed.
+   * twin and report a landed write as lost. The registration carries the twin's *value*, so the
+   * reverse move — a consumed registration whose replacement write then fails — can put the twin
+   * back rather than merely remember that one existed. Not its lifetime: see `preservedTwins`, where
+   * `restoreConsumedTwin` recomputes that from the value's own envelope at restore time.
    */
   const preserveTwin = (key: string, value: string, maxAgeSeconds: number): void => {
     preservedTwins.set(key, value)
@@ -401,6 +417,13 @@ export const createCookieLayer = (
     preserveTwin(key, value, life === 'undecodable' ? LEGACY_TWIN_RESTORE_SECONDS : life)
   }
 
+  /**
+   * A same-named host-only cookie is indistinguishable by name from the shared one in
+   * document.cookie and can sort ahead of it, so it shadows the shared value — and a read-then-
+   * refresh (getAnonymousId, session activity) would copy the stale twin onto the shared cookie and
+   * corrupt identity site-wide. Once per key on first access: expire the twin, then see what
+   * remains. No-op in host-only mode, where there is no shared cookie to shadow.
+   */
   const reconcileTwin = (key: string): void => {
     if (!domainAttr || reconciledKeys.has(key)) {
       return
@@ -510,13 +533,26 @@ export const createCookieLayer = (
           // this teardown removed — an identifier coming back after opt-out reported success.
           reconciledKeys.add(key)
           preservedTwins.delete(key)
+          // Re-arm: a latch may outlive one episode but never the residue it describes.
+          removeFailedKeys.delete(key)
+          return true
         }
-        return gone
+        // Same level and same consequence as the catch below — the mechanism of failure does not
+        // pick the severity, and a store blocked mid-session no-ops the assignments above without
+        // throwing. Silent, this was the one teardown failure with no diagnostic anywhere: callers
+        // surface remove() only as an aggregate boolean (clearProfile, clearSession, the store's
+        // removeItem), none of which can name the key or say which layer kept the value.
+        reportRemoveFailure(key, `The "${key}" cookie survived removal during teardown; the identity may resurface.`)
+        return false
       } catch (err) {
         // Error, not debug: `log.debug` is off unless the integrator already set `debug: true`, so
         // the reason was invisible to exactly the person diagnosing a failed opt-out. The whole
         // teardown boolean chain rests on this return value.
-        log.error(`Failed to remove the "${key}" cookie during teardown; the identity may resurface:`, err)
+        reportRemoveFailure(
+          key,
+          `Failed to remove the "${key}" cookie during teardown; the identity may resurface:`,
+          err,
+        )
         return false
       }
     },

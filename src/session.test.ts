@@ -632,6 +632,26 @@ describe('consent gate', () => {
     // The failed configure armed nothing: no registry write happened.
     expect(mockStorage.getItem(TABS_KEY)).toBeNull()
   })
+
+  it('still stamps a usable sessionId after the guard throws (fallback assigned above it)', () => {
+    // `fallbackSessionId = uuidv7()` sits *above* the head guard for this reason and no other, and
+    // the pin above cannot see it: asserting the throw says nothing about what the module is left
+    // holding. init() catches this TypeError, routes it through reportInitFailure and keeps running,
+    // so resolveSessionId() is reached either way — and with the assignment moved below the guard it
+    // returns '', which the proto's `string.uuid` rule rejects as InvalidArgument. That code is
+    // classified permanent, so every batch carrying those events is committed and dropped rather
+    // than retried: total, silent event loss from one mis-wired argument.
+    destroySession()
+    expect(() => (configureSession as (p: string, c?: unknown, s?: unknown, g?: unknown) => void)(PROJECT_ID)).toThrow(
+      TypeError,
+    )
+
+    // Nothing is configured, so rotate() bails on the empty storage key and the fallback is what is
+    // left to answer with — the exact path the ordering exists to keep populated.
+    const id = resolveSessionId()
+    expect(id).not.toBe('')
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  })
 })
 
 describe('read validation', () => {

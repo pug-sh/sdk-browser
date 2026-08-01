@@ -408,6 +408,22 @@ export const init = (projectId: string, options: InitOptions) => {
             : 'the queued-events purge did not fully land (see the error above)'
         }, and stored identity was left in place. Use trackingConsent.persist to record the choice.`,
       )
+      // The message above is at debug because this branch is a no-op on every default install: the
+      // 'cookieless' seed is non-granted and non-authoritative, so it runs for everyone and there is
+      // usually nothing to leave behind. That is exactly why it could not reach the case it exists
+      // for — `init({ trackingConsent: 'denied' })` as a bare string on a device carrying a prior
+      // consented visit's identity, where the skipped purge is a real outcome and debug is off.
+      //
+      // isIdentified() separates the two: configureProfile has already restored any externalId a
+      // previous identify() persisted, so a true here means a durable, routinely email-shaped
+      // identifier is being kept on the device under a state the integrator spelled as non-granted.
+      // Warn, so it reaches them without knowing a flag exists; silent otherwise, so the default
+      // install stays quiet.
+      if (isIdentified()) {
+        log.warn(
+          "Consent is not granted, but a previous identify() left an externalId on this device and it was NOT removed: the state came from config rather than from storage, so it may be a pre-banner placeholder rather than the user's choice. Pass trackingConsent.persist to record real choices, or call optOutTracking() once the user has actually rejected.",
+        )
+      }
     }
   }
 

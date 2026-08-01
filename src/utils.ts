@@ -371,11 +371,12 @@ export const isStorageAvailable = (): boolean => {
     try {
       localStorage.removeItem(key)
       // Learn whether removals land here. A key that survives is reused by the next probe rather
-      // than joined by a fresh one; a removal that lands releases the reuse. The gap this leaves is
-      // narrow and deliberate: on a store that strands keys and *later* also starts no-opping
-      // setItem, the surviving '1' reads back as this run's write and reports available. The
-      // alternative — a fresh key every probe — trades that for unbounded residue nothing can
-      // reclaim, and PersistentStore's own per-write failure reporting still catches the writes.
+      // than joined by a fresh one; a removal that lands releases the reuse. Reuse is safe on its
+      // own because freshness rides the *value*: the residue at a reused key is an earlier call's
+      // token, so a store that also starts no-opping setItem still fails the `=== token` read-back
+      // above rather than matching its own leftovers. See the header comment on that read-back —
+      // the per-call key and the per-call token close different faults, and this is the one the
+      // token closes.
       strandedProbeKey = localStorage.getItem(key) === null ? null : key
     } catch {
       // Name it again next time rather than stranding another: a probe that never landed costs

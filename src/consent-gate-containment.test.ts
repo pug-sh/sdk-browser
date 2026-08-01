@@ -36,16 +36,54 @@ const shippedSources = (prefix = ''): string[] =>
 /** The module that owns the brand, and the only place a mint may appear. */
 const BRAND_OWNER = 'tracking-consent.ts'
 
+/**
+ * Every spelling of "produce a branded gate here". Each is a way *around* the one before it, which
+ * is the whole risk with a source-text rule: the discipline is only as good as its evasions are
+ * closed, and a rule that names one syntax reads as complete while three others sail past.
+ *
+ * Type-position uses (`isGranted: GrantedGate`, `import type { GrantedGate }`) are deliberately not
+ * matched — naming the brand is how consumers are *supposed* to use it.
+ */
+const MINT_PATTERNS: readonly RegExp[] = [
+  // The `as` cast, in every spacing.
+  /\bas\s+(?:Granted|Tracking|Consent)Gate\b/,
+  // The angle-bracket cast `<GrantedGate>fn`, which the `as` rule never saw. The lookbehind keeps
+  // ordinary generic arguments out — `Set<GrantedGate>` is preceded by an identifier character, a
+  // cast never is.
+  /(?<![\w$])<\s*(?:Granted|Tracking|Consent)Gate\s*>/,
+  // The phantom member supplied directly, by object literal or Object.assign.
+  /__gate/,
+  // Aliasing the brand at the import (`import type { GrantedGate as GG }`), which renames it out of
+  // all three rules above and leaves `as GG` looking like an ordinary cast. No shipped module has a
+  // reason to rename it.
+  /\b(?:Granted|Tracking|Consent)Gate\s+as\s+\w/,
+]
+
+/**
+ * The cast-free evasion: `deferredGrantedGate` is exported, so any module could call it with its own
+ * `() => controller` and get a real branded gate answering to a controller it chose — no cast, no
+ * phantom member, nothing for the rules above to match. It is exported because the wiring genuinely
+ * spans two modules (the controller needs the store, the store needs the cookie layer), and that is
+ * the single call site.
+ */
+const GATE_FACTORY_CALLERS = new Set([BRAND_OWNER, 'pug.ts'])
+
 describe('consent gate mint containment', () => {
   it('no shipped module outside tracking-consent.ts mints a gate', () => {
-    // `as <Brand>` catches the cast in every spacing; `__gate` catches an object literal or
-    // Object.assign that supplies the phantom member directly. Type-position uses (`isGranted:
-    // GrantedGate`, `import type { GrantedGate }`) are deliberately not matched — they are how
-    // consumers are *supposed* to name the brand.
-    const mintsGate = /\bas\s+(?:Granted|Tracking)Gate\b|\bas\s+ConsentGate\b|__gate/
     const offenders = shippedSources()
       .filter(rel => rel !== BRAND_OWNER)
-      .filter(rel => mintsGate.test(readFileSync(srcUrl(rel), 'utf8')))
+      .filter(rel => {
+        const source = readFileSync(srcUrl(rel), 'utf8')
+        return MINT_PATTERNS.some(pattern => pattern.test(source))
+      })
+    expect(offenders).toEqual([])
+  })
+
+  it('only the documented wiring site calls the gate factory', () => {
+    // A comment naming deferredGrantedGate (session.ts has one) is not a mint; a *call* is.
+    const offenders = shippedSources()
+      .filter(rel => !GATE_FACTORY_CALLERS.has(rel))
+      .filter(rel => /deferredGrantedGate\s*\(/.test(readFileSync(srcUrl(rel), 'utf8')))
     expect(offenders).toEqual([])
   })
 
@@ -57,5 +95,27 @@ describe('consent gate mint containment', () => {
     expect(owner).toMatch(/__gate/)
     expect(shippedSources()).toContain('pug.ts')
     expect(shippedSources()).toContain(BRAND_OWNER)
+    // And the factory rule: the one permitted caller really does call it.
+    expect(readFileSync(srcUrl('./pug.ts'), 'utf8')).toMatch(/deferredGrantedGate\s*\(/)
+  })
+
+  it('every mint pattern actually matches the evasion it names', () => {
+    // Each rule exists because the previous one missed something, so each needs its own canary: a
+    // rule that silently stops matching (a renamed brand, a broken lookbehind) leaves the scan
+    // green while the hole it closed is open again.
+    const evasions = [
+      'const g = fn as GrantedGate',
+      'const g = <GrantedGate>fn',
+      'const g = Object.assign(fn, { __gate: "granted" })',
+      "import type { GrantedGate as GG } from './tracking-consent.js'",
+    ]
+    for (const [i, evasion] of evasions.entries()) {
+      expect(MINT_PATTERNS.some(pattern => pattern.test(evasion))).toBe(true)
+      // And the rule it names is the one that catches it, so a rule cannot quietly go dead behind
+      // another's match.
+      expect(MINT_PATTERNS[i]?.test(evasion)).toBe(true)
+    }
+    // The lookbehind's job: an ordinary generic argument is not a cast.
+    expect(MINT_PATTERNS[1]?.test('const gates = new Set<GrantedGate>()')).toBe(false)
   })
 })

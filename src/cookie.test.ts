@@ -48,6 +48,9 @@ const KEY = '__pug_proj_profile__'
 // Every set() carries a lifetime — the store owns retention, so the layer never picks one.
 const TTL = 31_536_000
 
+/** The max-age a captured cookie write carries, or NaN when there is no write to read one from. */
+const maxAgeOf = (write: string | undefined): number => Number(write?.match(/max-age=(\d+)/)?.[1])
+
 beforeEach(() => {
   vi.clearAllMocks()
 })
@@ -253,6 +256,39 @@ describe('createCookieLayer', () => {
     expect(logSpies.debug).toHaveBeenCalledWith(expect.any(String), expect.any(Error))
   })
 
+  it('escalates that write-threw log to warn when it destroyed a twin it could not put back', () => {
+    // The other half of the split above. A throw that harmed nothing is debug (the case above); a
+    // throw that already expired a preserved twin to make room for itself, and then could not
+    // restore it, has destroyed the sole copy — cross-subdomain reads have no localStorage fallback.
+    // At debug that loss was invisible to exactly the person diagnosing it, which is the same
+    // argument that put remove()'s catch at error. Only the level differs, so nothing about the
+    // return value or the cookie jar can pin it.
+    const real = new JSDOM('', { url: 'https://app.example.com/' }).window.document
+    let failWrites = false
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        // Deletions still land — the twin must actually be destroyed — but nothing carrying a value
+        // can be written, so neither the replacement nor the restore that follows it can succeed.
+        if (failWrites && !value.includes('max-age=0')) {
+          throw new Error('cookie store blocked mid-session')
+        }
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    real.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy'))}; path=/`
+    const layer = createCookieLayer(true, DENIED, doc)
+    layer?.get(KEY) // preserves the twin, registering it for a later expiry
+
+    failWrites = true
+    expect(layer?.set(KEY, persisted('replacement'), 600)).toBe(false)
+
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('twin could not be put back'), expect.any(Error))
+  })
+
   // At error, not debug. The intent ("must surface why") was always stated, but log.debug is off
   // unless the integrator already passed `debug: true` — invisible to exactly the person diagnosing
   // a failed opt-out. The teardown boolean chain now rests on this return value, and the outcome is
@@ -334,6 +370,50 @@ describe('createCookieLayer', () => {
     const layer = grantedLayer(true, doc)
     expect(layer?.set(KEY, 'anon-123', TTL)).toBe(true)
     expect(layer?.remove(KEY)).toBe(false)
+
+    // And says so. This arm was silent while the throwing one logged at error — but a no-op and a
+    // throw leave the same identity cookie on the device, and the mechanism of failure does not pick
+    // the severity. Callers surface remove() only as an aggregate boolean (clearProfile,
+    // clearSession, the store's removeItem), so nothing else can name the key or the layer.
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('survived removal'))
+  })
+
+  it('reports a failed removal once per key, then again after a later removal lands', () => {
+    // remove() is not only a teardown path: the store's dropStale() reaches it from readItem(),
+    // which the session read runs on every tracked event — so an unlatched report is one console
+    // line per event for the life of the page. The release is the other half: a latch may report
+    // once per episode but must never outlive the residue it describes.
+    const jar = new CookieJar()
+    const real = new JSDOM('', { url: 'https://app.example.com/', cookieJar: jar }).window.document
+    let blockDeletes = true
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        if (blockDeletes && value.includes('max-age=0')) return
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    const survived = () => logSpies.error.mock.calls.filter(c => String(c[0]).includes('survived removal'))
+
+    const layer = grantedLayer(true, doc)
+    expect(layer?.set(KEY, 'anon-123', TTL)).toBe(true)
+    expect(layer?.remove(KEY)).toBe(false)
+    expect(layer?.remove(KEY)).toBe(false)
+    expect(survived()).toHaveLength(1)
+
+    // The store recovers and the key genuinely leaves the device — the reported fact is now false.
+    logSpies.error.mockClear()
+    blockDeletes = false
+    expect(layer?.remove(KEY)).toBe(true)
+
+    // A second, distinct teardown failure on the same key must not be swallowed by the first.
+    blockDeletes = true
+    expect(layer?.set(KEY, 'anon-456', TTL)).toBe(true)
+    expect(layer?.remove(KEY)).toBe(false)
+    expect(survived()).toHaveLength(1)
   })
 
   // remove() latches reconciledKeys / consumes the preservedTwins registration only on a CONFIRMED
@@ -635,9 +715,96 @@ describe('cookie lifetime', () => {
     doc.cookie = `${KEY}=${encodeURIComponent(persisted('anon-legacy', 600_000))}; path=/`
     grantedLayer(true, doc)?.get(KEY)
     const write = writes.find(w => w.includes(KEY) && w.includes('domain=.example.com'))
-    const maxAge = Number(/max-age=(\d+)/.exec(write ?? '')?.[1])
+    const maxAge = maxAgeOf(write)
     expect(maxAge).toBeGreaterThan(500)
     expect(maxAge).toBeLessThanOrEqual(600)
+  })
+})
+
+describe('restoring a twin whose registration a failed write consumed', () => {
+  // writeCookie() expires a preserved twin to make room for its own write, so a write that then
+  // fails must put the twin back — restoreConsumedTwin. Every existing twin-restore case asserts
+  // only that the value *comes back*, which the lifetime cannot affect, so the whole function was
+  // free: replacing its body with a flat `preserveTwin(key, value, 31536000)` — reintroducing the
+  // captured-TTL bug at its maximum — left the entire suite green.
+
+  /**
+   * A layer holding a preserved host-only twin with `ttlMs` left, plus a switch for making the next
+   * cookie write fail. Preserved via the denied arm of reconcileTwin, which is what registers a twin
+   * in the first place; `advance` moves the clock so "recomputed now" and "captured when preserved"
+   * stop agreeing — without it every implementation of the lifetime looks identical.
+   */
+  const withPreservedTwin = (ttlMs: number) => {
+    const real = new JSDOM('', { url: 'https://app.example.com/' }).window.document
+    const writes: string[] = []
+    let blocked: string | null = null
+    const doc: CookieDocument = {
+      get cookie() {
+        return real.cookie
+      },
+      set cookie(value: string) {
+        if (blocked !== null && value.includes(blocked)) {
+          return
+        }
+        writes.push(value)
+        real.cookie = value
+      },
+      location: { hostname: 'app.example.com', protocol: 'https:' },
+    }
+    const twin = persisted('anon-legacy', ttlMs)
+    real.cookie = `${KEY}=${encodeURIComponent(twin)}; path=/`
+    const layer = createCookieLayer(true, DENIED, doc)
+    layer?.get(KEY) // preserves the twin host-only and registers it for a later expiry
+    writes.length = 0 // the preserve-time restore is not the write under test
+
+    const clock = vi.spyOn(Date, 'now')
+    const start = Date.now()
+    return {
+      layer,
+      advance: (ms: number) => clock.mockReturnValue(start + ms),
+      /** A set() whose write cannot land, so writeCookie consumes the twin and must restore it. */
+      failingSet: () => {
+        blocked = 'replacement'
+        return layer?.set(KEY, persisted('replacement'), 600)
+      },
+      restore: () => writes.find(w => w.includes('anon-legacy')),
+      done: () => clock.mockRestore(),
+    }
+  }
+
+  it('puts it back with the lifetime it has left now, not the one it had when preserved', () => {
+    // A twin preserved with 600s left and restored 300s later must go back with ~300s. Replaying the
+    // preserve-time figure writes a cookie that outlives the deadline stamped in the value it
+    // carries, contradicting CookieLayer.set's "the cookie expires with the value it holds" on the
+    // one path that also widens scope. Not a data leak — the envelope still governs what the store
+    // reads — but the physical cookie sits on the device past its own deadline.
+    const twin = withPreservedTwin(600_000)
+    try {
+      twin.advance(300_000)
+      expect(twin.failingSet()).toBe(false)
+
+      const maxAge = maxAgeOf(twin.restore())
+      expect(maxAge).toBeGreaterThan(250)
+      expect(maxAge).toBeLessThanOrEqual(300)
+    } finally {
+      twin.done()
+    }
+  })
+
+  it('does not put back a twin whose retention ended while it was preserved', () => {
+    // The 'expired' arm. writeCookie's expiry write already removed it, which is exactly what its
+    // own deadline asks for — restoring it would resurrect an identifier past its retention bound,
+    // on a path the store cannot see.
+    const twin = withPreservedTwin(600_000)
+    try {
+      twin.advance(700_000)
+      expect(twin.failingSet()).toBe(false)
+
+      expect(twin.restore()).toBeUndefined()
+      expect(twin.layer?.get(KEY)).toBeNull()
+    } finally {
+      twin.done()
+    }
   })
 })
 

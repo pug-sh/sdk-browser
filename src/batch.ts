@@ -9,6 +9,20 @@ interface SendOptions {
   readonly immediate?: boolean
 }
 
+/**
+ * What one queue's `purge()` reports, and what `PurgeResult` is aggregated from: `ok` is whether the
+ * queue left the device, `dropped` how many events that cost.
+ *
+ * Declared and annotated on both implementations rather than inferred, for the reason `PurgeResult`
+ * itself is declared: an inferred producer shape lets one queue grow or rename a field while the
+ * other does not, and the aggregate reads whichever members happen to line up. That is the same
+ * structural drift `PurgeResult` exists to prevent, one level down.
+ */
+interface QueuePurgeResult {
+  readonly ok: boolean
+  readonly dropped: number
+}
+
 // Queue storage uses a two-phase lock/commit/rollback protocol:
 // lock(n) reserves up to n events and returns them; while locked, size and
 // peekUnlocked() exclude locked events and subsequent lock() calls return [].
@@ -51,7 +65,7 @@ const createMemoryQueueStorage = (maxQueueSize: number) => {
     sync: () => {},
     // Consent teardown. Nothing to confirm — this queue never reaches the device — but it shares the
     // shape so callers can purge both without asking which is which.
-    purge: () => {
+    purge: (): QueuePurgeResult => {
       // buffer.length, not `size`: purge discards the in-flight locked batch too, and the caller's
       // warning is gated on this count — `size` made it silent in exactly the highest-loss case.
       const dropped = buffer.length
@@ -183,7 +197,7 @@ const createLocalStorageQueueStorage = (key: string, maxQueueSize: number) => {
      * fires afterwards and rewrites the very payloads this just removed. Returns false when the key
      * is still readable, so a withdrawal that did not fully land is detectable rather than assumed.
      */
-    purge: () => {
+    purge: (): QueuePurgeResult => {
       if (persistTimer !== null) {
         clearTimeout(persistTimer)
         persistTimer = null
@@ -349,9 +363,16 @@ export const createBatchedTransport = (
     return value
   }
 
-  const maxSize = validated('maxSize')
-  const maxWaitMs = validated('maxWaitMs')
-  const maxQueueSize = validated('maxQueueSize')
+  // Destructured off a `satisfies BatchConfig` literal, not three loose consts. BATCH_RULES makes a
+  // fourth knob a compile error until it has a *rule*; nothing made it a compile error until it was
+  // actually *validated*, so a member could be settable through `init({ batch })`, documented, and
+  // inert — the mirror of the hole BATCH_RULES itself was added to close. `satisfies` requires every
+  // member of BatchConfig to be present here, which is the missing half.
+  const { maxSize, maxWaitMs, maxQueueSize } = {
+    maxSize: validated('maxSize'),
+    maxWaitMs: validated('maxWaitMs'),
+    maxQueueSize: validated('maxQueueSize'),
+  } satisfies BatchConfig
   const storageKey = makeStorageKey(projectId, 'queue')
 
   const inner = createTransport(endpoint, apiKey)
