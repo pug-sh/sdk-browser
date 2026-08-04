@@ -441,34 +441,21 @@ export const createBatchedTransport = (
     },
 
     /**
-     * Empties both queues from the device. `ok` is false when a persisted key survived the removal —
-     * it answers exactly one question, "did the queues leave the device", so it can feed the teardown
-     * chain whose meaning is device state. A dropped farewell beacon reports through reportBeaconLoss
-     * but does not flip it: beacons fail routinely under analytics blockers, so folding delivery in
-     * made reset() "fail" on blocker-equipped browsers whose devices were verifiably clean — and the
-     * README's recipe puts that boolean in front of end users, telling them a stored identifier may
-     * have survived.
+     * Empties both queues from the device.
      *
-     * `destroyed` counts only events that actually left the device, per queue: the memory-only
-     * cookieless queue always destroys what it held, while a consented queue whose key survived
-     * destroyed nothing — save its un-persisted debounced tail, gone with the memory buffer yet
-     * uncounted. With the in-flight overcount (a locked batch is included but may still be
-     * delivered), the number is approximate in both directions, never an audit. A single
-     * `ok && total` could not say any of that — `ok` is structurally the localStorage queue's
-     * answer alone, so it made a real cookieless loss unreportable.
+     * `ok` answers exactly one question — "did the queues leave the device" — so it can feed the
+     * teardown chain, whose meaning is device state. A dropped farewell beacon reports through
+     * `reportBeaconLoss` but does **not** flip it.
      *
-     * `send` is true only for `reset()` — a logout, where consent is unchanged and those events were
-     * agreed to at collection time. Every consent teardown passes false: transmitting after the user
-     * said no is fresh processing of data they just withdrew, and Art. 7(3) protects the prior
-     * collection, not a later send.
+     * `destroyed` counts, per queue, what actually left the device. It is approximate in both
+     * directions and is never an audit.
      *
-     * Queued events carry `sessionId` and `distinctId` — after `identify()` the `distinctId` IS the
-     * `externalId` — so the queue is identity storage in every sense the profile and session keys
-     * are, and it was the one such store the consent teardown never reached.
+     * `send` is true only for `reset()`. Every consent teardown passes false.
      *
      * The send is `beacon`, not `flush`: a synchronous user action must not wait on the network, and
      * the events must be gone from the device either way. `peekUnlocked()` excludes any in-flight
      * batch, whose later commit/rollback lands on an emptied buffer and is a harmless no-op.
+     * @see docs/design-notes/batch.md#purge
      */
     purgeQueue: ({ send }: { send: boolean }): PurgeResult => {
       // Held, not reported, until the purge below has run. The counts are captured here because
@@ -488,20 +475,14 @@ export const createBatchedTransport = (
           beaconLoss = { consented: consentedTail.length, cookieless: cookielessTail.length }
         }
       }
-      // To disk before purging, the same move beaconFlush() makes before *reporting* and for the
-      // same reason: events younger than the 1s persist debounce live only in the buffer, and
-      // purge() clears the buffer and cancels the pending persist. Unsynced, a purge that failed to
+      // To disk before purging: events younger than the 1s persist debounce live only in the buffer,
+      // which purge() clears while cancelling the pending write, so an unsynced purge that failed to
       // remove the key destroyed exactly that tail while the surviving key made every report claim
-      // it back — the farewell beacon's "remain in the persisted queue and will retry on next
-      // init()", and `destroyed` counting 0 for the whole queue. Syncing first makes both true
-      // instead of rewording them: the key that survives now genuinely holds the tail.
+      // it back.
       //
-      // Gated on `send`, which is true only for reset(): a logout leaves consent untouched, so
-      // writing the tail down before removing it is a write the user already agreed to. Every
-      // consent teardown passes false and must not reach this — a rewrite-then-remove is still a
-      // device write, and under the cookieless default the SDK promises none at all (pinned by
-      // "writes nothing to the device when a leftover queue meets a cookieless init"). That path
-      // has no farewell beacon to be truthful about either, so the sync would buy nothing.
+      // Gated on `send`, i.e. reset() only — every consent teardown must not write at all, and a
+      // rewrite-then-remove is still a device write.
+      // @see docs/design-notes/batch.md#the-sync-before-purge-under-send
       if (send) {
         storage.sync()
       }

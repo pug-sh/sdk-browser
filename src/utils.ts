@@ -304,32 +304,26 @@ const PROBE_STALE_MS = 5000
 
 /**
  * The probe key an earlier call wrote and could not remove, reused by every later probe for as long
- * as it survives. This — not the sweep below — is what bounds probe residue: on a store whose
- * `removeItem` persistently no-ops, the sweep reclaims nothing, because it removes through that same
- * failing `removeItem`. The only way not to accumulate keys there is not to mint them, so the one
- * stranded key gets overwritten in place instead of joined by a fresh one per call (~2-3 per
- * `init()`, accumulating across every visit, outside the retention envelope and every teardown).
+ * as it survives. **This — not the sweep below — is what bounds probe residue**, since the sweep
+ * removes through the same failing `removeItem`.
  *
- * Reuse cannot collide across tabs: each tab minted its own key before stranding it, so two tabs
- * hold different ones and neither can clobber the other's probe. What reuse *does* expose is residue
- * at the same key from this tab's earlier failed removal, which is why the probe writes a fresh
- * token per call rather than a constant — read back, a stale token is not this run's own write and a
- * no-opping `setItem` is still caught.
+ * Reuse cannot collide across tabs: each minted its own key before stranding it. What it *does*
+ * expose is residue at the same key from this tab's earlier failure, which is why the probe writes a
+ * fresh token per call rather than a constant.
  *
  * Cleared by the first removal that lands, so a store that recovers returns to per-call keys.
+ * @see docs/design-notes/utils.md#storage-probe
  */
 let strandedProbeKey: string | null = null
 
 /**
- * Reclaims probe keys stranded by earlier failed removals. Effective only *after* a store recovers —
- * while removals are still failing this sweep's own removals fail identically — which is why
- * `strandedProbeKey` above, rather than this, is what actually bounds the residue.
+ * Reclaims probe keys stranded by earlier failed removals. Effective only *after* a store recovers.
  *
  * Only demonstrably stale keys are swept: a fresh sibling may be another tab's probe in flight, and
  * deleting it mid-probe would fail that tab's read-back — the exact memory-only downgrade the
- * per-call key exists to prevent. A key without a parseable stamp is stale by construction; that is
- * the fixed `__pug___probe__` key older builds used, and sweeping one mid-probe costs them nothing,
- * since no shipped build ever read its probe back (all of them returned true unconditionally).
+ * per-call key exists to prevent. A key without a parseable stamp is stale by construction (the
+ * fixed key older builds used).
+ * @see docs/design-notes/utils.md#storage-probe
  */
 const sweepStaleProbeKeys = (currentKey: string): void => {
   // Backwards: removals shift the indices above them.

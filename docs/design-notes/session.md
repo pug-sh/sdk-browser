@@ -88,3 +88,41 @@ and the still-attached reaper wrote to the device again on the way out — while
 storing nothing.
 
 If no persistence layer is usable, sessions continue in memory only.
+
+### <a id="registry-purge"></a>Why the purge derives its own key
+
+A device wipe must not depend on this page having armed the registry. `armTabRegistry()` returns early
+whenever consent withholds it — which is **exactly the state a purge runs in** — so keying the removal
+on those handles made it a silent no-op that reported success. The purge derives the key instead; only
+the entry-level path needs `tabId`.
+
+### Why unavailable storage counts as released
+
+When storage is unavailable at teardown time the skip leaves `released` true — treating
+unavailable-for-writes as evidence-of-absence. A registry key written while storage *was* usable could
+in principle survive unreachable.
+
+Accepted, because a store that cannot be read cannot be verified either, and reporting false forever on
+storageless devices would make every teardown boolean useless there. The registry holds per-tab
+timestamps, never identifiers, and stale entries are pruned by their own idle timeout on the next arm.
+
+### <a id="fail-closed"></a>The `?? false` in `mayWriteToDevice`
+
+An absent gate reads as **withheld**, like everywhere else in the gate chain.
+
+With the head guard in `configureSession`, a configured module always holds a real gate, so the
+`?? false` covers only the unconfigured windows (before `configureSession`, after `destroySession`) —
+where the two store-backed sites (`rotate`'s write, `resetIdentity`'s clear) are inert with `store`
+null, and the registry site (raw `localStorage`, not the store) is unreachable because
+`onConsentGranted()` bails without a configured `storageKey`.
+
+**Defense in depth, not a live gate.** The fail-open `?? true` it replaced was the one place an untyped
+caller's omitted argument silently wrote identity with full permission.
+
+### Why `read()` distinguishes malformed from absent
+
+Absent is the ordinary first visit — silent. Present-but-malformed must not share that silence: falling
+through quietly rotated the session with no trace of why analytics saw a new one.
+
+The value is omitted from both messages because a stored-session fragment (and a parse error's message)
+can echo identity.
