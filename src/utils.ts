@@ -267,17 +267,6 @@ export const getSafeElementText = (el: Element | null, maxLength: number): strin
   return text.trim().substring(0, maxLength).trimEnd()
 }
 
-export const urlBase64ToUint8Array = (base64String: string): Uint8Array<ArrayBuffer> => {
-  const padding = '='.repeat((4 - (base64String.length % 4)) % 4)
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
-  const rawData = atob(base64)
-  const bytes = new Uint8Array(rawData.length)
-  for (let i = 0; i < rawData.length; i++) {
-    bytes[i] = rawData.charCodeAt(i)
-  }
-  return bytes
-}
-
 /**
  * JSON.stringify for log interpolation of untrusted values — the values being *rejected* are
  * exactly the ones most likely to make JSON.stringify itself throw (circular refs, bigint, a

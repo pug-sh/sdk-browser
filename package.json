@@ -16,7 +16,6 @@
   },
   "files": [
     "dist",
-    "pug_sw.js",
     "README.md",
     "WELL_KNOWN_EVENTS.md",
     "LICENSE"
