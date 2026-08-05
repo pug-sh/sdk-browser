@@ -42,24 +42,16 @@ let lastHeartbeat = 0
 let lastPersistMs = 0
 let fallbackSessionId = ''
 let onPageHide: (() => void) | null = null
-// Retained at module scope so the registry can be re-armed on a mid-page grant, clearSession() can
-// derive the registry key without this page having armed it, and the write paths below can consult
-// consent — which became runtime-mutable with setTrackingConsent(), so gating only at configure
-// time would guard creation and leave every later write open.
+// Retained at module scope because consent became runtime-mutable with setTrackingConsent(): gating
+// only at configure time would guard creation and leave every later write open.
 let sessionProjectId = ''
 let isGrantedFn: GrantedGate | null = null
 
 /**
  * Gates the *deliberate* device writes — rotate(), resetIdentity(), the tab registry. Not every
  * write: resolveSessionId()'s activity persist is ungated, safe only because track() branches on
- * consent first. An absent gate reads as *withheld*, like everywhere else in the gate chain
- * (deferredGrantedGate): with the head guard in configureSession, a configured module always holds
- * a real gate, so the `?? false` covers only the unconfigured windows (before configureSession,
- * after destroySession) — where the two store-backed sites (rotate's write, resetIdentity's
- * clear) are inert with `store` null, and the registry site — which writes raw localStorage, not
- * through the store — is unreachable because onConsentGranted() bails without a configured
- * storageKey. Defense in depth, not a live gate. The fail-open `?? true` this replaced was the
- * one place an untyped caller's omitted argument silently wrote identity with full permission.
+ * consent first. An absent gate reads as *withheld*, like everywhere else in the gate chain.
+ * @see docs/design-notes/session.md#fail-closed
  */
 const mayWriteToDevice = (): boolean => isGrantedFn?.() ?? false
 
@@ -67,20 +59,16 @@ export const configureSession = (
   projectId: string,
   sessionConfig: SessionConfig | undefined,
   persistentStore: PersistentStore | null | undefined,
-  // Required, not optional: the gate decides device writes. The arity pin in
-  // consent-gate.test-d.ts turns a typed omission into a build failure; the head guard below is
-  // for callers typecheck never sees.
+  // Required, not optional: the gate decides device writes.
   isGranted: GrantedGate,
 ): void => {
-  // Assigned before the head guard, not after: resolveSessionId() falls back to this id, so a throw
-  // between here and the assignment would leave it '' and stamp an empty sessionId on every event —
-  // which the proto's `string.uuid` rule rejects as InvalidArgument, classified permanent, so whole
-  // batches are committed and dropped. Nothing below depends on the guard having run first.
+  // Assigned *before* the head guard: resolveSessionId() falls back to this id, so a throw first
+  // would leave it '' and stamp an empty sessionId on every event — which the proto's `string.uuid`
+  // rule rejects as InvalidArgument, classified permanent, so whole batches are dropped. Nothing
+  // below depends on the guard having run first.
   fallbackSessionId = uuidv7()
-  // Fail loud at the head, uniformly with configureProfile and createCookieLayer. Measured against
-  // main, where `mayWriteToDevice()` read an absent gate as *permitted* (`?? true`): an omitted
-  // argument silently wrote identity to the device with nothing in the types to say so. This branch
-  // now makes that unreachable, and the `?? false` below makes it fail closed if it ever is.
+  // Fail loud at the head, uniformly with configureProfile and createCookieLayer.
+  // @see docs/design-notes/tracking-consent.md#the-head-guards
   if (typeof isGranted !== 'function') {
     throw new TypeError('configureSession requires the isGranted consent gate')
   }
@@ -200,22 +188,18 @@ const releaseTabRegistry = ({ purge }: { purge: boolean }): boolean => {
   let released = true
   try {
     if (purge) {
-      // A device wipe must not depend on this page having armed the registry: armTabRegistry()
-      // returns early whenever consent withholds it, which is exactly the state a purge runs in, so
-      // keying the removal on those handles made it a silent no-op that reported success. Derive the
-      // key instead; only the entry-level path below needs tabId.
+      // Derive the key rather than key off the handles: armTabRegistry() returns early whenever
+      // consent withholds it, which is exactly the state a purge runs in, so keying on those made
+      // the removal a silent no-op that reported success.
+      // @see docs/design-notes/session.md#registry-purge
       const storage = tabsStorage ?? (isStorageAvailable() ? localStorage : null)
       const key = tabsKey || (sessionProjectId ? makeStorageKey(sessionProjectId, 'tabs') : '')
       if (storage && key) {
         storage.removeItem(key)
         released = storage.getItem(key) === null
       }
-      // When storage is unavailable at teardown time, the skip above leaves `released` true —
-      // unavailable-for-writes treated as evidence-of-absence. A registry key written while storage
-      // *was* usable could in principle survive unreachable; accepted, because a store that cannot
-      // be read cannot be verified either, and reporting false forever on storageless devices would
-      // make every teardown boolean useless there. The registry holds per-tab timestamps, never
-      // identifiers, and its stale entries are pruned by their own idle timeout on the next arm.
+      // Unavailable storage leaves `released` true — a store that cannot be read cannot be verified
+      // either, and the registry holds timestamps, never identifiers.
     } else if (tabsStorage && tabsKey && tabId) {
       const tabs: Record<string, number> = JSON.parse(tabsStorage.getItem(tabsKey) ?? '{}')
       delete tabs[tabId]
@@ -267,9 +251,8 @@ const read = (): StoredState | null => {
     ) {
       return parsed as StoredState
     }
-    // Present but malformed must not share absence's silence: falling through quietly rotated the
-    // session with no trace of why analytics saw a new one. The value is omitted from the message
-    // for the same reason the parse error is below — it can echo identity fragments.
+    // Malformed must not share absence's silence, and the value is omitted because it can echo
+    // identity fragments. @see docs/design-notes/session.md#why-read-distinguishes-malformed-from-absent
     log.warn('Stored session state is malformed; starting fresh.')
   } catch {
     // Omit the parse error: its message can echo a fragment of the stored session JSON.
@@ -283,8 +266,7 @@ const write = (s: StoredState): boolean => {
     return false
   }
   // Advance the throttle clock only on a persist that actually landed, so a dropped write leaves
-  // lastPersistMs stale and is retried on the next event rather than suppressed for the window. The
-  // store already logs the underlying failure, so this frequent path stays quiet.
+  // lastPersistMs stale and is retried on the next event rather than suppressed for the window.
   const persisted = store.setItem(config.storageKey, JSON.stringify(s))
   if (persisted) {
     lastPersistMs = Date.now()
@@ -362,8 +344,8 @@ export const resolveSessionId = (): string => {
 
 /**
  * Resets both session and device ID — call on logout. Returns false when the reset could not be made
- * durable: both failure arms log and return rather than throw, so reset()'s try/catch could not see
- * them and reported success while the previous user's ids were still on the device.
+ * durable: both failure arms log and return rather than throw, so a catch-only guard in reset()
+ * reported success while the previous user's ids were still on the device.
  */
 export const resetIdentity = (): boolean => {
   const now = Date.now()
@@ -390,10 +372,10 @@ export const resetIdentity = (): boolean => {
   return true
 }
 
-// Clears the persisted session and in-memory state while leaving the module configured, so a later
-// resolveSessionId() lazily starts a fresh session. The opt-out teardown, as opposed to
-// destroySession()'s runtime one. In cross-subdomain mode this removes the shared cookie, so the
-// opt-out propagates to sibling subdomains.
+// The opt-out teardown, as opposed to destroySession()'s runtime one: clears the persisted session
+// and in-memory state while leaving the module configured, so a later resolveSessionId() lazily
+// starts a fresh one. In cross-subdomain mode this removes the shared cookie, so the opt-out
+// propagates to sibling subdomains. @see docs/design-notes/session.md
 export const clearSession = (): boolean => {
   let cleared = true
   // Error level: in cross-subdomain mode a failed removal means the shared cookie survived.
