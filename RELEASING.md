@@ -5,6 +5,18 @@ Publishing is manual. A release ships **two** things:
 - the **npm package** (`npm publish`) — for `npm install` / bundler users; jsDelivr also serves it from npm as a fallback.
 - the **CDN bundle** to **`cdn.pugs.dev`** (first-party Cloudflare R2) — the URL the documented `<script>` installs point at: `https://cdn.pugs.dev/vX.Y.Z/pug.min.js`. It's an **`@`-free, version-in-path** URL on purpose: a `pkg@version` substring in a customer's HTML matches Cloudflare Email Address Obfuscation and gets rewritten to `[email protected]`, breaking the load — the path form avoids that on every customer's Cloudflare zone.
 
+## Installing without a release
+
+`dist/` is not committed, so a git install has to build. npm and friends do that themselves — `npm i github:pug-sh/sdk-browser` (optionally `#<branch|sha>`) runs `prepare`, which builds and packs per the `files` allowlist.
+
+**Bun does not**: it extracts the raw repo tarball and skips `prepare`, so it would install a package with no `dist/`. For bun, run `bun run publish:dist` — it builds and force-pushes the packed output as a single orphan commit on the **`dist`** branch, which installs with any package manager:
+
+```bash
+bun add github:pug-sh/sdk-browser#dist
+```
+
+The branch is only as fresh as the last run, so re-run it after any source change you expect a consumer to pick up. It is a stopgap for pre-release consumers, not a substitute for a release.
+
 ## One-time setup (Cloudflare)
 
 1. Create the R2 bucket (default `pugs-dev-cdn`; override with `PUG_CDN_BUCKET`): `bunx wrangler r2 bucket create pugs-dev-cdn`.
