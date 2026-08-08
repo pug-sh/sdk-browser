@@ -543,7 +543,7 @@ See **[WELL_KNOWN_EVENTS.md](./WELL_KNOWN_EVENTS.md)** for the full list — eac
 
 ## Upgrading
 
-### Unreleased — breaking changes
+### v0.1.0 — breaking changes
 
 Several **runtime** changes affect every install, including JavaScript and one-tag:
 
