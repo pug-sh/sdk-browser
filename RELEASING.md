@@ -32,7 +32,7 @@ This is **not** a release: the branch tracks `main`, so it carries unreleased wo
 
 0. **Clear the proto pin**: `make check-proto-pin`. This must pass before anything else. It re-downloads the pinned BSR commit and diffs it against the committed `proto/` mirror, proving nothing is hand-patched ahead of the pin. `npm publish` runs it via `prepublishOnly`, so a release cannot skip it.
 
-   It **fails today by design**: `proto/sdk/events/v1/events.proto` carries the cookieless contract (`Event.cookieless`, validation restructure) ahead of the BSR, from the pug repo branch `feat/cookieless-identity`. To clear it: merge that branch, `make proto-latest`, bump `PROTO_COMMIT` in the `Makefile`, then `make sync-protos && make protos` and commit the (expected-empty) diff.
+   If it fails, `proto/` is hand-patched ahead of the pin: merge the backend branch, `make proto-latest`, bump `PROTO_COMMIT` in the `Makefile`, then `make sync-protos && make protos` and commit the diff.
 
    No other check catches this. CI runs `make protos` against the *committed* mirror, so a hand-patched `proto/` regenerates consistently and `make check-codegen` stays green — only a fresh BSR download can tell, which is why this step needs network access and lives here rather than in CI.
 

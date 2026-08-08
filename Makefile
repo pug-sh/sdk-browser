@@ -9,12 +9,8 @@
 # builds and CI never touch BSR (proto/ + src/gen are committed). To bump: run
 # `make proto-latest` for the newest commit, set PROTO_COMMIT below, then
 # `make sync-protos && make protos` and review + commit the diff.
-# RELEASE BLOCKER: proto/sdk/events/v1/events.proto is hand-patched ahead of the
-# BSR (cookieless field, pug repo branch feat/cookieless-identity). Before any
-# npm/CDN release: merge that branch, run `make proto-latest`, bump PROTO_COMMIT,
-# `make sync-protos && make protos`, and confirm the sync produces no diff.
 PROTO_MODULE  := buf.build/pugsh/pug
-PROTO_COMMIT  := 739d784162d649a3be748db76d3fafd8
+PROTO_COMMIT  := 1707192ba6e5470cbdf5e2ab382d08f5
 
 # Re-vendor proto/ from the pinned BSR commit. `buf export` is a read-only download; --path is
 # an allowlist and buf pulls in transitive imports (buf/validate, google WKTs) automatically,
@@ -33,17 +29,14 @@ sync-protos:
 proto-latest:
 	@buf registry module commit resolve $(PROTO_MODULE):main
 
-# Release gate for the RELEASE BLOCKER above: proves proto/ is exactly what the pinned BSR commit
-# exports, i.e. that nothing is hand-patched ahead of the pin.
+# Release gate: proves proto/ is exactly what the pinned BSR commit exports, i.e. that nothing is
+# hand-patched ahead of the pin.
 #
 # Nothing else in the repo can detect that divergence. `make check-codegen` runs `make protos`
 # against the *committed* mirror and diffs src/gen, so a hand-patched proto/ regenerates
 # consistently and stays green — CI is structurally incapable of noticing. Only re-downloading from
 # BSR and diffing can, which is why this is a separate target: it needs network access, so it runs
 # at publish time rather than on every CI run.
-#
-# While the blocker stands this target FAILS BY DESIGN. That is the point — it converts a comment
-# nobody is obliged to read into a step `npm publish` cannot skip.
 check-proto-pin:
 	@command -v buf >/dev/null || { echo "buf CLI required: https://buf.build/docs/installation"; exit 1; }
 	@rm -rf .proto-pin-check

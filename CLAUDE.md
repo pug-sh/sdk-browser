@@ -290,12 +290,6 @@ Protobuf types are **vendored**, not consumed from a Buf Schema Registry npm pac
 `npm install` with no `.npmrc`/registry config. Mirrors sdk-android / sdk-flutter. Both `proto/` and
 `src/gen/` are committed; `@buf/pugsh_pug.bufbuild_es` is **not** a dependency.
 
-> **Provisional pin (release blocker):** `proto/sdk/events/v1/events.proto` is hand-patched *ahead* of
-> `PROTO_COMMIT` with the cookieless contract (pug repo branch `feat/cookieless-identity` —
-> `Event.cookieless = 8` + validation restructure). Before any npm/CDN release the backend branch must
-> merge and the pin must be bumped so `make sync-protos` produces a zero diff. See the RELEASE BLOCKER
-> comment in the Makefile.
-
 - `make sync-protos` — `buf export buf.build/pugsh/pug:$(PROTO_COMMIT)` (read-only, **pinned**) into
   `proto/`, allowlisted so backend-only trees are never synced. Needs BSR network access; nothing else
   in the build does. Bump deliberately: `make proto-latest`, update `PROTO_COMMIT`, re-run, review.
