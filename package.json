@@ -1,0 +1,48 @@
+{
+  "name": "@pug-sh/browser",
+  "version": "0.1.0",
+  "description": "Pug browser SDK for event tracking and product analytics",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "jsdelivr": "./dist/cdn/pug.min.js",
+  "unpkg": "./dist/cdn/pug.min.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "WELL_KNOWN_EVENTS.md",
+    "LICENSE"
+  ],
+  "homepage": "https://pug.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pug-sh/sdk-browser.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pug-sh/sdk-browser/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.12.0",
+    "uuidv7": "^1.1.0"
+  },
+  "keywords": [
+    "analytics",
+    "tracking",
+    "events",
+    "sdk",
+    "browser",
+    "web"
+  ],
+  "author": "pug.sh",
+  "license": "MIT"
+}
