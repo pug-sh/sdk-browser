@@ -7,15 +7,19 @@ Publishing is manual. A release ships **two** things:
 
 ## Installing without a release
 
-`dist/` is not committed, so a git install has to build. npm and friends do that themselves — `npm i github:pug-sh/sdk-browser` (optionally `#<branch|sha>`) runs `prepare`, which builds and packs per the `files` allowlist.
+`dist/` is not committed, so a git install has to build. npm does that itself — `npm i github:pug-sh/sdk-browser` (optionally `#<branch|sha>`) installs the devDependencies, runs `prepare`, and packs per the `files` allowlist. That is what the `prepare` script is for.
 
-**Bun does not**: it extracts the raw repo tarball and skips `prepare`, so it would install a package with no `dist/`. For bun, run `bun run publish:dist` — it builds and force-pushes the packed output as a single orphan commit on the **`dist`** branch, which installs with any package manager:
+**Bun does not.** It extracts the repo tarball verbatim — no `prepare`, no build, no `files` filtering — so it would install a package carrying `src/` and `proto/` and no `dist/`, with `main` resolving to nothing. Neither a full `git+https://` URL nor the consumer's `trustedDependencies` changes that (checked on bun 1.3.14), and it is not specific to this repo: `github:sindresorhus/ky` builds under npm and not under bun.
+
+So the build output has to be in the tree bun extracts. The **`dist`** branch is that tree, and it installs with any package manager:
 
 ```bash
 bun add github:pug-sh/sdk-browser#dist
 ```
 
-The branch is only as fresh as the last run, so re-run it after any source change you expect a consumer to pick up. It is a stopgap for pre-release consumers, not a substitute for a release.
+CI republishes it on every push to `main` (the `publish-dist` job, gated behind `build`); `bun run publish:dist` does it by hand. Either way it is one orphan commit, force-pushed, carrying what `npm pack` would ship plus a `package.json` with `scripts` and `devDependencies` stripped — leaving `prepare` on the branch would send npm off to rebuild from sources the branch does not carry. An identical rebuild is not republished, since lockfiles pin the branch by commit sha and a docs-only commit shouldn't churn them.
+
+This is **not** a release: the branch tracks `main`, so it carries unreleased work under whatever version `package.json` had at build time. It is for the pre-launch window; consumers who need a stable artifact want the npm package or a pinned CDN bundle.
 
 ## One-time setup (Cloudflare)
 
