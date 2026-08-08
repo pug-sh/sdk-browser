@@ -33,7 +33,7 @@
   },
   "scripts": {
     "prebuild": "echo \"export const SDK_VERSION = '$(node -p \"require('./package.json').version\")'\" > src/version.ts",
-    "build": "tsc && node scripts/build-cdn.mjs",
+    "build": "rm -rf dist && tsc && node scripts/build-cdn.mjs",
     "prepare": "npm run build",
     "prepublishOnly": "make check-proto-pin && npm run build",
     "publish:dist": "bun run scripts/publish-dist-branch.mjs",
