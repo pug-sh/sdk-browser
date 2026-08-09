@@ -1,6 +1,8 @@
 version: 2
 updates:
-  - package-ecosystem: "npm"
+  # "bun", not "npm": the npm ecosystem updates package-lock/yarn.lock/pnpm-lock, none of which
+  # exist here, leaving bun.lock stale and CI's `bun install --frozen-lockfile` failing.
+  - package-ecosystem: "bun"
     directory: "/"
     schedule:
       interval: "weekly"
