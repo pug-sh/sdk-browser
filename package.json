@@ -32,19 +32,19 @@
     "access": "public"
   },
   "scripts": {
-    "prebuild": "echo \"export const SDK_VERSION = '$(node -p \"require('./package.json').version\")'\" > src/version.ts",
-    "build": "rm -rf dist && tsc && node scripts/build-cdn.mjs",
-    "prepare": "npm run build",
-    "prepublishOnly": "make check-proto-pin && npm run build",
+    "prebuild": "echo \"export const SDK_VERSION = '$(bun --print \"require('./package.json').version\")'\" > src/version.ts",
+    "build": "rm -rf dist && bun --bun tsc && bun scripts/build-cdn.mjs",
+    "prepare": "bun run build",
+    "prepublishOnly": "make check-proto-pin && bun run build",
     "publish:dist": "bun run scripts/publish-dist-branch.mjs",
-    "watch": "tsc -w",
-    "dev": "tsc -w & serve . & sleep 1 && open http://localhost:3000 && wait",
-    "serve": "serve . & sleep 1 && open http://localhost:3000 && wait",
-    "typecheck": "tsc -p tsconfig.typecheck.json",
-    "lint": "biome check --write .",
-    "format": "biome format --write .",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "watch": "bun --bun tsc -w",
+    "dev": "bun --bun tsc -w & bun --bun serve . & sleep 1 && open http://localhost:3000 && wait",
+    "serve": "bun --bun serve . & sleep 1 && open http://localhost:3000 && wait",
+    "typecheck": "bun --bun tsc -p tsconfig.typecheck.json",
+    "lint": "bun --bun biome check --write .",
+    "format": "bun --bun biome format --write .",
+    "test": "bun --bun vitest run",
+    "test:watch": "bun --bun vitest"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.12.0",
