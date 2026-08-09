@@ -357,18 +357,13 @@ describe('Event proto integrity', () => {
     })
 
     // Every kind an automatic tracker emits, plus a custom one.
-    it.each([
-      'click',
-      'scroll',
-      'form_start',
-      'form_submit',
-      'rage_click',
-      'dead_click',
-      'my_event',
-    ])('omits $pageTitle on %s', kind => {
-      const ev = toEvent(PROJECT_ID, kind, { sessionId: SESSION_ID, distinctId: DISTINCT_ID })
-      expect(ev!.autoProperties.$pageTitle).toBeUndefined()
-    })
+    it.each(['click', 'scroll', 'form_start', 'form_submit', 'rage_click', 'dead_click', 'my_event'])(
+      'omits $pageTitle on %s',
+      kind => {
+        const ev = toEvent(PROJECT_ID, kind, { sessionId: SESSION_ID, distinctId: DISTINCT_ID })
+        expect(ev!.autoProperties.$pageTitle).toBeUndefined()
+      },
+    )
 
     // The conditional spread must not swallow its siblings.
     it('still sends the other auto-properties on a non-page_view event', () => {
