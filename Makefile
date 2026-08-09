@@ -68,18 +68,18 @@ check-proto-pin:
 # resolved from node_modules/.bin.
 protos:
 	@command -v buf >/dev/null || { echo "buf CLI required: https://buf.build/docs/installation"; exit 1; }
-	PATH="$(CURDIR)/node_modules/.bin:$$PATH" buf generate
-	node scripts/strip-validate-deps.mjs
+	buf generate
+	bun scripts/strip-validate-deps.mjs
 	$(MAKE) typed-events
 
 # Rebuild the well-known-event artifacts from the generated schemas: the type-only
 # registry (src/well-known-events.generated.ts) and the human reference
 # (WELL_KNOWN_EVENTS.md). Web analog of sdk-flutter's typed-track. The script introspects
-# a throwaway compile of src/gen (node can't import the .ts source directly), so nothing
-# here touches the Buf Schema Registry.
+# a throwaway compile of src/gen rather than the .ts source, so nothing here touches the
+# Buf Schema Registry.
 typed-events:
-	node_modules/.bin/tsc -p tsconfig.gen.json
-	node scripts/gen-well-known-events.mjs
+	bun --bun tsc -p tsconfig.gen.json
+	bun scripts/gen-well-known-events.mjs
 	rm -rf .codegen-tmp
 
 # CI gate: committed codegen (src/gen + typed events + the reference doc) must match a
