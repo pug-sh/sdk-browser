@@ -1,8 +1,8 @@
 // Builds the CDN IIFE bundle from src/cdn.ts into dist/cdn/pug.min.js plus a sourcemap with the
 // sources inlined (src/ is not shipped, so the map is the readable form of the bundle). It lives
 // under dist/cdn/ because tsc emits dist/pug.js from src/pug.ts — a root-level bundle would
-// overwrite that module and break the ESM package. Runs as part of `bun run build` and must stay
-// plain node — `npm publish` executes prepublishOnly under node, not bun. Prints the bundle's raw
+// overwrite that module and break the ESM package. Runs under bun as part of `bun run build`,
+// including via prepublishOnly, so `npm publish` needs bun on PATH. Prints the bundle's raw
 // and gzip sizes plus its SRI hash, and fails the build when gzip exceeds the size budget so a
 // dependency regression cannot ship silently; raising the budget is a deliberate, reviewable
 // change to the constant below. Also writes a pug.min.js.LEGAL.txt sidecar attributing every
