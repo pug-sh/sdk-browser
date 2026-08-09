@@ -137,9 +137,7 @@ export interface InitOptions {
    * `'denied'` → `'cookieless'` thaw, where the entry to `'denied'` already emptied it. `reset()`
    * additionally sends-and-drops the queue but leaves the registry, which holds per-tab timestamps
    * and no identifiers (and whose stale entries are pruned by their own idle timeout). A queue that
-   * cannot reach the network is bounded by `batch.maxQueueSize`, not by this deadline. Nor is
-   * `pug_device_id`, the push module's device identifier — it has no deadline and no teardown clears
-   * it (push is not currently exported, so nothing writes it yet).
+   * cannot reach the network is bounded by `batch.maxQueueSize`, not by this deadline.
    */
   readonly maxAgeDays?: number | undefined
   /**
@@ -197,9 +195,8 @@ let cookielessIdentifyWarned = false
  * Compile-time exhaustiveness marker: reaching it with a non-`never` argument is a type error, so
  * widening a union forces every dispatch over it to be revisited.
  *
- * Deliberately does not throw. The caller's `else` branch already fails closed and logs the offending
- * state by name; a throw would be swallowed by track()'s own try/catch and replace that with a
- * generic message.
+ * Deliberately does not throw: the caller's `else` branch already logs the offending state by name,
+ * and a throw would be swallowed by track()'s own try/catch and replace that with a generic message.
  */
 const unreachable = (_state: never): void => {}
 
@@ -256,11 +253,9 @@ const warnOnInsecureEndpoint = (endpoint: string): void => {
  * Reports a failed `init()` phase without letting it escape — `init()` must not throw into a host
  * application, and the SDK still runs (degraded) with the phase skipped.
  *
- * A `TypeError` here is one of the three consent-gate head guards firing (`createCookieLayer`,
- * `configureSession`, `configureProfile`), which is an SDK wiring fault rather than a hostile
- * browser, so it is reported at error and named as such. Without the split every one of those
- * guards — whose whole purpose is to fail loud — arrived as a warn that reads like a blocked cookie
- * store, while the SDK silently continued with no session or profile persistence.
+ * A `TypeError` here is one of the three consent-gate head guards firing: an SDK wiring fault, not a
+ * hostile browser, so it is reported at error and named as such rather than as a warn that reads
+ * like a blocked cookie store. @see docs/design-notes/tracking-consent.md#the-head-guards
  */
 const reportInitFailure = (what: string, err: unknown): void => {
   if (err instanceof TypeError) {
@@ -369,38 +364,27 @@ export const init = (projectId: string, options: InitOptions) => {
     log.debug('Cookieless mode: events flow without stored identity; identify() is disabled until consent is granted.')
   }
 
-  // Entering a non-granted state via config must leave the device as setTrackingConsent() would, or
-  // a visitor whose CMP now says "reject" keeps a prior consented visit's identifiers and a later
-  // grant resolves the *pre-existing* session and anonymous ID.
-  //
-  // Gated on isAuthoritative(), so it only fires when the resolved state is the user's own recorded
-  // choice. Without persistence the value is the caller's per-load placeholder — typically a
-  // 'denied' an async CMP corrects later — and purging on that mints a new identity every load.
+  // Entering a non-granted state via config must leave the device as setTrackingConsent() would.
+  // Gated on isAuthoritative() so it only fires for the user's own recorded choice — without
+  // persistence the value is a per-load placeholder, and purging on that mints a new identity every
+  // load. @see docs/design-notes/pug.md#non-granted-init
   if (!state.trackingConsent.isGranted()) {
     if (state.trackingConsent.isAuthoritative()) {
       // purgePersistedIdentity() drops the queue first, so it is not purged separately here.
-      //
-      // init() returns void, so this outcome has nowhere structured to go and must not be left to
-      // be inferred from the per-key errors: a purge that did not land means a later
-      // optInTracking() resumes the PRE-EXISTING identity while getTrackingConsent() reports the
-      // new state as though it fully applied.
+      // init() returns void, so this outcome must not be left to be inferred from per-key errors: a
+      // purge that did not land means a later optInTracking() resumes the PRE-EXISTING identity.
       if (!purgePersistedIdentity({ dropQueue: true })) {
         log.error(
           'Could not fully remove stored identity for a non-granted consent state. Identifiers may survive on this device, and granting consent later may resume the previous identity rather than minting a fresh one.',
         )
       }
     } else {
-      // The queue goes either way, unlike identity: it is an outbound buffer of events already
-      // collected, not an identifier a later grant could resolve. Withholding it here left a prior
-      // consented visit's identified payloads on the device for every non-authoritative non-granted
-      // init — any config without `persist: true`, i.e. a bare `'denied'`/`'cookieless'` string or
-      // the `{ initial, persist: false }` form in examples/cdn/index.html.
+      // The queue goes either way, unlike identity: it is an outbound buffer, not an identifier a
+      // later grant could resolve.
       const queueDropped = purgeQueuedEvents({ send: false }).ok
-      // Identity is deliberately skipped — see isAuthoritative(). Say so, or an integrator passing a
-      // bare 'cookieless'/'denied' cannot tell the documented purge did not run — and name the queue
-      // drop, which is where a hard-killed granted session's events went. The phrase is conditioned
-      // on the result: on a failed purge the queue's own error already says the key survived, and an
-      // unconditional "were dropped" here contradicted it.
+      // Identity is deliberately skipped — see isAuthoritative() — and saying so is what tells an
+      // integrator passing a bare 'cookieless'/'denied' that the documented purge did not run. The
+      // phrase is conditioned on the result: unconditional, it contradicted the queue's own error.
       log.debug(
         `Consent is not granted but was not restored from storage, so it is a config seed rather than a recorded choice — ${
           queueDropped
@@ -408,17 +392,11 @@ export const init = (projectId: string, options: InitOptions) => {
             : 'the queued-events purge did not fully land (see the error above)'
         }, and stored identity was left in place. Use trackingConsent.persist to record the choice.`,
       )
-      // The message above is at debug because this branch is a no-op on every default install: the
-      // 'cookieless' seed is non-granted and non-authoritative, so it runs for everyone and there is
-      // usually nothing to leave behind. That is exactly why it could not reach the case it exists
-      // for — `init({ trackingConsent: 'denied' })` as a bare string on a device carrying a prior
-      // consented visit's identity, where the skipped purge is a real outcome and debug is off.
-      //
-      // isIdentified() separates the two: configureProfile has already restored any externalId a
-      // previous identify() persisted, so a true here means a durable, routinely email-shaped
-      // identifier is being kept on the device under a state the integrator spelled as non-granted.
-      // Warn, so it reaches them without knowing a flag exists; silent otherwise, so the default
-      // install stays quiet.
+      // Debug above, because this branch is a no-op on every default install — which is also why it
+      // could never reach the case it exists for. isIdentified() separates the two: a true here
+      // means a durable, routinely email-shaped identifier is being kept under a state the
+      // integrator spelled as non-granted, so it warns.
+      // @see docs/design-notes/pug.md#non-granted-init
       if (isIdentified()) {
         log.warn(
           "Consent is not granted, but a previous identify() left an externalId on this device and it was NOT removed: the state came from config rather than from storage, so it may be a pre-banner placeholder rather than the user's choice. Pass trackingConsent.persist to record real choices, or call optOutTracking() once the user has actually rejected.",
@@ -448,13 +426,11 @@ export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
 
 /**
  * Drops the queued events off the device. `send: false` on every consent teardown — beaconing after
- * a withdrawal is a fresh transmission of the data just refused; `reset()` (a logout, consent
- * unchanged) sends first.
+ * a withdrawal is a fresh transmission of the data just refused; `reset()` sends first.
  *
- * Split from the identity purge because the two answer to different gates: the queue is an outbound
- * buffer, not an identifier anything reads back, so purging it can never mint a new identity and
- * `isAuthoritative()` does not apply. Folded together, it left a prior consented visit's identified
- * payloads on the device through every non-authoritative non-granted init.
+ * Split from the identity purge because the queue is an outbound buffer, not an identifier anything
+ * reads back, so `isAuthoritative()` does not apply to it.
+ * @see docs/design-notes/pug.md#non-granted-init
  */
 const purgeQueuedEvents = ({ send }: { send: boolean }): PurgeResult => {
   // A null state means the transport was never built, so the queue was not purged. Report that
@@ -463,14 +439,12 @@ const purgeQueuedEvents = ({ send }: { send: boolean }): PurgeResult => {
     return { ok: false, destroyed: 0 }
   }
   try {
-    // `ok: false` means a queue key survived on the device, and the queue's own purge() reports that
-    // at its site with the cause in hand; a dropped farewell beacon reports through reportBeaconLoss
-    // and does not affect it. Adding a message for either would only guess.
+    // No message for `ok: false` or a dropped beacon — the queue's own purge() and reportBeaconLoss
+    // each report at their site with the cause in hand; anything here would guess at both.
     const result = state.transport.purgeQueue({ send })
-    // The page that queued these events logged "will retry" at warn level; this is where that
-    // breaks. Keyed on `destroyed` rather than a buffer count, so a purge that left the persisted
-    // key behind claims no destruction while a cookieless queue's permanent loss is still reported,
-    // and on `!send`, since reset() beacons them out first.
+    // Keyed on `destroyed`, not a buffer count, so a purge that left the persisted key behind claims
+    // no destruction — and on `!send`, since reset() beacons them out first.
+    // @see docs/design-notes/pug.md#purge-reporting
     if (!send && result.destroyed > 0) {
       log.warn(
         `Dropped ${result.destroyed} queued event(s) collected under a previous consent state, unsent — they may include identified payloads, which must not be held or transmitted once consent is no longer granted.`,
@@ -492,10 +466,9 @@ const purgeQueuedEvents = ({ send }: { send: boolean }): PurgeResult => {
  * Idempotent in end state but not side-effect-free: it issues removals (cookie deletions when
  * cross-subdomain) and may log an error on an unconfirmed removal even when nothing was stored.
  *
- * `dropQueue` is the caller's statement that this purge accompanies a consent *reduction* (or
- * init()'s authoritative restore, where there is no previous state) — the identity removals are
- * end-state no-ops on a re-assert, but the queue drop is not: it destroys queued events, so it
- * must not run when nothing actually changed.
+ * `dropQueue` states that this purge accompanies a consent *reduction*. The identity removals are
+ * end-state no-ops on a re-assert; the queue drop is not.
+ * @see docs/design-notes/pug.md#dropqueue
  */
 const purgePersistedIdentity = ({ dropQueue }: { dropQueue: boolean }): boolean => {
   // Runs first, while those events still exist.

@@ -77,18 +77,12 @@ const isGpcEnabled = (): boolean => {
 
 /**
  * A consent predicate, nominally tagged with the question it answers. Both gates are `() => boolean`
- * and are injected positionally, so passing the wrong one compiled silently — and one such swap
- * (`configureProfile` receiving `isTracking`) was invisible to types *and* to every test while
- * writing a durable `externalId` to the device in cookieless mode.
+ * and injected positionally, so passing the wrong one compiled silently.
  *
- * The member is **required**: optional, it could be laundered off by `const f: () => boolean = g` or
- * a `() => g()` wrapper. Producers add it with the `as` casts below.
- *
- * Deliberately **not exported** — only the two instantiations below are. Exported, a module could
- * write `type Gate = ConsentGate<'granted'>` and then `fn as Gate`, which renames the brand out of
- * every rule in consent-gate-containment.test.ts (`as Gate` matches none of them) without ever
- * looking like a cast to the brand. Nothing outside this module needs the generic; `GrantedGate` and
- * `TrackingGate` are the only instantiations that exist.
+ * The member is **required**: optional, it could be laundered off by `const f: () => boolean = g`.
+ * The generic is deliberately **not exported** — exported, `type Gate = ConsentGate<'granted'>` then
+ * `fn as Gate` renames the brand out of every containment rule.
+ * @see docs/design-notes/tracking-consent.md#the-two-gates
  */
 type ConsentGate<K extends string> = (() => boolean) & { readonly __gate: K }
 /** May we write identity to the device? Full consent only. */
@@ -98,31 +92,23 @@ export type TrackingGate = ConsentGate<'tracking'>
 
 /**
  * A granted gate for a controller that does not exist yet. `init()` must build the cookie layer
- * before the controller — the controller needs the store, and the store needs the layer — so the
- * layer's gate resolves lazily through `controller`.
+ * before the controller — the controller needs the store, the store needs the layer — so the layer's
+ * gate resolves lazily.
  *
- * Until it resolves this reads as **not granted**, so the window cannot become a hole if a future
- * edit moves a store access above the assignment: no `?? true` here means no fail-open default
- * anywhere in the gate chain. It costs nothing today — the only value read in that window is the
- * consent record, and the sole thing a withheld gate suppresses is `reconcileTwin`'s *promotion*.
- * The twin is preserved and read normally, and the restore write that follows it is ungated, so a
- * cookie-backed consent record still round-trips and still lands on the registrable domain — the
- * ungated write being `createTrackingConsent`'s own refresh `setItem`, not `reconcileTwin`'s
- * `restoreTwin`, which is deliberately host-only and stays that way under a withheld gate.
+ * Until it resolves this reads as **not granted**: no `?? true` here means no fail-open default
+ * anywhere in the gate chain, so the window cannot become a hole if a future edit moves a store
+ * access above the assignment.
  *
- * Lives here so the `as GrantedGate` cast stays in the module that owns the brand — minted
- * anywhere else it is indistinguishable from the wrapper-arrow laundering `consent-gate.test-d.ts`
- * exists to reject.
+ * Lives here so the `as GrantedGate` cast stays in the module that owns the brand.
+ * @see docs/design-notes/tracking-consent.md#containment
  */
 export const deferredGrantedGate = (controller: () => TrackingConsentController | null): GrantedGate =>
   ((): boolean => controller()?.isGranted() ?? false) as GrantedGate
 
 /**
- * The recognized `TrackingConsentConfig` keys. Needed at runtime because the CDN one-tag install
- * supplies this object as untyped JSON, where a typo is otherwise undetectable — but *derived* from
- * the type, like `TrackingConsent` is from `CONSENT_STATES`. Written separately, adding a legal
- * member made valid typed configs fail closed to 'denied'; `satisfies` makes both drift directions
- * a compile error (a missing key fails the constraint, an extra one the excess-property check).
+ * The recognized `TrackingConsentConfig` keys — needed at runtime because the one-tag install
+ * supplies this as untyped JSON, but *derived* from the type so it cannot drift: `satisfies` makes
+ * both directions a compile error. @see docs/design-notes/tracking-consent.md#derived-unions-so-predicates-cannot-drift
  */
 const CONSENT_KEY_MAP = {
   initial: true,

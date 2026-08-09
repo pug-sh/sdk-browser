@@ -1,6 +1,6 @@
 {
   "name": "@pug-sh/browser",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "description": "Pug browser SDK for event tracking and product analytics",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,7 +16,6 @@
   },
   "files": [
     "dist",
-    "pug_sw.js",
     "README.md",
     "WELL_KNOWN_EVENTS.md",
     "LICENSE"
@@ -34,8 +33,10 @@
   },
   "scripts": {
     "prebuild": "echo \"export const SDK_VERSION = '$(node -p \"require('./package.json').version\")'\" > src/version.ts",
-    "build": "tsc && node scripts/build-cdn.mjs",
+    "build": "rm -rf dist && tsc && node scripts/build-cdn.mjs",
+    "prepare": "npm run build",
     "prepublishOnly": "make check-proto-pin && npm run build",
+    "publish:dist": "bun run scripts/publish-dist-branch.mjs",
     "watch": "tsc -w",
     "dev": "tsc -w & serve . & sleep 1 && open http://localhost:3000 && wait",
     "serve": "serve . & sleep 1 && open http://localhost:3000 && wait",

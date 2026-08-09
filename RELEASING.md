@@ -5,6 +5,22 @@ Publishing is manual. A release ships **two** things:
 - the **npm package** (`npm publish`) — for `npm install` / bundler users; jsDelivr also serves it from npm as a fallback.
 - the **CDN bundle** to **`cdn.pugs.dev`** (first-party Cloudflare R2) — the URL the documented `<script>` installs point at: `https://cdn.pugs.dev/vX.Y.Z/pug.min.js`. It's an **`@`-free, version-in-path** URL on purpose: a `pkg@version` substring in a customer's HTML matches Cloudflare Email Address Obfuscation and gets rewritten to `[email protected]`, breaking the load — the path form avoids that on every customer's Cloudflare zone.
 
+## Installing without a release
+
+`dist/` is not committed, so a git install has to build. npm does that itself — `npm i github:pug-sh/sdk-browser` (optionally `#<branch|sha>`) installs the devDependencies, runs `prepare`, and packs per the `files` allowlist. That is what the `prepare` script is for.
+
+**Bun does not.** It extracts the repo tarball verbatim — no `prepare`, no build, no `files` filtering — so it would install a package carrying `src/` and `proto/` and no `dist/`, with `main` resolving to nothing. Neither a full `git+https://` URL nor the consumer's `trustedDependencies` changes that (checked on bun 1.3.14), and it is not specific to this repo: `github:sindresorhus/ky` builds under npm and not under bun.
+
+So the build output has to be in the tree bun extracts. The **`dist`** branch is that tree, and it installs with any package manager:
+
+```bash
+bun add github:pug-sh/sdk-browser#dist
+```
+
+CI republishes it on every push to `main` (the `publish-dist` job, gated behind `build`); `bun run publish:dist` does it by hand. Either way it is one orphan commit, force-pushed, carrying what `npm pack` would ship plus a `package.json` with `scripts` and `devDependencies` stripped — leaving `prepare` on the branch would send npm off to rebuild from sources the branch does not carry. An identical rebuild is not republished, since lockfiles pin the branch by commit sha and a docs-only commit shouldn't churn them.
+
+This is **not** a release: the branch tracks `main`, so it carries unreleased work under whatever version `package.json` had at build time. It is for the pre-launch window; consumers who need a stable artifact want the npm package or a pinned CDN bundle.
+
 ## One-time setup (Cloudflare)
 
 1. Create the R2 bucket (default `pugs-dev-cdn`; override with `PUG_CDN_BUCKET`): `bunx wrangler r2 bucket create pugs-dev-cdn`.
@@ -16,7 +32,7 @@ Publishing is manual. A release ships **two** things:
 
 0. **Clear the proto pin**: `make check-proto-pin`. This must pass before anything else. It re-downloads the pinned BSR commit and diffs it against the committed `proto/` mirror, proving nothing is hand-patched ahead of the pin. `npm publish` runs it via `prepublishOnly`, so a release cannot skip it.
 
-   It **fails today by design**: `proto/sdk/events/v1/events.proto` carries the cookieless contract (`Event.cookieless`, validation restructure) ahead of the BSR, from the pug repo branch `feat/cookieless-identity`. To clear it: merge that branch, `make proto-latest`, bump `PROTO_COMMIT` in the `Makefile`, then `make sync-protos && make protos` and commit the (expected-empty) diff.
+   If it fails, `proto/` is hand-patched ahead of the pin: merge the backend branch, `make proto-latest`, bump `PROTO_COMMIT` in the `Makefile`, then `make sync-protos && make protos` and commit the diff.
 
    No other check catches this. CI runs `make protos` against the *committed* mirror, so a hand-patched `proto/` regenerates consistently and `make check-codegen` stays green — only a fresh BSR download can tell, which is why this step needs network access and lives here rather than in CI.
 
