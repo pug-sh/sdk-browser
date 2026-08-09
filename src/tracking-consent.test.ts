@@ -119,23 +119,17 @@ describe('createTrackingConsent', () => {
   // or that passes null before the user answers, left a 'granted' user fully tracked while
   // isTrackingEnabled() confirmed the wrong state. init() already fails closed on the same untrusted
   // input, so runtime input now matches it.
-  it.each([
-    'Cookieless',
-    'reject',
-    'opt-out',
-    'cookie-less',
-    'cookieless ',
-    false,
-    null,
-    undefined,
-  ])('fails closed to denied and reports failure for the invalid state %p', async invalid => {
-    const createTrackingConsent = await loadFactory()
-    const consent = createTrackingConsent('proj', 'granted')
-    expect(consent.set(invalid as never)).toBe(false)
-    expect(consent.getConsent()).toBe('denied')
-    expect(consent.isTracking()).toBe(false)
-    expect(logSpies.error).toHaveBeenCalled()
-  })
+  it.each(['Cookieless', 'reject', 'opt-out', 'cookie-less', 'cookieless ', false, null, undefined])(
+    'fails closed to denied and reports failure for the invalid state %p',
+    async invalid => {
+      const createTrackingConsent = await loadFactory()
+      const consent = createTrackingConsent('proj', 'granted')
+      expect(consent.set(invalid as never)).toBe(false)
+      expect(consent.getConsent()).toBe('denied')
+      expect(consent.isTracking()).toBe(false)
+      expect(logSpies.error).toHaveBeenCalled()
+    },
+  )
 
   it('reports success for a valid transition', async () => {
     const createTrackingConsent = await loadFactory()

@@ -292,22 +292,23 @@ describe('cookieless loss reporting and flush fairness', () => {
   // floors the consented budget at 1, which at maxSize:1 IS the whole budget — so cookieless got
   // lock(0) on every flush forever. maxSize:1 is legal (validated with min 1) and is the natural
   // choice for per-event delivery. A single fixed maxSize could never have caught it.
-  it.each([
-    1, 2, 3, 10,
-  ])('does not starve cookieless events behind a maxSize consented backlog (maxSize: %i)', async maxSize => {
-    sendBatch.mockRejectedValue(new RpcError('down', GrpcCode.Unavailable))
-    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize, maxWaitMs: 500 })
-    for (const k of ['b0', 'b1', 'b2']) {
-      await t.send(evt(k))
-    }
-    await vi.advanceTimersByTimeAsync(3000)
+  it.each([1, 2, 3, 10])(
+    'does not starve cookieless events behind a maxSize consented backlog (maxSize: %i)',
+    async maxSize => {
+      sendBatch.mockRejectedValue(new RpcError('down', GrpcCode.Unavailable))
+      const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize, maxWaitMs: 500 })
+      for (const k of ['b0', 'b1', 'b2']) {
+        await t.send(evt(k))
+      }
+      await vi.advanceTimersByTimeAsync(3000)
 
-    await t.send(cookielessEvt('c0'))
-    await vi.advanceTimersByTimeAsync(5000)
+      await t.send(cookielessEvt('c0'))
+      await vi.advanceTimersByTimeAsync(5000)
 
-    const attempted = sendBatch.mock.calls.flatMap((c: unknown) => (c as [Event[]])[0].map(e => e.eventId || e.kind))
-    expect(attempted).toContain('c0')
-  })
+      const attempted = sendBatch.mock.calls.flatMap((c: unknown) => (c as [Event[]])[0].map(e => e.eventId || e.kind))
+      expect(attempted).toContain('c0')
+    },
+  )
 
   // Same starvation, reached through the config instead of the reserve arithmetic: a fractional
   // maxSize makes `lock(maxSize - consented.length)` reserve 0.5 events, which slice() returns as []
