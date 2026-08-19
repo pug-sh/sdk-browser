@@ -68,7 +68,7 @@
     "jsdom": "^30.0.1",
     "knip": "^6.32.2",
     "serve": "^14.2.6",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.1"
   }
 }
