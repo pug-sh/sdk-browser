@@ -54,8 +54,9 @@ jobs:
 
       - run: bun run lint
 
-      # Unused files, exports and dependencies. Biome's linter is off, so nothing else catches
-      # dead code; the shipped bundle is size-budgeted, so it also guards the budget.
+      # Unused files, exports and dependencies. Biome's linter is off, so nothing else catches an
+      # export nothing imports or a file nothing reaches — and tsc emits every src/ file to dist/,
+      # which ships to npm.
       - run: bun run knip
 
       # Typechecks src/**/*.test-d.ts, the type-level tests the build's tsconfig excludes. These
