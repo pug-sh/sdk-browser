@@ -89,3 +89,25 @@ jobs:
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - run: bun run publish:dist
+
+  # Preview build for every PR and main push, installable as
+  # `https://pkg.pr.new/@pug-sh/browser@<sha>` — how site/docs dogfood an unmerged branch.
+  # pkg.pr.new packs what is already on disk, so this builds first; the GitHub App posts the
+  # install command on the PR. Needs no token, hence no write permissions.
+  publish-preview:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run build
+
+      - run: bunx pkg-pr-new publish
