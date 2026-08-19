@@ -1,0 +1,21 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/cdn.ts",
+    // Type-level tests: never run, so no test-runner plugin claims them as entries.
+    "src/**/*.test-d.ts",
+    // Invoked from the Makefile and by hand, never imported.
+    "scripts/*.mjs",
+    // Demo pages loaded by <script>, not by the bundle.
+    "examples/**/*.js",
+    "public/*.js"
+  ],
+  "project": ["src/**/*.ts", "scripts/**/*.mjs"],
+  "ignore": ["src/gen/**"],
+  // `make` runs the codegen targets; `wait` is a shell builtin in the dev/serve scripts.
+  "ignoreBinaries": ["make", "wait"],
+  // knip's script parser stops at `bun --bun <bin>`, and buf.gen.yaml is not a format it reads,
+  // so these three are invisible to it: biome + serve via package.json scripts, protoc-gen-es
+  // via buf.gen.yaml's `local:` plugin path.
+  "ignoreDependencies": ["@biomejs/biome", "@bufbuild/protoc-gen-es", "serve"]
+}

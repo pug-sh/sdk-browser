@@ -54,6 +54,10 @@ jobs:
 
       - run: bun run lint
 
+      # Unused files, exports and dependencies. Biome's linter is off, so nothing else catches
+      # dead code; the shipped bundle is size-budgeted, so it also guards the budget.
+      - run: bun run knip
+
       # Typechecks src/**/*.test-d.ts, the type-level tests the build's tsconfig excludes. These
       # guard against *missing* type errors (e.g. a permissive track() overload silently absorbing a
       # wrong-typed well-known property), which no runtime test can catch.

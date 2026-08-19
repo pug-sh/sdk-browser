@@ -31,12 +31,21 @@ bun run dev            # Watch TypeScript + serve on port 3000
 bun run serve          # Serve static files on port 3000
 bun run lint           # Lint & auto-fix with Biome (biome check --write .)
 bun run format         # Format source files with Biome
+bun run knip           # Find unused files, exports & dependencies (knip.jsonc)
 bun run typecheck      # Typecheck src + type-level tests (tsc -p tsconfig.typecheck.json)
 bun run test           # Run tests once (vitest run)
 bun run test:watch     # Run tests in watch mode
 ```
 
 **Manual testing:** after building, `bun run serve` and open `http://localhost:3000`.
+
+**Dead-code gate:** `bun run knip` runs in CI and is expected to stay at zero findings. Biome's
+linter is disabled, so knip is the only thing catching an export nothing imports or a file nothing
+reaches. Its config (`knip.jsonc`) carries the entry points tooling cannot infer — `src/cdn.ts`,
+the never-run `*.test-d.ts`, the Makefile-invoked `scripts/*.mjs`, the demo pages — and three
+`ignoreDependencies` that are real but invisible to it (knip's script parser stops at
+`bun --bun <bin>`, and it does not read `buf.gen.yaml`). Prefer deleting dead code over widening
+the ignores.
 
 **Use `bun run test`, not `bun test`** — the latter invokes Bun's built-in runner instead of Vitest.
 Verify by **exit code**, not by the printed summary: vitest can print "747 passed" and still exit 1 on
