@@ -43,6 +43,7 @@
     "typecheck": "bun --bun tsc -p tsconfig.typecheck.json",
     "lint": "bun --bun biome check --write .",
     "format": "bun --bun biome format --write .",
+    "knip": "bun --bun knip-bun --treat-config-hints-as-errors",
     "test": "bun --bun vitest run",
     "test:watch": "bun --bun vitest"
   },
@@ -65,6 +66,7 @@
     "@bufbuild/protoc-gen-es": "^2.12.1",
     "esbuild": "0.28.2",
     "jsdom": "^30.0.1",
+    "knip": "^6.32.2",
     "serve": "^14.2.6",
     "typescript": "^7.0.2",
     "vitest": "^4.1.1"

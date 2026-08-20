@@ -1,8 +1,8 @@
 import type { TrackFn, WellKnownEventName } from '../track.js'
 import { getSafeElementText } from '../utils.js'
 
-export const eventRageClick = 'rage_click' satisfies WellKnownEventName
-export const eventDeadClick = 'dead_click' satisfies WellKnownEventName
+const eventRageClick = 'rage_click' satisfies WellKnownEventName
+const eventDeadClick = 'dead_click' satisfies WellKnownEventName
 
 const MAX_TEXT_LENGTH = 20
 

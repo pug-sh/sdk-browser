@@ -1,6 +1,6 @@
 import type { TrackFn, WellKnownEventName } from '../track.js'
 
-export const eventScroll = 'scroll' satisfies WellKnownEventName
+const eventScroll = 'scroll' satisfies WellKnownEventName
 
 export const setupScrollTracking = (track: TrackFn) => {
   let timer: ReturnType<typeof setTimeout> | null = null
