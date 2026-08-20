@@ -1,8 +1,8 @@
 import type { TrackFn, WellKnownEventName } from '../track.js'
 import { scrubUrl } from '../utils.js'
 
-export const eventFormStart = 'form_start' satisfies WellKnownEventName
-export const eventFormSubmit = 'form_submit' satisfies WellKnownEventName
+const eventFormStart = 'form_start' satisfies WellKnownEventName
+const eventFormSubmit = 'form_submit' satisfies WellKnownEventName
 
 export const setupFormTracking = (track: TrackFn) => {
   const formsSeen = new WeakSet<HTMLFormElement>()

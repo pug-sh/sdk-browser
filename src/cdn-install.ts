@@ -29,7 +29,7 @@ export type StubMethod = (typeof STUB_METHODS)[number]
  * Methods that work without init() and so are exempt from replayQueue's "queued before pug.init()"
  * warning. Grows alongside STUB_METHODS when init-independent features ship (e.g. push).
  */
-export const INIT_INDEPENDENT_METHODS: ReadonlySet<string> = new Set(['ready'] satisfies StubMethod[])
+const INIT_INDEPENDENT_METHODS: ReadonlySet<string> = new Set(['ready'] satisfies StubMethod[])
 
 /** One call recorded by the loader snippet before the bundle loaded: [method name, arguments]. */
 export type QueuedCall = [string, ArrayLike<unknown>]

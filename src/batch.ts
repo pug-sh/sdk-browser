@@ -23,7 +23,7 @@ export interface BatchConfig {
  */
 export type BatchOptions = { readonly [K in keyof BatchConfig]?: BatchConfig[K] | undefined }
 
-export const DEFAULT_BATCH_CONFIG: BatchConfig = {
+const DEFAULT_BATCH_CONFIG: BatchConfig = {
   maxSize: 10,
   maxWaitMs: 5000,
   maxQueueSize: 1000,

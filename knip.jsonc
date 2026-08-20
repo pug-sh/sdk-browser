@@ -1,0 +1,20 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    // Declared so the CDN bundle's entry point isn't reachable only via cdn.test.ts.
+    "src/cdn.ts",
+    // Makefile- and hand-invoked. Listed one by one on purpose: a `scripts/*.mjs` glob would also
+    // mark legal.mjs and publish-cdn.lib.mjs as entries, exempting their exports from the gate.
+    "scripts/gen-well-known-events.mjs",
+    "scripts/strip-validate-deps.mjs",
+    "scripts/publish-cdn.mjs"
+  ],
+  "project": ["src/**/*.ts", "scripts/**/*.mjs"],
+  "ignore": ["src/gen/**"],
+  // `make check-proto-pin` runs from prepublishOnly; `wait` is a shell builtin in dev/serve.
+  "ignoreBinaries": ["make", "wait"],
+  // knip doesn't resolve binaries invoked through `bun` (`bunx` and bare binaries resolve fine),
+  // and it doesn't read buf.gen.yaml: biome + serve come from package.json scripts, protoc-gen-es
+  // from buf.gen.yaml's `local:` plugin path.
+  "ignoreDependencies": ["@biomejs/biome", "@bufbuild/protoc-gen-es", "serve"]
+}
