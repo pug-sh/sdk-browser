@@ -34,6 +34,25 @@ export const initUserAgentData = () => {
     })
 }
 
+const ENGINE_BRAND = 'chromium'
+
+// Chromium keys the GREASE separators to its major version, so the punctuation differs between
+// builds (";Not A Brand", "Not/A)Brand", ...). Match on the letters, which don't move.
+const isGrease = (brand: string) => brand.replace(/[^a-z]/gi, '').toLowerCase() === 'notabrand'
+
+// Position is unspecified and varies by build, so choose by name. Longest wins, or an Edge
+// WebView2 embed (which reports "Microsoft Edge" too) is flattened into the browser.
+const bySpecificity = (a: NavigatorUABrandVersion, b: NavigatorUABrandVersion) =>
+  b.brand.length - a.brand.length || (a.brand < b.brand ? -1 : a.brand > b.brand ? 1 : 0)
+
+const selectBrand = (brands: NavigatorUABrandVersion[] | undefined): NavigatorUABrandVersion | undefined => {
+  const realBrands = (brands ?? []).filter(b => b.brand && !isGrease(b.brand))
+  const specificBrands = realBrands.filter(b => b.brand.toLowerCase() !== ENGINE_BRAND)
+  const candidates = specificBrands.length > 0 ? specificBrands : realBrands
+
+  return candidates.sort(bySpecificity)[0]
+}
+
 export const parseUserAgentData = (): UserAgentProps => {
   try {
     const uad = navigator.userAgentData
@@ -43,10 +62,7 @@ export const parseUserAgentData = (): UserAgentProps => {
 
     const result: UserAgentProps = {}
 
-    const brand = uad.brands
-      ?.slice()
-      .reverse()
-      .find(b => !b.brand.toLowerCase().startsWith('not'))
+    const brand = selectBrand(uad.brands)
     if (brand) {
       result.$browser = brand.brand
       result.$browserVersion = brand.version

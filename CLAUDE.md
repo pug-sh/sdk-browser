@@ -267,6 +267,8 @@ protobuf; since it cannot carry headers, the API key rides a `?api_key=` query p
   events may lack `$osVersion`/`$device`.
 - `parseUserAgentData()` — low-entropy props read directly; high-entropy from the cache. `{}` on
   Firefox/Safari.
+- `$browser` picks from `brands` by name, never by position — Chromium shuffles that list and keys
+  its GREASE entry to the major version. Engine loses to a specific brand; ties go to the longest.
 - `parseUtmParams(search)` — only UTM params present with non-empty values.
 
 ### `src/logger.ts`

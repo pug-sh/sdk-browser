@@ -37,6 +37,7 @@
     "prepare": "bun run build",
     "prepublishOnly": "make check-proto-pin && bun run build",
     "publish:dist": "bun run scripts/publish-dist-branch.mjs",
+    "publish:preview": "pkg-pr-new publish --packageManager=bun",
     "watch": "bun --bun tsc -w",
     "dev": "bun --bun tsc -w & bun --bun serve . & sleep 1 && open http://localhost:3000 && wait",
     "serve": "bun --bun serve . & sleep 1 && open http://localhost:3000 && wait",
@@ -67,6 +68,7 @@
     "esbuild": "0.28.2",
     "jsdom": "^30.0.1",
     "knip": "^6.32.2",
+    "pkg-pr-new": "^0.0.88",
     "serve": "^14.2.6",
     "typescript": "^7.0.2",
     "vitest": "^4.1.1"
