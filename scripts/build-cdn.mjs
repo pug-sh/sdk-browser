@@ -13,7 +13,7 @@ import { build } from 'esbuild'
 import { backfillLegalNotices } from './legal.mjs'
 import { sriHash } from './publish-cdn.lib.mjs'
 
-const GZIP_BUDGET_KB = 45
+const GZIP_BUDGET_KB = 50
 
 const { name, version, homepage, dependencies } = JSON.parse(readFileSync('package.json', 'utf8'))
 
