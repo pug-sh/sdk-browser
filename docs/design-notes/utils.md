@@ -182,3 +182,84 @@ factory `init()` calls unguarded) and out of `set()`, which the public `setTrack
 
 `JSON.stringify`'s `undefined` results (undefined itself, functions, symbols) fall through to `String()`
 rather than interpolating as the literal text "undefined" of a missing value.
+
+---
+
+## <a id="automation"></a>`isAutomatedBrowser()`
+
+The browser half of the three bot signals in the backend's
+[`docs/architecture/bot-detection.md`](https://github.com/pug-sh/pug/blob/main/docs/architecture/bot-detection.md).
+The other two are server-side and *tag* rather than drop: a crawler user-agent list, and datacenter
+ASNs. This one can drop, and `init()` is where it fires — but only when
+`excludeAutomatedBrowsers` asks it to.
+
+### Why tracking is the default
+
+The platform's rule everywhere else is **tag, never drop**: the server marks bot traffic and every
+query decides for itself via `include_bots`. A client-side drop is the one place that rule could be
+broken, and breaking it silently is worse than the traffic it removes — an integrator whose e2e
+suite asserts "the SDK sent a `page_view`" would watch it stop working on a patch upgrade, with a
+console line as the only explanation.
+
+So the default matches the rest of the platform, and the drop is opt-in.
+
+### What the opt-in actually buys
+
+Cost. A tagged event is still stored and still counted in the project's metered
+`uniqExact(event_id)`; an e2e suite that runs on every deploy inflates the integrator's own bill.
+Not sending is the only version of that which costs nothing, and `excludeAutomatedBrowsers: true` is
+how someone who cares buys it.
+
+### What this actually catches that the server does not
+
+User agents below are the shapes these tools emit; the `server signal 1` column is what the
+backend's crawler list does with them. Re-check both against the backend before trusting the
+conclusion — nothing in this repo can:
+
+| scenario | user agent | `navigator.webdriver` | server signal 1 |
+|---|---|---|---|
+| Chrome `--headless` (new headless, no driver) | `…HeadlessChrome/151.0.0.0…` | false | matches |
+| Playwright `headless: true` | `…HeadlessChrome/151.0.7922.34…` | true | matches |
+| Playwright `headless: false` | `…Chrome/151.0.0.0…` | **true** | **no match** |
+
+So **headless is already covered server-side.** Chrome's new headless mode (`--headless`, the only
+one left since 132) still ships the `HeadlessChrome` token, and the crawler list matches it.
+
+The row that earns this signal is the last one: **headed** automation. A `--headed` Playwright run,
+Selenium driving a visible Chrome, `puppeteer.launch({ headless: false })` — an ordinary Chrome UA,
+and on a developer's laptop a residential IP, so the ASN check misses it too. `navigator.webdriver`
+is the only one of the three signals that sees it.
+
+The UA and brand-list branches here are therefore belt-and-braces rather than the point. They are
+kept because they close the case where a driver rewrites one identifier and forgets the other —
+`chrome-headless-shell` puts `HeadlessChrome` in the brand list, where full Chrome headless does not
+— and because removing both saves 36 B gzip off the CDN bundle (measured: 48,437 → 48,401 B).
+
+### Why each signal gets its own `try`
+
+The three reads started life inside one `try`. That made the belt-and-braces claim above false: a
+throwing `navigator.webdriver` getter returned `false` without ever reaching the UA check, so a
+headless browser that also hid the flag went undetected — and so did one whose `userAgentData`
+carried a brand entry with no `brand` string, since the `TypeError` from `.includes` escaped
+`.some()` into the same shared `catch`. Each signal is now probed on its own, and `brand` is
+type-guarded rather than trusted. Fail-open is per signal, which is the only version of it that
+leaves three signals worth having.
+
+### The caveat worth knowing
+
+Under the default, the headed-automation row reaches ClickHouse **untagged**: no server signal saw
+it, so no `include_bots: false` query excludes it either. The SDK cannot close that by tagging —
+`$bot`/`$bot_reason` are server-only auto-properties and a client-sent value is stripped before
+enrichment. Covering it without dropping would need a server change to accept a client-asserted
+hint.
+
+### Why a stealth driver is out of scope
+
+A driver that hides the flag is not caught here, deliberately. That is the server signals' problem,
+and they are the ones an adversary cannot edit.
+
+### Why it fails open
+
+Every read is inside one `try`, returning **false** — a real visitor. A privacy extension shadowing
+`navigator` with a throwing getter is a live population; silencing their analytics to catch a bot
+that is not there is the wrong trade in both directions.

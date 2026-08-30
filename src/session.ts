@@ -2,7 +2,7 @@ import { uuidv7 } from 'uuidv7'
 import { log } from './logger.js'
 import { type PersistentStore, resolveStore } from './persistence.js'
 import type { GrantedGate } from './tracking-consent.js'
-import { isStorageAvailable, makeStorageKey } from './utils.js'
+import { isAutomationSuppressed, isStorageAvailable, makeStorageKey } from './utils.js'
 
 interface StoredState {
   readonly sessionId: string
@@ -296,6 +296,11 @@ const isExpired = (s: StoredState): boolean => {
 // Rotates session only — preserves deviceId across sessions
 export const rotate = (): void => {
   if (!config.storageKey) {
+    // As pug.ts's reportNoState: after a suppressed init() "before init()" is a confident wrong answer.
+    if (isAutomationSuppressed()) {
+      log.debug('rotate() ignored: this browser was excluded as automation by excludeAutomatedBrowsers.')
+      return
+    }
     log.warn('rotate() called before init().')
     return
   }

@@ -156,12 +156,29 @@ optOutTracking()
 | `batch` | `BatchOptions` | — | Batching overrides (`maxSize`, `maxWaitMs`, `maxQueueSize`). |
 | `debug` | `boolean` | `false` | Logs internal activity (each event tracked, plus the consent-denied and `dryRun` drops) to `console.debug`. Turn it on when events aren't arriving. Warnings and errors are always logged regardless, so this can only widen what you see. See [Debugging](#debugging). |
 | `dryRun` | `boolean` | `false` | Builds events as normal but never sends them. Does not change consent, or what `isTrackingEnabled()` reports. |
+| `excludeAutomatedBrowsers` | `boolean` | `false` | Send nothing from browsers driven by automation (Playwright, Puppeteer, Selenium, headless Chrome). See [Automated browsers](#automated-browsers). |
 | `autoCapture` | `boolean \| AutoCaptureSelection` | `true` | Controls SDK-owned automatic listeners. `false` disables all automatic capture; an object is an **allowlist** enabling only the keys set to `true`, with every omitted key off. |
 | `trackingConsent` | `'granted' \| 'cookieless' \| 'denied' \| TrackingConsentConfig` | `'cookieless'` | Initial consent. **Defaults to `'cookieless'`** — events flow, no identifier is written to the device — so the out-of-the-box install stores nothing before the user answers. While denied, automatic listeners stay off and `track()` / `identify()` are ignored; `'cookieless'` keeps events flowing without identity. Object form: `initial` seeds the state used until the user answers, `onReject` sets what `optOutTracking()` applies (`'denied'` by default, or `'cookieless'`), `persist: true` remembers the choice across reloads, `respectGpc: true` honors the browser's [Global Privacy Control](#global-privacy-control) signal. |
 | `crossSubdomainTracking` | `boolean \| { domain: string }` | `false` | **Off by default** — sharing identity across subdomains weakens browser isolation from same-origin to same-site, so it is an explicit opt-in. `false` keeps persistence origin-scoped in `localStorage`; `true` shares identity (anonymous ID, external ID, session, consent) across subdomains via a first-party cookie on the auto-discovered registrable domain, and `{ domain }` pins that cookie domain explicitly. See [Cross-subdomain tracking](#cross-subdomain-tracking) for fallback behavior and the multi-tenant caveat. |
 | `maxAgeDays` | `number` | `365` | How long the SDK's stored identifiers are kept. The deadline is **absolute** — stamped at first write, never extended by later visits. See [Retention](#retention). |
 | `redactUrlParams` | `readonly string[] \| false` | built-in list | Query and fragment params whose values are replaced with `redacted` in `$url`, `$referrer` and a form's `action`. See [Privacy controls](#privacy-controls). |
 | `beforeSend` | `(event) => event \| null \| void` | — | Redact, rewrite or drop any event before it's sent — mask URLs, strip PII from properties. See [Privacy controls](#privacy-controls). |
+
+#### Automated browsers
+
+By default, a browser driven by automation — WebDriver/CDP (Playwright, Puppeteer, Selenium) or a headless Chrome build — is tracked like any other traffic. That matches the rest of the platform, which tags bot traffic server-side rather than dropping it, and it means a test asserting the SDK fired still sees the event.
+
+Pass `excludeAutomatedBrowsers: true` to keep it out entirely — `init()` then warns once and returns without attaching a listener, writing to storage or sending anything:
+
+```js
+// An e2e suite that runs on every deploy otherwise lands in dashboards as visitors,
+// and each event counts against the project's metered usage.
+pug.init('project-id', { apiKey: 'pub_...', excludeAutomatedBrowsers: true })
+```
+
+After that bail the SDK is inert: every other method does nothing and logs to `console.debug`, and `reset()`, `setTrackingConsent()`, `optInTracking()` and `optOutTracking()` return `false`. The two queries keep answering honestly rather than reporting suppression — `isConsentPending()` still returns `true` and `getTrackingConsent()` `undefined`, because nobody has answered a banner here either, so a consent banner behaves under e2e exactly as it does in production. Stored identity from an earlier visit is left untouched: the flag means "touch nothing on this browser", so a `trackingConsent: 'denied'` seed does not run its usual purge.
+
+Detection is `navigator.webdriver`, plus the `HeadlessChrome` token in the user agent or `navigator.userAgentData.brands`. Each is read independently, so one unreadable signal does not decide for the others. A driver that hides all three is not caught here — that is what the server-side bot signals are for. If a check throws (a privacy extension shadowing `navigator`), the visitor is treated as real and tracking proceeds.
 
 #### Cross-subdomain tracking
 
@@ -512,7 +529,7 @@ track('error_occurred', { errorCode: 'PAYMENT_FAILED' }, { immediate: true })
 
 ### Debugging
 
-If events aren't arriving, pass `debug: true` to `init()`. The SDK then logs every `track()` call, the drops this flag governs — denied consent and `dryRun` — and whether auto-capture ended up with any trackers active:
+If events aren't arriving, pass `debug: true` to `init()`. The SDK then logs every `track()` call, the drops this flag governs — denied consent, `dryRun`, and the calls ignored after an [automated-browser](#automated-browsers) bail — and whether auto-capture ended up with any trackers active:
 
 ```ts
 init('your-project-id', { apiKey: 'your-api-key', debug: true })

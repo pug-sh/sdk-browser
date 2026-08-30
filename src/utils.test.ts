@@ -4,6 +4,7 @@ import {
   decodeStored,
   encodeStored,
   getSafeElementText,
+  isAutomatedBrowser,
   isCaptureSuppressed,
   isStorageAvailable,
   makeStorageKey,
@@ -572,5 +573,91 @@ describe('isStorageAvailable', () => {
     })
     expect(isStorageAvailable()).toBe(true)
     localStorage.removeItem('__pug___probe__')
+  })
+})
+
+describe('isAutomatedBrowser', () => {
+  // Chrome still ships this token in new headless, so the server already catches it; see the note.
+  const HEADLESS_UA = 'Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/151.0.0.0 Safari/537.36'
+  const restore: (() => void)[] = []
+
+  const stub = (prop: string, descriptor: PropertyDescriptor) => {
+    const previous = Object.getOwnPropertyDescriptor(navigator, prop)
+    Object.defineProperty(navigator, prop, { configurable: true, ...descriptor })
+    restore.push(() => {
+      if (previous) {
+        Object.defineProperty(navigator, prop, previous)
+      } else {
+        Reflect.deleteProperty(navigator, prop)
+      }
+    })
+  }
+
+  afterEach(() => {
+    while (restore.length > 0) {
+      restore.pop()?.()
+    }
+  })
+
+  it('reads an ordinary browser as a real visitor', () => {
+    expect(isAutomatedBrowser()).toBe(false)
+  })
+
+  it('catches a WebDriver-driven browser', () => {
+    stub('webdriver', { value: true })
+
+    expect(isAutomatedBrowser()).toBe(true)
+  })
+
+  it('catches the headless user agent', () => {
+    stub('userAgent', { value: HEADLESS_UA })
+
+    expect(isAutomatedBrowser()).toBe(true)
+  })
+
+  // The UA is the last branch, so it is only reached once the brand list has declined to answer.
+  it('catches a headless user agent behind an ordinary brand list', () => {
+    stub('userAgentData', { value: { brands: [{ brand: 'Chromium', version: '151' }] } })
+    stub('userAgent', { value: HEADLESS_UA })
+
+    expect(isAutomatedBrowser()).toBe(true)
+  })
+
+  // They disagree: chrome-headless-shell carries the brand, full Chrome headless does not.
+  it('catches a headless brand behind an ordinary user agent', () => {
+    stub('userAgentData', { value: { brands: [{ brand: 'HeadlessChrome', version: '120' }] } })
+
+    expect(isAutomatedBrowser()).toBe(true)
+  })
+
+  // Each signal is probed separately, so one unreadable source must not decide for the other two.
+  it('falls through a throwing webdriver to the user agent', () => {
+    stub('webdriver', {
+      get: () => {
+        throw new Error('blocked')
+      },
+    })
+    stub('userAgent', { value: HEADLESS_UA })
+
+    expect(isAutomatedBrowser()).toBe(true)
+  })
+
+  // `brand` is typed string but page-controlled; a missing one must not take the UA check with it.
+  it('falls through a malformed brand entry to the user agent', () => {
+    stub('userAgentData', { value: { brands: [{ version: '151' }] } })
+    stub('userAgent', { value: HEADLESS_UA })
+
+    expect(isAutomatedBrowser()).toBe(true)
+  })
+
+  // Fails open: a privacy extension shadowing navigator must not silence a real visitor.
+  it('reads a throwing navigator as a real visitor', () => {
+    stub('webdriver', {
+      get: () => {
+        throw new Error('blocked')
+      },
+    })
+
+    expect(isAutomatedBrowser()).toBe(false)
   })
 })

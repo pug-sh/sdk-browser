@@ -389,3 +389,38 @@ export const isStorageAvailable = (): boolean => {
     }
   }
 }
+
+const HEADLESS_BRAND = 'HeadlessChrome'
+
+// Per signal: a shared try let one throwing getter skip the other two.
+const probe = (read: () => boolean): boolean => {
+  try {
+    return read()
+  } catch {
+    return false
+  }
+}
+
+// `brand` is page-controlled whatever the .d.ts says.
+const hasHeadlessBrand = (brands: readonly NavigatorUABrandVersion[] | undefined): boolean =>
+  brands?.some(b => typeof b.brand === 'string' && b.brand.includes(HEADLESS_BRAND)) === true
+
+/**
+ * Whether the browser is driven by automation — WebDriver/CDP or a headless Chrome build. Fails
+ * **open**: an unreadable signal counts as a real visitor.
+ * @see docs/design-notes/utils.md#automation
+ */
+export const isAutomatedBrowser = (): boolean =>
+  // The only signal that sees headed automation, whose UA the server's crawler list cannot match.
+  probe(() => navigator.webdriver === true) ||
+  probe(() => hasHeadlessBrand(navigator.userAgentData?.brands)) ||
+  probe(() => navigator.userAgent.includes(HEADLESS_BRAND))
+
+// pug.ts owns this bail, but session.ts must read it and cannot import pug.ts without a cycle.
+let automationSuppressed = false
+
+export const setAutomationSuppressed = (suppressed: boolean): void => {
+  automationSuppressed = suppressed
+}
+
+export const isAutomationSuppressed = (): boolean => automationSuppressed

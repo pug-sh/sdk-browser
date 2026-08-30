@@ -9,7 +9,8 @@ interface UADataValues {
 }
 
 interface NavigatorUAData {
-  readonly brands: NavigatorUABrandVersion[]
+  // Optional: non-conformant shims fill this slot, and three call sites already defend against it.
+  readonly brands?: readonly NavigatorUABrandVersion[]
   readonly mobile: boolean
   readonly platform: string
   getHighEntropyValues(hints: string[]): Promise<UADataValues>
