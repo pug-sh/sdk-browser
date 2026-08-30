@@ -52,8 +52,11 @@ import {
   configureUrlRedaction,
   DEFAULT_ENDPOINT,
   DEVICE_ID_KEY,
+  isAutomatedBrowser,
+  isAutomationSuppressed,
   RESERVED_DISTINCT_ID_PREFIX,
   safeStringify,
+  setAutomationSuppressed,
 } from './utils.js'
 
 export interface PugConfig {
@@ -66,6 +69,19 @@ export interface InitOptions {
   readonly apiKey: string
   readonly batch?: BatchOptions | undefined
   readonly dryRun?: boolean | undefined
+  /**
+   * Send nothing at all from browsers driven by automation — WebDriver/CDP (Playwright, Puppeteer,
+   * Selenium) and headless Chrome builds. **Off by default:** automation is tracked like any other
+   * traffic, matching the rest of the platform, which tags bot traffic server-side rather than
+   * dropping it.
+   *
+   * Turn it on to keep an e2e suite out of dashboards and off the project's metered event count.
+   * Note that it also stops a test asserting the SDK sent an event from ever seeing one.
+   *
+   * On a match `init()` warns once and returns, leaving the API inert: every method does nothing and
+   * logs to `console.debug`, the public booleans return `false`, and stored identity is left alone.
+   */
+  readonly excludeAutomatedBrowsers?: boolean | undefined
   /**
    * Logs the SDK's internal activity to `console.debug`. Off by default.
    *
@@ -191,6 +207,17 @@ let state: PugState | null = null
 // One-shot so a cookieless site calling identify() on every page doesn't spam the console.
 let cookielessIdentifyWarned = false
 
+// A suppressed init() also leaves no state, so "called before init()" would send an integrator
+// hunting for a call they made. Debug: the bail already warned, and a suite may call these per page.
+
+const reportNoState = (fn: string, preInitMessage: string): void => {
+  if (isAutomationSuppressed()) {
+    log.debug(`${fn}() ignored: this browser was excluded as automation by excludeAutomatedBrowsers.`)
+    return
+  }
+  log.warn(preInitMessage)
+}
+
 /**
  * Compile-time exhaustiveness marker: reaching it with a non-`never` argument is a type error, so
  * widening a union forces every dispatch over it to be revisited.
@@ -219,6 +246,15 @@ const resolveRedactUrlParams = (params: unknown): readonly string[] | false | un
     return undefined
   }
   return params
+}
+
+// Untrusted: one-tag installs feed these from JSON, where `"dryRun": "false"` is truthy and so
+// silently enables what it names. Warn rather than coerce — coercing would move existing behavior.
+const warnOnNonBoolean = (options: InitOptions, key: 'debug' | 'dryRun' | 'excludeAutomatedBrowsers'): void => {
+  const value = options[key]
+  if (value !== undefined && typeof value !== 'boolean') {
+    log.warn(`${key} must be a boolean; received ${typeof value}. See the README options table.`)
+  }
 }
 
 // High-entropy client hints are themselves a device read, so skip them for an untracked user. Takes
@@ -285,10 +321,35 @@ export const init = (projectId: string, options: InitOptions) => {
   }
 
   // Before any other setup, so init's own debug output is captured too.
+  setAutomationSuppressed(false)
   setDebugLogging(options.debug ?? false)
 
   const config: PugConfig = { endpoint: options.endpoint || DEFAULT_ENDPOINT, projectId }
+
+  // Validate-and-log only, above the bail: the automated browser is CI, where a config mistake is
+  // likeliest to be read.
   warnOnInsecureEndpoint(config.endpoint)
+  warnOnNonBoolean(options, 'debug')
+  warnOnNonBoolean(options, 'dryRun')
+  warnOnNonBoolean(options, 'excludeAutomatedBrowsers')
+  // No compiler protects a JS or one-tag install, so a silently ignored sanitizer means URLs the
+  // integrator believes are masked lose that masking.
+  if ('sanitizeUrl' in options) {
+    log.warn(
+      'sanitizeUrl was removed and is ignored. Known-sensitive query and fragment params are redacted by default (see redactUrlParams); any further masking belongs in beforeSend.',
+    )
+  }
+  const redactUrlParams = resolveRedactUrlParams(options.redactUrlParams)
+
+  // Ahead of every listener, storage write and network call — the server can only tag automation,
+  // and a tagged event is still metered. Warn, not debug: whoever debugs the silence didn't set it.
+  if (options.excludeAutomatedBrowsers === true && isAutomatedBrowser()) {
+    setAutomationSuppressed(true)
+    log.warn(
+      'Automated browser detected (WebDriver or headless Chrome) and excludeAutomatedBrowsers is set — this SDK instance is inert: no listeners, no storage, no events, and stored identity is left untouched. Remove excludeAutomatedBrowsers to track this traffic.',
+    )
+    return
+  }
 
   // Late-bound: the controller needs the store, the store needs the cookie layer. Until the
   // assignment below the gate reads as *not granted* — see deferredGrantedGate for why that
@@ -330,15 +391,8 @@ export const init = (projectId: string, options: InitOptions) => {
 
   warmUserAgentData(trackingConsent.isTracking)
 
-  // No compiler protects a JS or one-tag install, so a silently ignored sanitizer means URLs the
-  // integrator believes are masked lose that masking.
-  if ('sanitizeUrl' in options) {
-    log.warn(
-      'sanitizeUrl was removed and is ignored. Known-sensitive query and fragment params are redacted by default (see redactUrlParams); any further masking belongs in beforeSend.',
-    )
-  }
   configureBeforeSend(options.beforeSend)
-  configureUrlRedaction(resolveRedactUrlParams(options.redactUrlParams))
+  configureUrlRedaction(redactUrlParams)
 
   const transport = createBatchedTransport(config.endpoint, options.apiKey, projectId, options.batch)
   const autoCapture = createAutoCaptureController(track, trackingConsent.isTracking)
@@ -412,7 +466,7 @@ export const init = (projectId: string, options: InitOptions) => {
 
 export const setAutoCapture = (autoCapture: AutoCaptureConfig): void => {
   if (!state) {
-    log.warn('setAutoCapture() called before init().')
+    reportNoState('setAutoCapture', 'setAutoCapture() called before init().')
     return
   }
   state.autoCapture.setDesired(autoCapture)
@@ -501,14 +555,15 @@ const purgePersistedIdentity = ({ dropQueue }: { dropQueue: boolean }): boolean 
  * Returns **false** when the change did not fully take effect: called before `init()`, an invalid
  * state (consent then fails closed to `'denied'`), a choice that could not be persisted, or an
  * identifier that could not be removed. After `init()` a valid state is always applied in memory, so
- * `false` means "applied, not fully durable" rather than "ignored" — only the pre-`init()` case is
- * genuinely ignored, which a banner racing initialization is most likely to hit. A failed
+ * `false` means "applied, not fully durable" rather than "ignored" — only the pre-`init()` case and
+ * an `excludeAutomatedBrowsers` bail are genuinely ignored, the first of which a banner racing
+ * initialization is most likely to hit. A failed
  * tab-registry re-arm on entering `'granted'` warns without failing the call: it is neither
  * identity nor durability, and a later grant or `init()` re-arms it.
  */
 export const setTrackingConsent = (consent: TrackingConsent): boolean => {
   if (!state) {
-    log.warn('setTrackingConsent() called before init().')
+    reportNoState('setTrackingConsent', 'setTrackingConsent() called before init().')
     return false
   }
   const wasTracking = state.trackingConsent.isTracking()
@@ -556,7 +611,7 @@ export const setTrackingConsent = (consent: TrackingConsent): boolean => {
 export const optInTracking = (): boolean => {
   if (!state) {
     // Guarded so the warning names this function rather than setTrackingConsent, matching optOut.
-    log.warn('optInTracking() called before init().')
+    reportNoState('optInTracking', 'optInTracking() called before init().')
     return false
   }
   return setTrackingConsent('granted')
@@ -570,7 +625,7 @@ export const optInTracking = (): boolean => {
  */
 export const optOutTracking = (): boolean => {
   if (!state) {
-    log.warn('optOutTracking() called before init().')
+    reportNoState('optOutTracking', 'optOutTracking() called before init().')
     return false
   }
   return setTrackingConsent(state.trackingConsent.getRejectState())
@@ -583,7 +638,7 @@ export const optOutTracking = (): boolean => {
  */
 export const isTrackingEnabled = (): boolean => {
   if (!state) {
-    log.warn('isTrackingEnabled() called before init().')
+    reportNoState('isTrackingEnabled', 'isTrackingEnabled() called before init().')
     return false
   }
   return state.trackingConsent.isTracking()
@@ -596,7 +651,8 @@ export const isTrackingEnabled = (): boolean => {
  */
 export const getTrackingConsent = (): TrackingConsent | undefined => {
   if (!state) {
-    log.warn(
+    reportNoState(
+      'getTrackingConsent',
       'getTrackingConsent() called before init(); returning undefined — a persisted choice is only read during init().',
     )
     return undefined
@@ -611,7 +667,10 @@ export const getTrackingConsent = (): TrackingConsent | undefined => {
  */
 export const isConsentPending = (): boolean => {
   if (!state) {
-    log.warn('isConsentPending() called before init(); returning true — a persisted choice is only read during init().')
+    reportNoState(
+      'isConsentPending',
+      'isConsentPending() called before init(); returning true — a persisted choice is only read during init().',
+    )
     return true
   }
   return state.trackingConsent.isPending()
@@ -623,7 +682,10 @@ export const destroy = () => {
   }
 
   if (!state) {
-    log.warn('destroy() called but SDK is not initialized.')
+    reportNoState('destroy', 'destroy() called but SDK is not initialized.')
+    // A suppressed init() returns after setDebugLogging() but before state, so both are ours to undo.
+    setAutomationSuppressed(false)
+    setDebugLogging(false)
     return
   }
 
@@ -642,6 +704,7 @@ export const destroy = () => {
   setDebugLogging(false)
 
   cookielessIdentifyWarned = false
+  setAutomationSuppressed(false)
   state = null
 }
 
@@ -662,7 +725,7 @@ export const reset = (): boolean => {
     return false
   }
   if (!state) {
-    log.warn('reset() called but SDK is not initialized.')
+    reportNoState('reset', 'reset() called but SDK is not initialized.')
     return false
   }
   let ok = true
@@ -699,7 +762,7 @@ export const identify = async (externalId: string, traits?: Record<string, JsonV
       return
     }
     if (!state) {
-      log.warn('identify() called before init().')
+      reportNoState('identify', 'identify() called before init().')
       return
     }
     if (!externalId || typeof externalId !== 'string') {
@@ -777,7 +840,7 @@ export const track: TrackFn = (kind: string, props?: Record<string, unknown>, op
     }
 
     if (!state) {
-      log.warn('track() called before init().')
+      reportNoState('track', 'track() called before init().')
       return
     }
 

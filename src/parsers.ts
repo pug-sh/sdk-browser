@@ -45,7 +45,7 @@ const isGrease = (brand: string) => brand.replace(/[^a-z]/gi, '').toLowerCase() 
 const bySpecificity = (a: NavigatorUABrandVersion, b: NavigatorUABrandVersion) =>
   b.brand.length - a.brand.length || (a.brand < b.brand ? -1 : a.brand > b.brand ? 1 : 0)
 
-const selectBrand = (brands: NavigatorUABrandVersion[] | undefined): NavigatorUABrandVersion | undefined => {
+const selectBrand = (brands: readonly NavigatorUABrandVersion[] | undefined): NavigatorUABrandVersion | undefined => {
   const realBrands = (brands ?? []).filter(b => b.brand && !isGrease(b.brand))
   const specificBrands = realBrands.filter(b => b.brand.toLowerCase() !== ENGINE_BRAND)
   const candidates = specificBrands.length > 0 ? specificBrands : realBrands

@@ -26,6 +26,7 @@ const options: InitOptions = {
   endpoint: undefined,
   batch: { maxSize: count, maxWaitMs: count, maxQueueSize: count },
   dryRun: flag,
+  excludeAutomatedBrowsers: flag,
   debug: flag,
   autoCapture: undefined,
   crossSubdomainTracking: undefined,

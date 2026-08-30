@@ -168,8 +168,14 @@ booleans. False means: the state was unrecognized (consent then fails closed to 
 could not be persisted, or an identifier could not be removed.
 
 After `init()` the state is always applied in memory when valid, so **false never means "nothing
-happened"**. Before `init()` it does: all three warn and return false having applied nothing — the one
-case where false really is "ignored", and a banner racing initialization is the likeliest way to hit it.
+happened"**. Before `init()` it does: all three warn and return false having applied nothing, and a
+banner racing initialization is the likeliest way to hit it.
+
+The automation bail (`excludeAutomatedBrowsers`, see [utils.md](utils.md#automation)) is the second
+and last case where false really is "ignored": `init()` returns having built no state on purpose, so
+these behave exactly as they do before `init()`. They report it as automation rather than as a
+missing `init()` — see `reportNoState` — but the return value cannot distinguish the two, which is
+why the bail itself warns.
 
 ---
 

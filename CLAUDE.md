@@ -100,6 +100,17 @@ A single nullable module-scoped `state` object enforces single initialization.
 
 **Invariants:**
 
+- `init()` returns early on an automated browser (`isAutomatedBrowser()`), after the log-only
+  validators but before any listener, storage write or network call — and **only** under
+  `excludeAutomatedBrowsers: true`. The default tracks automation like any other traffic, matching
+  the platform's tag-never-drop rule. The validators run first on purpose: the automated browser is
+  CI, where a config mistake is likeliest to be read. The bail warns once (a larger drop than
+  `dryRun`, which warns) and latches `setAutomationSuppressed`.
+- **Every** no-state branch reports through `reportNoState`, so none of them claims "called before
+  init()" after a suppressed init — including `rotate()` in `session.ts`, which reads the same latch.
+  The latch lives in `utils.ts` because `session.ts` cannot import `pug.ts` without a cycle, and
+  `destroy()` clears it (plus `setDebugLogging(false)`) on its no-state path — a suppressed `init()`
+  is the one way to reach `destroy()` with debug logging on and no state.
 - `track()` dispatches on consent as an **allow-list**, never a deny-check. Widening
   `TrackingConsent` must be a `TS2345` at that dispatch.
 - `init()` creates the consent controller **before** `configureProfile`, so the latter's expiry
@@ -107,7 +118,8 @@ A single nullable module-scoped `state` object enforces single initialization.
 - Consent effects run **before** auto-capture reconciles, matching `init()`'s order.
 - `track()` and `identify()` **must never throw** — see Design Invariants below.
 - The public booleans (`reset`, `setTrackingConsent`, `optInTracking`, `optOutTracking`) mean "did it
-  fully land", and after `init()` false never means "nothing happened".
+  fully land", and after `init()` false never means "nothing happened" — with one exception, the
+  automation bail above, where `init()` returns having deliberately built nothing.
 
 ### `src/tracking-consent.ts` — consent state → [design note](docs/design-notes/tracking-consent.md)
 
@@ -230,7 +242,23 @@ constraint drives several placement decisions.
 
 `makeStorageKey`, `isCaptureSuppressed`, `getSafeElementText`, `scrubUrl` / `configureUrlRedaction`,
 `encodeStored` / `decodeStored` (the retention envelope + `StoredEnvelope` brand),
-`DEFAULT_MAX_AGE_DAYS`, `SECONDS_PER_DAY`, `safeStringify`, `isStorageAvailable`.
+`DEFAULT_MAX_AGE_DAYS`, `SECONDS_PER_DAY`, `safeStringify`, `isStorageAvailable`,
+`isAutomatedBrowser`.
+
+`isAutomatedBrowser()` probes its three signals **independently** — a shared `try` let one throwing
+getter skip the other two, which is the whole point of reading three — and `brand` is type-guarded
+because the object is page-controlled whatever the `.d.ts` says. `setAutomationSuppressed` /
+`isAutomationSuppressed` park `pug.ts`'s bail latch here so `session.ts` can read it without a cycle.
+
+`isAutomatedBrowser()` is the browser half of the backend's three bot signals, and the only one
+that can drop rather than tag — which is why it is opt-in (`excludeAutomatedBrowsers`) and buys
+cost, not accuracy: a tagged event is still stored and still metered. It reads `navigator.webdriver`
+— which is what catches **headed** automation (a `--headed` Playwright run, Selenium driving a
+visible Chrome): an ordinary Chrome UA on a residential IP, so neither server signal sees it, and
+under the default it reaches ClickHouse untagged where no `include_bots: false` query excludes it.
+Headless is *already* covered server-side — Chrome's new headless still ships the `HeadlessChrome`
+token — so the UA and brand branches here are belt-and-braces. **Fails open**: a throwing
+`navigator` getter reads as a real visitor.
 
 ### `src/events/` — trackers
 
@@ -278,9 +306,9 @@ by `init({ debug })` via `setDebugLogging` and reset by `destroy()`.
 
 The gate matters because the SDK runs inside a host application's console. **`warn`/`error` stay
 ungated** — they report things an integrator must see without first knowing a flag exists — so the flag
-can only widen what is visible, never narrow it. The `debug` option governs the *consent-denied* and
-*dryRun* drops, **not** every drop; the pre-init drop is `log.warn` and therefore unreachable by a flag
-`init()` sets.
+can only widen what is visible, never narrow it. The `debug` option governs the *consent-denied*,
+*dryRun* and *automation-suppressed* drops, **not** every drop; the pre-init drop is `log.warn` and
+therefore unreachable by a flag `init()` sets.
 
 Every write goes through `safeConsole`, which swallows a throwing/absent console.
 

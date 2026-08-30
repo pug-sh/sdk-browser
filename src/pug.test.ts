@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createBatchedTransport } from './batch.js'
 import { initUserAgentData } from './parsers.js'
 import {
   clearProfile,
@@ -1455,5 +1456,163 @@ describe('the identity-retained warning on a non-authoritative init', () => {
     init('proj', { apiKey: 'k' })
 
     expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('NOT removed'))
+  })
+})
+
+describe('automated browsers', () => {
+  const restore: (() => void)[] = []
+
+  const driveWithWebdriver = () => {
+    const previous = Object.getOwnPropertyDescriptor(navigator, 'webdriver')
+    Object.defineProperty(navigator, 'webdriver', { value: true, configurable: true })
+    restore.push(() =>
+      previous
+        ? Object.defineProperty(navigator, 'webdriver', previous)
+        : Reflect.deleteProperty(navigator, 'webdriver'),
+    )
+  }
+
+  const suppressedInit = async () => {
+    const pug = await importPug()
+    driveWithWebdriver()
+    pug.init('project-id', { apiKey: 'api-key', excludeAutomatedBrowsers: true })
+    return pug
+  }
+
+  afterEach(async () => {
+    while (restore.length > 0) {
+      restore.pop()?.()
+    }
+    // The latch is module state in utils.ts, so it outlives `state` and would leak into later suites.
+    const { destroy } = await importPug()
+    destroy()
+  })
+
+  it('tracks a WebDriver-driven browser like any other traffic', async () => {
+    const { init, track } = await importPug()
+    driveWithWebdriver()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false })
+    track('signup')
+
+    expect(transportSpies.send).toHaveBeenCalledOnce()
+  })
+
+  // Warn, not debug: gating the only explanation behind a flag is what makes a silent SDK silent.
+  it('warns once and initializes nothing under WebDriver', async () => {
+    await suppressedInit()
+
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('Automated browser detected'))
+  })
+
+  it('attaches no tracker, builds no transport and touches no storage', async () => {
+    localStorage.clear()
+
+    await importPug().then(pug => {
+      driveWithWebdriver()
+      pug.init('project-id', {
+        apiKey: 'api-key',
+        excludeAutomatedBrowsers: true,
+        trackingConsent: { initial: 'granted', persist: true },
+      })
+    })
+
+    for (const spy of Object.values(trackerSpies)) {
+      expect(spy).not.toHaveBeenCalled()
+    }
+    expect(vi.mocked(createBatchedTransport)).not.toHaveBeenCalled()
+    expect(vi.mocked(configureSession)).not.toHaveBeenCalled()
+    expect(vi.mocked(configureProfile)).not.toHaveBeenCalled()
+    expect(vi.mocked(initUserAgentData)).not.toHaveBeenCalled()
+    expect(localStorage.length).toBe(0)
+  })
+
+  // The bail sits below them: the automated browser is CI, where a config mistake gets read.
+  it('still reports a misconfiguration it is about to stop acting on', async () => {
+    const pug = await importPug()
+    driveWithWebdriver()
+
+    pug.init('project-id', {
+      apiKey: 'api-key',
+      excludeAutomatedBrowsers: true,
+      endpoint: 'http://collector.example.com',
+      redactUrlParams: [],
+    })
+
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('is not https'))
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining('redactUrlParams is empty'))
+  })
+
+  // Never "called before init()", which would send an integrator hunting for a call they made.
+  it.each([
+    ['track', (p: Awaited<ReturnType<typeof importPug>>) => p.track('signup')],
+    ['identify', (p: Awaited<ReturnType<typeof importPug>>) => p.identify('user-42')],
+    ['reset', (p: Awaited<ReturnType<typeof importPug>>) => p.reset()],
+    ['setAutoCapture', (p: Awaited<ReturnType<typeof importPug>>) => p.setAutoCapture(false)],
+    ['setTrackingConsent', (p: Awaited<ReturnType<typeof importPug>>) => p.setTrackingConsent('granted')],
+    ['optInTracking', (p: Awaited<ReturnType<typeof importPug>>) => p.optInTracking()],
+    ['optOutTracking', (p: Awaited<ReturnType<typeof importPug>>) => p.optOutTracking()],
+    ['isTrackingEnabled', (p: Awaited<ReturnType<typeof importPug>>) => p.isTrackingEnabled()],
+    ['getTrackingConsent', (p: Awaited<ReturnType<typeof importPug>>) => p.getTrackingConsent()],
+    ['isConsentPending', (p: Awaited<ReturnType<typeof importPug>>) => p.isConsentPending()],
+    ['destroy', (p: Awaited<ReturnType<typeof importPug>>) => p.destroy()],
+  ])('blames automation, not a missing init(), in %s()', async (name, call) => {
+    const pug = await suppressedInit()
+    logSpies.warn.mockClear()
+
+    await call(pug)
+
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('before init()'))
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('not initialized'))
+    expect(logSpies.debug).toHaveBeenCalledWith(
+      `${name}() ignored: this browser was excluded as automation by excludeAutomatedBrowsers.`,
+    )
+  })
+
+  it('sends nothing through either send path', async () => {
+    const pug = await suppressedInit()
+
+    pug.track('signup')
+    await pug.identify('user-42')
+
+    expect(transportSpies.send).not.toHaveBeenCalled()
+    expect(unaryCallSpy).not.toHaveBeenCalled()
+  })
+
+  // Only destroy()'s no-state branch can put back what a suppressed init() left set.
+  it('lets destroy() undo the suppressed init', async () => {
+    const pug = await importPug()
+    driveWithWebdriver()
+    pug.init('project-id', { apiKey: 'api-key', debug: true, excludeAutomatedBrowsers: true })
+    expect(setDebugLoggingSpy).toHaveBeenCalledWith(true)
+
+    pug.destroy()
+    while (restore.length > 0) {
+      restore.pop()?.()
+    }
+    logSpies.warn.mockClear()
+    pug.track('signup')
+
+    expect(setDebugLoggingSpy).toHaveBeenLastCalledWith(false)
+    expect(logSpies.warn).toHaveBeenCalledWith('track() called before init().')
+  })
+
+  // The option alone must not suppress anyone: it is the automation signal that decides.
+  it('leaves an ordinary browser tracking when the option is set', async () => {
+    const { init, track } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false, excludeAutomatedBrowsers: true })
+    track('signup')
+
+    expect(transportSpies.send).toHaveBeenCalledOnce()
+  })
+
+  // Untrusted: a one-tag install supplies this as JSON, where the string "true" is the mistake.
+  it.each(['debug', 'dryRun', 'excludeAutomatedBrowsers'])('warns when %s is not a boolean', async key => {
+    const { init } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false, [key]: 'true' } as never)
+
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining(`${key} must be a boolean; received string`))
   })
 })
