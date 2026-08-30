@@ -79,7 +79,8 @@ export interface InitOptions {
    * Note that it also stops a test asserting the SDK sent an event from ever seeing one.
    *
    * On a match `init()` warns once and returns, leaving the API inert: every method does nothing and
-   * logs to `console.debug`, the public booleans return `false`, and stored identity is left alone.
+   * logs to `console.debug`, the consent setters return `false`, and stored identity is left alone.
+   * `isConsentPending()` still reports `true` — suppression is not an answer to a banner.
    */
   readonly excludeAutomatedBrowsers?: boolean | undefined
   /**

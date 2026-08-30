@@ -1569,6 +1569,20 @@ describe('automated browsers', () => {
     )
   })
 
+  // Suppression is not an answer to a banner: returning false here would stop a host's consent UI
+  // rendering under e2e, breaking a banner test because an analytics flag was switched on.
+  it('keeps answering the consent queries honestly', async () => {
+    const pug = await suppressedInit()
+
+    expect(pug.isConsentPending()).toBe(true)
+    expect(pug.getTrackingConsent()).toBeUndefined()
+    expect(pug.isTrackingEnabled()).toBe(false)
+    expect(pug.optInTracking()).toBe(false)
+    expect(pug.optOutTracking()).toBe(false)
+    expect(pug.setTrackingConsent('granted')).toBe(false)
+    expect(pug.reset()).toBe(false)
+  })
+
   it('sends nothing through either send path', async () => {
     const pug = await suppressedInit()
 

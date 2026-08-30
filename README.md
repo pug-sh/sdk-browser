@@ -176,7 +176,7 @@ Pass `excludeAutomatedBrowsers: true` to keep it out entirely — `init()` then 
 pug.init('project-id', { apiKey: 'pub_...', excludeAutomatedBrowsers: true })
 ```
 
-After that bail the SDK is inert: every other method (`track`, `identify`, `optInTracking`, `isConsentPending`, …) does nothing and logs to `console.debug`, and the public booleans return `false`. Stored identity from an earlier visit is left untouched — the flag means "touch nothing on this browser", so a `trackingConsent: 'denied'` seed does not run its usual purge here.
+After that bail the SDK is inert: every other method does nothing and logs to `console.debug`, and `reset()`, `setTrackingConsent()`, `optInTracking()` and `optOutTracking()` return `false`. The two queries keep answering honestly rather than reporting suppression — `isConsentPending()` still returns `true` and `getTrackingConsent()` `undefined`, because nobody has answered a banner here either, so a consent banner behaves under e2e exactly as it does in production. Stored identity from an earlier visit is left untouched: the flag means "touch nothing on this browser", so a `trackingConsent: 'denied'` seed does not run its usual purge.
 
 Detection is `navigator.webdriver`, plus the `HeadlessChrome` token in the user agent or `navigator.userAgentData.brands`. Each is read independently, so one unreadable signal does not decide for the others. A driver that hides all three is not caught here — that is what the server-side bot signals are for. If a check throws (a privacy extension shadowing `navigator`), the visitor is treated as real and tracking proceeds.
 

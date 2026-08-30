@@ -177,6 +177,12 @@ these behave exactly as they do before `init()`. They report it as automation ra
 missing `init()` — see `reportNoState` — but the return value cannot distinguish the two, which is
 why the bail itself warns.
 
+`isConsentPending()` is deliberately **not** folded into that: it keeps returning `true`. It answers
+"has the user chosen?", and suppressing a send does not choose for them. Returning `false` would read
+as "already answered" and stop a host's banner from rendering under e2e — breaking a banner test
+because someone enabled an analytics flag, which is the failure the tag-never-drop default exists to
+avoid. `getTrackingConsent()` stays `undefined` for the same reason.
+
 ---
 
 ## <a id="purge-reporting"></a>Queue purge reporting
