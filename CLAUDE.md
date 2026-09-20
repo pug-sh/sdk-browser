@@ -52,6 +52,11 @@ Prefer deleting dead code over widening the ignores.
 Verify by **exit code**, not by the printed summary: vitest can print "747 passed" and still exit 1 on
 an unhandled rejection.
 
+**`test` and `test:watch` omit `--bun`** — vitest runs on Node (bin shebang; CI pins it with
+`actions/setup-node`). jsdom >= 30.1 brands IDL wrappers with private fields that Bun's `node:vm`
+`DONT_CONTEXTIFY` global drops, so under `--bun` every jsdom window call throws before any test runs.
+Re-add once [oven-sh/bun#34623](https://github.com/oven-sh/bun/pull/34623) lands.
+
 ## Test Layout
 
 Specs live alongside source as `src/*.test.ts` (Vitest, jsdom).
