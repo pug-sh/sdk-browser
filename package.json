@@ -45,8 +45,8 @@
     "lint": "bun --bun biome check --write .",
     "format": "bun --bun biome format --write .",
     "knip": "bun --bun knip-bun --treat-config-hints-as-errors",
-    "test": "bun --bun vitest run",
-    "test:watch": "bun --bun vitest"
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.12.0",
