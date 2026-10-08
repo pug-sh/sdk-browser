@@ -112,6 +112,13 @@ const errorFromResponse = async (res: Response, methodName: string): Promise<Rpc
   }
 }
 
+/** Headers for a Connect binary-codec request, shared by `unaryCall` and `transport.beacon`. */
+export const connectHeaders = (apiKey: string): Record<string, string> => ({
+  'content-type': 'application/proto',
+  'connect-protocol-version': '1',
+  'x-api-key': apiKey,
+})
+
 /**
  * A unary RPC over the Connect protocol with the binary codec — hand-rolled `fetch` replacing
  * `@connectrpc/connect-web` to shrink the bundle, on the same wire format `transport.beacon` uses.
@@ -135,11 +142,7 @@ export const unaryCall = async <I extends DescMessage, O extends DescMessage>(
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/proto',
-        'connect-protocol-version': '1',
-        'x-api-key': apiKey,
-      },
+      headers: connectHeaders(apiKey),
       body,
       signal: controller.signal,
     })

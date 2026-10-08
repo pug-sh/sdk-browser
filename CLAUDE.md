@@ -291,8 +291,11 @@ body; drops and timeouts surface as `unavailable` / `deadline_exceeded` so the b
 Deliberately **not** every failure: a 2xx non-protobuf body and a `toBinary` bug surface raw, which
 `batch.ts` treats as permanent.
 
-`createTransport(endpoint, apiKey)` adds `beacon`, which uses `navigator.sendBeacon` with binary
-protobuf; since it cannot carry headers, the API key rides a `?api_key=` query param.
+`createTransport(endpoint, apiKey)` adds `beacon`, the page-hide and teardown send: binary protobuf as a
+`keepalive` fetch with `credentials: 'omit'` and the same `connectHeaders` as `unaryCall`. Where
+`Request` has no `keepalive` it falls back to `navigator.sendBeacon`, which cannot carry headers, so the
+API key rides a `?api_key=` query param. Why not `sendBeacon` everywhere →
+[design note](docs/design-notes/batch.md#why-the-farewell-send-is-a-keepalive-fetch).
 
 ### `src/parsers.ts`
 
