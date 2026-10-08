@@ -3,13 +3,18 @@ import { BatchCreateRequestSchema, type Event, EventsService } from './gen/sdk/e
 import { log } from './logger.js'
 import { connectHeaders, unaryCall } from './rpc.js'
 
-// Browsers refuse keepalive bodies, and sendBeacon payloads, above 64 KiB.
+// Browsers refuse keepalive bodies, and sendBeacon payloads, above 64 KiB in flight per page.
 const KEEPALIVE_BODY_LIMIT = 64 * 1024
 
 const supportsKeepalive = () => typeof Request !== 'undefined' && 'keepalive' in Request.prototype
 
 export const createTransport = (endpoint: string, apiKey: string) => {
   const batchCreateUrl = `${endpoint.replace(/\/$/, '')}/sdk.events.v1.EventsService/BatchCreate`
+  // Our own pending keepalive bodies. The browser's budget is shared and rejects asynchronously, after
+  // the caller has already committed its queue, so a batch our own requests would push over the limit
+  // is refused here instead, while the caller can still roll it back. Other scripts' requests share
+  // the budget too; only `onRejected` can catch those.
+  let keepaliveBytesInFlight = 0
 
   return {
     send: (event: Event) =>
@@ -23,15 +28,17 @@ export const createTransport = (endpoint: string, apiKey: string) => {
       unaryCall(endpoint, apiKey, EventsService.method.batchCreate, create(BatchCreateRequestSchema, { events })),
     /**
      * Hands the batch to the browser so it survives the page closing. Returns whether the browser
-     * accepted it, not whether it was delivered.
+     * accepted it, not whether it was delivered. `onRejected` runs if an accepted keepalive request
+     * then fails without reaching the server, while the page is still alive to run it.
      */
-    beacon: (events: Event[]) => {
+    beacon: (events: Event[], onRejected?: () => void) => {
       try {
         const bytes = toBinary(BatchCreateRequestSchema, create(BatchCreateRequestSchema, { events }))
         if (supportsKeepalive()) {
-          if (bytes.byteLength > KEEPALIVE_BODY_LIMIT) {
+          if (keepaliveBytesInFlight + bytes.byteLength > KEEPALIVE_BODY_LIMIT) {
             return false
           }
+          keepaliveBytesInFlight += bytes.byteLength
           // Not sendBeacon: it always sends cookies, and the SDK endpoints answer CORS with a wildcard
           // origin, so the browser blocks its preflight. A keepalive fetch can omit credentials.
           fetch(batchCreateUrl, {
@@ -40,7 +47,18 @@ export const createTransport = (endpoint: string, apiKey: string) => {
             credentials: 'omit',
             headers: connectHeaders(apiKey),
             body: bytes,
-          }).catch((err: unknown) => log.debug('keepalive flush failed:', err))
+          })
+            .then(
+              () => undefined,
+              (err: unknown) => {
+                log.debug('keepalive flush failed:', err)
+                onRejected?.()
+              },
+            )
+            .finally(() => {
+              keepaliveBytesInFlight -= bytes.byteLength
+            })
+            .catch((err: unknown) => log.error('handling a failed keepalive flush failed:', err))
           return true
         }
         if (typeof navigator === 'undefined' || !navigator.sendBeacon) {

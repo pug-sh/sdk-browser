@@ -82,6 +82,31 @@ describe('beacon with keepalive fetch', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('refuses a batch while our own pending keepalive requests would push it over the budget', async () => {
+    let finishFirst!: () => void
+    fetchMock.mockImplementationOnce(
+      () => new Promise<Response>(resolve => (finishFirst = () => resolve(new Response(null)))),
+    )
+    const transport = createTransport(ENDPOINT, KEY)
+
+    expect(transport.beacon([evt('x'.repeat(40_000))])).toBe(true)
+    expect(transport.beacon([evt('y'.repeat(40_000))])).toBe(false)
+
+    finishFirst()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(transport.beacon([evt('z'.repeat(40_000))])).toBe(true)
+  })
+
+  it('tells the caller when an accepted keepalive request fails', async () => {
+    fetchMock.mockImplementationOnce(() => Promise.reject(new TypeError('Failed to fetch')))
+    const onRejected = vi.fn()
+
+    expect(createTransport(ENDPOINT, KEY).beacon([evt()], onRejected)).toBe(true)
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(onRejected).toHaveBeenCalledTimes(1)
+  })
+
   it('swallows a failed keepalive fetch, since the page may already be gone', async () => {
     fetchMock.mockImplementationOnce(() => Promise.reject(new TypeError('Failed to fetch')))
 

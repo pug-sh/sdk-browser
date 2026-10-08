@@ -208,6 +208,9 @@ export const createBatchedTransport = (
   let state: TransportState = 'idle'
   // Round-robin cursor, consulted only when maxSize leaves one indivisible slot. See flush().
   let preferCookieless = false
+  // Bumped by every purgeQueue(), so a late beacon failure can tell whether the queues were emptied
+  // on purpose (consent withdrawn, logout) since its events left them.
+  let purgeCount = 0
 
   /**
    * Reports a failed `sendBeacon` at the level each queue's outcome warrants — `beacon()` returns
@@ -244,6 +247,33 @@ export const createBatchedTransport = (
         `sendBeacon failed ${phase}; ${cookielessCount} cookieless events were dropped — the cookieless queue is memory-only and cannot be recovered.`,
       )
     }
+  }
+
+  /** A beacon the browser accepted and then failed, after its events were committed. */
+  const reportRejectedBeacon = (count: number, phase: string): void => {
+    if (count > 0) {
+      log.error(`A beacon failed ${phase} after the browser accepted it; ${count} events were not delivered.`)
+    }
+  }
+
+  /**
+   * The page-hide beacon was accepted, its events committed, and then it failed — another script spent
+   * the shared keepalive budget, or the network dropped it. The page is still alive, so the events go
+   * back on the queue to retry, unless the queues were purged since: after a consent withdrawal or a
+   * logout they must not return to the device.
+   * @see docs/design-notes/batch.md#a-beacon-that-fails-after-it-was-accepted
+   */
+  const requeueRejectedBeacon = (events: Event[], purgeCountAtSend: number): void => {
+    if (state === 'destroyed' || purgeCount !== purgeCountAtSend) {
+      reportRejectedBeacon(events.length, 'on page hide')
+      return
+    }
+    for (const event of events) {
+      storageFor(event).push(event)
+    }
+    storage.sync()
+    log.warn(`A page-hide beacon failed after the browser accepted it; ${events.length} events were queued again.`)
+    scheduleFlush()
   }
 
   const clearTimer = () => {
@@ -383,7 +413,8 @@ export const createBatchedTransport = (
     // that no lock is held at `idle`. That invariant does hold here (the early return above), but
     // destroy()'s comment explains why acting on a lock you do not own is a real hazard — leaving
     // one call site unguarded invites a reader to conclude it is safe everywhere.
-    if (inner.beacon?.(batch)) {
+    const purgeCountAtSend = purgeCount
+    if (inner.beacon?.(batch, () => requeueRejectedBeacon(batch, purgeCountAtSend))) {
       if (a.length > 0) {
         storage.commit()
       }
@@ -463,6 +494,7 @@ export const createBatchedTransport = (
       // the device: announced first, a failed consented purge printed "dropped unsent — the queue is
       // removed" one line above purge()'s own "may be sent on a later visit", and the second is the
       // true one. Same reasoning that keys purgeQueuedEvents' warning on `destroyed`.
+      purgeCount += 1
       let beaconLoss: { readonly consented: number; readonly cookieless: number } | null = null
       if (send && state !== 'destroyed') {
         const consentedTail = storage.peekUnlocked()
@@ -471,7 +503,9 @@ export const createBatchedTransport = (
         // The third beacon call site, and the only one that discarded this result — so a blocked
         // sendBeacon destroyed everything collected under valid consent, returned true, and said
         // nothing. Both other sites (beaconFlush, destroy) already report through reportBeaconLoss.
-        if (pending.length > 0 && !inner.beacon?.(pending)) {
+        // A late failure is reported, never requeued: these events are leaving the device by design.
+        const onRejected = () => reportRejectedBeacon(pending.length, 'during reset')
+        if (pending.length > 0 && !inner.beacon?.(pending, onRejected)) {
           beaconLoss = { consented: consentedTail.length, cookieless: cookielessTail.length }
         }
       }
@@ -523,7 +557,10 @@ export const createBatchedTransport = (
       const cookielessTail = b.length === 0 ? cookielessStorage.peekUnlocked() : []
       const payload = [...a, ...b, ...consentedTail, ...cookielessTail]
       if (payload.length > 0) {
-        if (inner.beacon?.(payload)) {
+        // On a late failure, the peeked consented tail is still on disk and retries on the next
+        // init(); everything else here is gone, so that is what is reported.
+        const onRejected = () => reportRejectedBeacon(a.length + b.length + cookielessTail.length, 'during destroy()')
+        if (inner.beacon?.(payload, onRejected)) {
           if (a.length > 0) {
             storage.commit()
           }

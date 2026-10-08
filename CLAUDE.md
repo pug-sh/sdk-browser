@@ -297,6 +297,11 @@ Deliberately **not** every failure: a 2xx non-protobuf body and a `toBinary` bug
 API key rides a `?api_key=` query param. Why not `sendBeacon` everywhere →
 [design note](docs/design-notes/batch.md#why-the-farewell-send-is-a-keepalive-fetch).
 
+`beacon` returns false when a batch would push the transport's own in-flight keepalive bytes over
+64 KiB, so the caller rolls back. A failure after acceptance reaches the caller through `onRejected`;
+the page-hide flush requeues on it unless a purge ran since →
+[design note](docs/design-notes/batch.md#a-beacon-that-fails-after-it-was-accepted).
+
 ### `src/parsers.ts`
 
 - `initUserAgentData()` — warms a high-entropy UA cache. Gated on `isTracking()`. Returns void; early
