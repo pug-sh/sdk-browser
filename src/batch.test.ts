@@ -621,6 +621,60 @@ describe('cookieless loss reporting and flush fairness', () => {
   })
 })
 
+describe('a beacon that fails after the browser accepted it', () => {
+  const consentedEvt = (id: string): Event =>
+    create(EventSchema, { eventId: id, kind: 'k', sessionId: 's', distinctId: 'd' })
+  const sentIds = () => sendBatch.mock.calls.flatMap(([events]: [Event[]]) => events.map(e => e.eventId))
+  const pageHideBeacon = (id: string) =>
+    (beacon.mock.calls as Array<[Event[], (() => void) | undefined]>).find(([events]) =>
+      events.some(e => e.eventId === id),
+    )
+
+  it('queues the page-hide batch again and retries it while the page is alive', async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    sendBatch.mockResolvedValue(okResponse(1))
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 10, maxWaitMs: 50 })
+    await t.send(consentedEvt('a'))
+    firePagehide()
+
+    pageHideBeacon('a')?.[1]?.()
+    await vi.advanceTimersByTimeAsync(50)
+
+    expect(sentIds()).toEqual(['a'])
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 events were queued again'))
+    warnSpy.mockRestore()
+  })
+
+  it('does not bring events back once the queues were purged, and reports them lost', async () => {
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    sendBatch.mockResolvedValue(okResponse(1))
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 10, maxWaitMs: 50 })
+    await t.send(consentedEvt('a'))
+    firePagehide()
+
+    // A consent withdrawal between the beacon and its failure: the events must not return.
+    t.purgeQueue({ send: false })
+    pageHideBeacon('a')?.[1]?.()
+    await vi.advanceTimersByTimeAsync(50)
+
+    expect(sentIds()).toEqual([])
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('1 events were not delivered'))
+    errSpy.mockRestore()
+  })
+
+  it('reports a destroy() beacon that fails after acceptance', async () => {
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 10, maxWaitMs: 60_000 })
+    await t.send(consentedEvt('a'))
+    t.destroy()
+
+    pageHideBeacon('a')?.[1]?.()
+
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('during destroy() after the browser accepted it'))
+    errSpy.mockRestore()
+  })
+})
+
 describe('rollback messaging after a concurrent purge', () => {
   // If a flush is in flight when purgeQueue() runs, purge() empties the buffer and the in-flight
   // transient .catch then rolls back onto nothing — while logging "will retry". Nothing will retry;

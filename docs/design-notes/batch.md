@@ -188,7 +188,45 @@ teardown.
 - consented events remain in the persisted queue → `log.warn`, recoverable on the next `init()`
 - cookieless events are gone with the memory-only queue → `log.error`, permanent
 
-`beacon()` returns false whenever `sendBeacon` is absent or blocked, not only on payload rejection.
+`beacon()` returns false when a batch would push its pending keepalive bytes over 64 KiB, and, on the `sendBeacon`
+fallback, whenever `sendBeacon` is absent or blocked, not only on payload rejection. `true` means the
+browser accepted the request, not that it was delivered.
+
+### Why the farewell send is a keepalive fetch
+
+`sendBeacon` always sends credentials, and its `application/proto` body is not CORS-safelisted, so a
+cross-origin beacon is preflighted as a credentialed request. The SDK endpoints answer CORS with
+`Access-Control-Allow-Origin: *` and no credentials, because customer sites have arbitrary origins, and
+a wildcard origin cannot satisfy a credentialed request. The browser failed the preflight and dropped
+every page-hide and teardown flush.
+
+A `keepalive` fetch outlives the page the same way, but it can set `credentials: 'omit'` and carry the
+API key as a header like every other call, so the wildcard response is enough. Browsers allow a
+preflight on keepalive requests from Chrome 81, and Firefox supports keepalive from 133. `sendBeacon`
+remains only where `Request` has no `keepalive`; it still fails against the wildcard origin there,
+which is no worse than before.
+
+### A beacon that fails after it was accepted
+
+`sendBeacon` refused synchronously, so a refused batch was rolled back before anything was committed.
+A keepalive fetch is refused asynchronously: the browser's 64 KiB in-flight budget is shared by every
+keepalive request on the page, and the promise rejects after the caller has committed its queues. Left
+alone, that erased persisted events and lost cookieless ones without a report.
+
+Two parts close it. The transport counts its own in-flight keepalive bytes and returns false when a
+batch would push them over 64 KiB, the common case being a hidden-tab flush followed by a page-hide
+flush, so that refusal takes the existing rollback-and-report path. What the count cannot see, another
+script's keepalive requests or a dropped connection, reaches the caller through `beacon`'s `onRejected`:
+
+- the page-hide flush puts the events back on their queues, syncs, and schedules a normal flush, since
+  the page is evidently still alive;
+- unless a `purgeQueue()` ran since the beacon (`purgeCount`): after a consent withdrawal or a logout
+  the events must not return to the device, so they are reported lost instead;
+- `destroy()` and `reset()` only report, as their events are leaving the device by design.
+
+Holding the batch until the fetch settled was rejected. On an ordinary page close the page is gone
+before it settles, so every consented page-hide batch would stay on disk and be sent again on the next
+visit, and the dashboard rollups, which do not deduplicate on `eventId`, would over-count each one.
 
 **Recoverability is judged by the queue implementation chosen at creation, never a storage probe at
 report time** — a probe that healed after creation promised recovery from a memory queue dying with the
