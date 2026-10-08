@@ -1,11 +1,11 @@
 import { create } from '@bufbuild/protobuf'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Event, EventSchema, EventsService } from './gen/sdk/events/v1/events_pb.js'
 
 // send/sendBatch are thin wrappers over unaryCall; mock it so we can assert the delegation
 // (endpoint, api key, method descriptor, request message) without a real fetch.
 const { unaryCall } = vi.hoisted(() => ({ unaryCall: vi.fn(() => Promise.resolve()) }))
-vi.mock('./rpc.js', () => ({ unaryCall }))
+vi.mock('./rpc.js', async importOriginal => ({ ...(await importOriginal<typeof import('./rpc.js')>()), unaryCall }))
 
 const { createTransport } = await import('./transport.js')
 
@@ -42,7 +42,83 @@ describe('send / sendBatch delegate to unaryCall', () => {
   })
 })
 
-describe('beacon', () => {
+// `'keepalive' in Request.prototype` is how the transport detects keepalive fetch support.
+const KeepaliveRequest = class {
+  get keepalive() {
+    return true
+  }
+}
+const LegacyRequest = class {}
+
+describe('beacon with keepalive fetch', () => {
+  const fetchMock = vi.fn((_url: string, _init: RequestInit) => Promise.resolve(new Response(null)))
+  const sendBeacon = vi.fn(() => true)
+
+  beforeEach(() => {
+    vi.stubGlobal('Request', KeepaliveRequest)
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('navigator', { sendBeacon })
+  })
+
+  it('posts the batch with keepalive, without credentials, and the key as a header', () => {
+    const ok = createTransport(`${ENDPOINT}/`, KEY).beacon([evt()])
+
+    expect(ok).toBe(true)
+    const [url, init] = fetchMock.mock.calls[0]
+    // Cookies would fail the preflight against the endpoints' wildcard CORS, so they must be omitted.
+    expect(url).toBe(`${ENDPOINT}/sdk.events.v1.EventsService/BatchCreate`)
+    expect(init).toMatchObject({
+      method: 'POST',
+      keepalive: true,
+      credentials: 'omit',
+      headers: { 'content-type': 'application/proto', 'connect-protocol-version': '1', 'x-api-key': KEY },
+    })
+    expect(init.body).toBeInstanceOf(Uint8Array)
+    expect(sendBeacon).not.toHaveBeenCalled()
+  })
+
+  it('refuses a batch over the 64 KiB keepalive budget without sending it', () => {
+    expect(createTransport(ENDPOINT, KEY).beacon([evt('x'.repeat(70_000))])).toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses a batch while our own pending keepalive requests would push it over the budget', async () => {
+    let finishFirst!: () => void
+    fetchMock.mockImplementationOnce(
+      () => new Promise<Response>(resolve => (finishFirst = () => resolve(new Response(null)))),
+    )
+    const transport = createTransport(ENDPOINT, KEY)
+
+    expect(transport.beacon([evt('x'.repeat(40_000))])).toBe(true)
+    expect(transport.beacon([evt('y'.repeat(40_000))])).toBe(false)
+
+    finishFirst()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(transport.beacon([evt('z'.repeat(40_000))])).toBe(true)
+  })
+
+  it('tells the caller when an accepted keepalive request fails', async () => {
+    fetchMock.mockImplementationOnce(() => Promise.reject(new TypeError('Failed to fetch')))
+    const onRejected = vi.fn()
+
+    expect(createTransport(ENDPOINT, KEY).beacon([evt()], onRejected)).toBe(true)
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(onRejected).toHaveBeenCalledTimes(1)
+  })
+
+  it('swallows a failed keepalive fetch, since the page may already be gone', async () => {
+    fetchMock.mockImplementationOnce(() => Promise.reject(new TypeError('Failed to fetch')))
+
+    expect(createTransport(ENDPOINT, KEY).beacon([evt()])).toBe(true)
+    // An unhandled rejection would fail the run here.
+    await new Promise(resolve => setTimeout(resolve, 0))
+  })
+})
+
+describe('beacon without keepalive support falls back to sendBeacon', () => {
+  beforeEach(() => vi.stubGlobal('Request', LegacyRequest))
+
   it('returns false when navigator.sendBeacon is unavailable', () => {
     vi.stubGlobal('navigator', { sendBeacon: undefined })
 
