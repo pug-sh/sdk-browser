@@ -245,10 +245,13 @@ and diagnostics (`validateAutoCapture`, called from `setDesired` only) are split
 `vi.mock`s `./logger.js`, since the hoisted factory then runs before its own spies exist. That
 constraint drives several placement decisions.
 
-`makeStorageKey`, `isCaptureSuppressed`, `getSafeElementText`, `scrubUrl` / `configureUrlRedaction`,
-`encodeStored` / `decodeStored` (the retention envelope + `StoredEnvelope` brand),
-`DEFAULT_MAX_AGE_DAYS`, `SECONDS_PER_DAY`, `safeStringify`, `isStorageAvailable`,
+`makeStorageKey`, `isCaptureSuppressed`, `isElement`, `getSafeElementText`, `scrubUrl` /
+`configureUrlRedaction`, `encodeStored` / `decodeStored` (the retention envelope + `StoredEnvelope`
+brand), `DEFAULT_MAX_AGE_DAYS`, `SECONDS_PER_DAY`, `safeStringify`, `isStorageAvailable`,
 `isAutomatedBrowser`.
+
+`isElement` checks `nodeType`, not `instanceof Element`, which rejects an element from another realm
+— so event targets are guarded with it.
 
 `isAutomatedBrowser()` probes its three signals **independently** — a shared `try` let one throwing
 getter skip the other two, which is the whole point of reading three — and `brand` is type-guarded
