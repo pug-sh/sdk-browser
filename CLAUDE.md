@@ -279,7 +279,11 @@ Each module exports `setup*Tracking(track: TrackFn)` returning a cleanup functio
 | `click.ts` | `click` | Capture-phase; tag, id, class, coordinates, own text via `getSafeElementText` (50 chars) |
 | `scroll.ts` | `scroll` | Throttled 2s; samples depth at timer expiry; cleanup clears pending timer |
 | `form.ts` | `form_start`, `form_submit` | `WeakSet` dedupe. `action`/`id`/`name` reads are `typeof`-guarded: `[LegacyOverrideBuiltIns]` means a control named after any of them shadows the IDL attribute with the element itself |
-| `frustration.ts` | `rage_click`, `dead_click` | Rage: 3+ clicks in 1s within 40px, 1s cooldown. Dead: no DOM mutation or URL change within 500ms, text via `getSafeElementText` (20 chars) |
+| `frustration.ts` | `rage_click`, `dead_click` | Rage: 4+ clicks in 1s within 40px, sent once per burst. Dead: no DOM mutation, URL change, text selection or input focus within 500ms; a multi-click is judged once. Text via `getSafeElementText` (20 chars). [Design note](docs/design-notes/frustration.md) |
+
+`forwarded-click.ts`: a `<label>` click makes the browser click its control too. The rage and
+dead-click trackers count the pair once, the dead-click one taking the forward as the label's
+response; the click tracker keeps both.
 
 ### `src/rpc.ts` / `src/transport.ts`
 

@@ -33,7 +33,7 @@ If you are new to the codebase, read in this order — each assumes the one befo
 
 The rest are reference: [`session.md`](session.md), [`profile.md`](profile.md),
 [`track.md`](track.md), [`utils.md`](utils.md), [`auto-capture.md`](auto-capture.md),
-[`cdn.md`](cdn.md).
+[`frustration.md`](frustration.md), [`cdn.md`](cdn.md).
 
 ## The one thing to know first
 

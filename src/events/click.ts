@@ -6,6 +6,8 @@ const eventClick = 'click' satisfies WellKnownEventName
 const MAX_TEXT_LENGTH = 50
 
 export const setupClickTracking = (track: TrackFn) => {
+  // A label click and the click the browser forwards to its control are both kept: they are two
+  // elements, and only the control's click carries its id.
   const onClick = (event: MouseEvent) => {
     const target = event.target
     if (!isElement(target)) {
