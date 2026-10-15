@@ -231,6 +231,10 @@ export const scrubUrl = (raw: string): string => {
  */
 export const isCaptureSuppressed = (el: Element | null): boolean => !!el?.closest('[data-pug-no-capture]')
 
+// Not `instanceof Element`: that fails for an element created in another realm, such as a same-origin iframe.
+export const isElement = (target: EventTarget | null | undefined): target is Element =>
+  (target as Node | null | undefined)?.nodeType === 1 /* ELEMENT_NODE */
+
 /**
  * `<textarea>` content is a child text node and `contenteditable` is user input; both are skipped.
  * `contenteditable` is inherited and editors put it on a root the pointer never hits, so this walks

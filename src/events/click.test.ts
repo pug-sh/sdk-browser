@@ -145,6 +145,22 @@ describe('setupClickTracking', () => {
     expect(track).toHaveBeenCalledWith('click', expect.objectContaining({ tag: 'SPAN', text: '' }))
   })
 
+  it('ignores a click dispatched at a non-element target', () => {
+    const track = vi.fn()
+    cleanup = setupClickTracking(track)
+    // dispatchEvent swallows a listener's exception, so the window error event is what would show it.
+    const errors: unknown[] = []
+    const onError = (event: ErrorEvent) => errors.push(event.error)
+    window.addEventListener('error', onError)
+
+    document.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    window.dispatchEvent(new MouseEvent('click'))
+    window.removeEventListener('error', onError)
+
+    expect(errors).toEqual([])
+    expect(track).not.toHaveBeenCalled()
+  })
+
   it('stops capturing after cleanup', () => {
     const track = vi.fn()
     const dispose = setupClickTracking(track)

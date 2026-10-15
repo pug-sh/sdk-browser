@@ -1,5 +1,5 @@
 import type { TrackFn, WellKnownEventName } from '../track.js'
-import { getSafeElementText } from '../utils.js'
+import { getSafeElementText, isElement } from '../utils.js'
 
 const eventClick = 'click' satisfies WellKnownEventName
 
@@ -7,10 +7,10 @@ const MAX_TEXT_LENGTH = 50
 
 export const setupClickTracking = (track: TrackFn) => {
   const onClick = (event: MouseEvent) => {
-    if (!event.target) {
+    const target = event.target
+    if (!isElement(target)) {
       return
     }
-    const target = event.target as HTMLElement
     track(eventClick, {
       class: target.getAttribute('class') ?? '',
       id: target.id,

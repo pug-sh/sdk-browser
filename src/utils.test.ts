@@ -6,6 +6,7 @@ import {
   getSafeElementText,
   isAutomatedBrowser,
   isCaptureSuppressed,
+  isElement,
   isStorageAvailable,
   makeStorageKey,
   scrubUrl,
@@ -299,6 +300,26 @@ describe('isCaptureSuppressed', () => {
   it('returns true when an ancestor is marked (covers everything inside it)', () => {
     document.body.innerHTML = '<div data-pug-no-capture><span><a id="inner">x@y.com</a></span></div>'
     expect(isCaptureSuppressed(document.getElementById('inner'))).toBe(true)
+  })
+})
+
+describe('isElement', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('accepts an element from another realm, which instanceof rejects', () => {
+    const iframe = document.body.appendChild(document.createElement('iframe'))
+    const foreign = iframe.contentDocument!.createElement('div')
+
+    expect(foreign instanceof Element).toBe(false)
+    expect(isElement(foreign)).toBe(true)
+  })
+
+  it('rejects the document, the window, a text node and null', () => {
+    for (const target of [document, window, document.createTextNode('x'), null]) {
+      expect(isElement(target)).toBe(false)
+    }
   })
 })
 
