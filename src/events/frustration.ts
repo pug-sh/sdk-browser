@@ -65,7 +65,7 @@ type Gesture = {
   mutations: number
   selections: number
   clicks: number
-  forward?: MouseEvent
+  forwards: MouseEvent[]
   settled: boolean
 }
 
@@ -107,7 +107,7 @@ export const setupDeadClickTracking = (track: TrackFn) => {
     // No native gesture selects with four clicks, so text a rage burst selects is incidental.
     const selected =
       current.clicks <= MAX_NATIVE_CLICKS && (selectionCount !== current.selections || selectedTextIn(current.target))
-    const answered = current.forward !== undefined && !current.forward.defaultPrevented
+    const answered = current.forwards.some(forward => !forward.defaultPrevented)
     if (window.location.href !== current.url || mutationCount !== current.mutations || selected || answered) {
       return
     }
@@ -129,7 +129,7 @@ export const setupDeadClickTracking = (track: TrackFn) => {
     if (control) {
       // A field answers its label click by toggling or taking focus; a <button> only by what it does.
       if (gesture && FIELD_TAGS.includes(control.tagName)) {
-        gesture.forward = event
+        gesture.forwards.push(event)
       }
       return
     }
@@ -149,6 +149,7 @@ export const setupDeadClickTracking = (track: TrackFn) => {
         mutations: mutationCount,
         selections: selectionCount,
         clicks: 0,
+        forwards: [],
         settled: false,
       }
     }

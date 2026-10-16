@@ -308,6 +308,26 @@ describe('setupDeadClickTracking', () => {
     expect(track).toHaveBeenCalledWith('dead_click', expect.objectContaining({ element: 'LABEL' }))
   })
 
+  it('does not report a double-click on a label when the page cancels only its second forward', async () => {
+    const track = vi.fn()
+    cleanup = setupDeadClickTracking(track)
+    const label = labelledCheckbox()
+    let forwards = 0
+    label.querySelector('input')!.addEventListener('click', event => {
+      if (++forwards === 2) {
+        event.preventDefault()
+      }
+    })
+    await Promise.resolve()
+
+    click(label, 1)
+    await vi.advanceTimersByTimeAsync(150)
+    click(label, 2)
+    await vi.advanceTimersByTimeAsync(500)
+
+    expect(track).not.toHaveBeenCalled()
+  })
+
   it('reports a label click whose control is a button that does nothing', async () => {
     const track = vi.fn()
     cleanup = setupDeadClickTracking(track)
