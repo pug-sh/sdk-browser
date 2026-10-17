@@ -1,48 +1,54 @@
 import type { TrackFn, WellKnownEventName } from '../track.js'
-import { getSafeElementText } from '../utils.js'
+import { getSafeElementText, isElement } from '../utils.js'
+import { createForwardedClickDetector } from './forwarded-click.js'
 
 const eventRageClick = 'rage_click' satisfies WellKnownEventName
 const eventDeadClick = 'dead_click' satisfies WellKnownEventName
 
 const MAX_TEXT_LENGTH = 20
+const MAX_NATIVE_CLICKS = 3 // a triple-click, the longest native multi-click gesture
+const FIELD_TAGS = ['INPUT', 'TEXTAREA', 'SELECT']
 
 export const setupRageClickTracking = (track: TrackFn) => {
-  const CLICKS_THRESHOLD = 3
+  const CLICKS_THRESHOLD = MAX_NATIVE_CLICKS + 1
   const TIME_WINDOW = 1000 // ms
   const DISTANCE_THRESHOLD = 40 // pixels
 
-  let clicks: { x: number; y: number; time: number }[] = []
-  let cooldownUntil = 0
+  const forwardedTo = createForwardedClickDetector()
+  let origin = { x: 0, y: 0 }
+  let recent: number[] = []
+  let clickCount = 0
+  let reported = false
 
   const onClick = (event: MouseEvent) => {
-    const now = Date.now()
-
-    if (now < cooldownUntil) {
+    if (forwardedTo(event)) {
       return
     }
+    const now = Date.now()
+    recent = recent.filter(time => now - time < TIME_WINDOW)
 
-    const newClick = { x: event.clientX, y: event.clientY, time: now }
+    const nearOrigin =
+      Math.abs(event.clientX - origin.x) < DISTANCE_THRESHOLD && Math.abs(event.clientY - origin.y) < DISTANCE_THRESHOLD
+    if (recent.length === 0 || !nearOrigin) {
+      origin = { x: event.clientX, y: event.clientY }
+      recent = []
+      clickCount = 0
+      reported = false
+    }
+    recent.push(now)
+    clickCount += 1
 
-    clicks = clicks.filter(c => now - c.time < TIME_WINDOW)
-    clicks.push(newClick)
-
-    if (clicks.length >= CLICKS_THRESHOLD) {
-      const first = clicks[0]
-      const allClose = clicks.every(
-        c => Math.abs(c.x - first.x) < DISTANCE_THRESHOLD && Math.abs(c.y - first.y) < DISTANCE_THRESHOLD,
-      )
-
-      if (allClose) {
-        track(eventRageClick, {
-          clickCount: clicks.length,
-          element: (event.target as HTMLElement)?.tagName ?? '',
-          x: first.x,
-          y: first.y,
-        })
-        clicks = []
-        // Drops all clicks during cooldown to avoid duplicate events from the same burst
-        cooldownUntil = now + TIME_WINDOW
-      }
+    // Sent once per burst, as soon as it qualifies, so clickCount is the clicks so far: holding it
+    // for the final count loses it whenever the burst ends in a navigation.
+    if (!reported && recent.length >= CLICKS_THRESHOLD) {
+      reported = true
+      const target = event.target
+      track(eventRageClick, {
+        clickCount,
+        element: isElement(target) ? target.tagName : '',
+        x: origin.x,
+        y: origin.y,
+      })
     }
   }
 
@@ -51,51 +57,120 @@ export const setupRageClickTracking = (track: TrackFn) => {
   return () => window.removeEventListener('click', onClick, true)
 }
 
+type Gesture = {
+  target: Element
+  x: number
+  y: number
+  url: string
+  mutations: number
+  selections: number
+  clicks: number
+  forwards: MouseEvent[]
+  settled: boolean
+}
+
 export const setupDeadClickTracking = (track: TrackFn) => {
   let mutationCount = 0
+  let selectionCount = 0
+  let gesture: Gesture | undefined
   const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
 
   const observer = new MutationObserver(() => (mutationCount += 1))
   observer.observe(document.documentElement, { childList: true, attributes: true, subtree: true, characterData: true })
 
+  // Selecting text is a response, but every click on text also moves the invisible caret, so only a
+  // highlighted selection counts: one in the target, or a change to or from one.
+  const hasSelection = () => document.getSelection()?.isCollapsed === false
+  const selectedTextIn = (target: Node) => {
+    const selection = document.getSelection()
+    return (
+      selection?.isCollapsed === false &&
+      (target.contains(selection.anchorNode) || target.contains(selection.focusNode))
+    )
+  }
+  let hadSelection = hasSelection()
+  const onSelectionChange = () => {
+    const selected = hasSelection()
+    if (selected || hadSelection) {
+      selectionCount += 1
+    }
+    hadSelection = selected
+  }
+
+  const forwardedTo = createForwardedClickDetector()
+
+  const settle = (current: Gesture) => {
+    if (current.settled) {
+      return
+    }
+    current.settled = true
+    // No native gesture selects with four clicks, so text a rage burst selects is incidental.
+    const selected =
+      current.clicks <= MAX_NATIVE_CLICKS && (selectionCount !== current.selections || selectedTextIn(current.target))
+    const answered = current.forwards.some(forward => !forward.defaultPrevented)
+    if (window.location.href !== current.url || mutationCount !== current.mutations || selected || answered) {
+      return
+    }
+    // Focus on an input is an effect, not a dead click
+    if (document.activeElement === current.target && FIELD_TAGS.includes(current.target.tagName)) {
+      return
+    }
+
+    track(eventDeadClick, {
+      element: current.target.tagName,
+      text: getSafeElementText(current.target, MAX_TEXT_LENGTH),
+      x: current.x,
+      y: current.y,
+    })
+  }
+
   const onClick = (event: MouseEvent) => {
-    if (!event.target) {
+    const control = forwardedTo(event)
+    if (control) {
+      // A field answers its label click by toggling or taking focus; a <button> only by what it does.
+      if (gesture && FIELD_TAGS.includes(control.tagName)) {
+        gesture.forwards.push(event)
+      }
       return
     }
-    const target = event.target as HTMLElement
-
-    if (target === document.body || target === document.documentElement) {
+    const target = event.target
+    if (!isElement(target) || target === document.body || target === document.documentElement) {
       return
     }
 
-    const urlBefore = window.location.href
-    const countAtClick = mutationCount
+    // A double or triple click is one gesture, even if its first click replaced the element under the
+    // pointer: its later clicks extend the wait instead of being judged on their own.
+    if (!gesture || event.detail <= 1) {
+      gesture = {
+        target,
+        x: event.clientX,
+        y: event.clientY,
+        url: window.location.href,
+        mutations: mutationCount,
+        selections: selectionCount,
+        clicks: 0,
+        forwards: [],
+        settled: false,
+      }
+    }
+    const current = gesture
+    const click = ++current.clicks
 
     const timer = setTimeout(() => {
       pendingTimers.delete(timer)
-      const urlAfter = window.location.href
-
-      if (urlBefore === urlAfter && mutationCount === countAtClick) {
-        // Focus on an input is an effect, not a dead click
-        if (document.activeElement === target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) {
-          return
-        }
-
-        track(eventDeadClick, {
-          element: target.tagName,
-          text: getSafeElementText(target, MAX_TEXT_LENGTH),
-          x: event.clientX,
-          y: event.clientY,
-        })
+      if (current.clicks === click) {
+        settle(current)
       }
     }, 500)
     pendingTimers.add(timer)
   }
 
   window.addEventListener('click', onClick, true)
+  document.addEventListener('selectionchange', onSelectionChange)
 
   return () => {
     window.removeEventListener('click', onClick, true)
+    document.removeEventListener('selectionchange', onSelectionChange)
     observer.disconnect()
     for (const timer of pendingTimers) {
       clearTimeout(timer)
