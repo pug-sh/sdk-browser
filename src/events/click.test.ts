@@ -145,6 +145,25 @@ describe('setupClickTracking', () => {
     expect(track).toHaveBeenCalledWith('click', expect.objectContaining({ tag: 'SPAN', text: '' }))
   })
 
+  it('tracks a label click and the click the browser forwards to its control', () => {
+    const track = vi.fn()
+    cleanup = setupClickTracking(track)
+
+    const label = withText(document.createElement('label'), 'Subscribe')
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    checkbox.id = 'newsletter'
+    label.appendChild(checkbox)
+    document.body.appendChild(label)
+
+    label.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+    expect(track.mock.calls).toEqual([
+      ['click', expect.objectContaining({ tag: 'LABEL', text: 'Subscribe' })],
+      ['click', expect.objectContaining({ tag: 'INPUT', id: 'newsletter' })],
+    ])
+  })
+
   it('ignores a click dispatched at a non-element target', () => {
     const track = vi.fn()
     cleanup = setupClickTracking(track)
