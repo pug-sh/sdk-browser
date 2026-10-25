@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.2/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.2/schema.json",
   "files": {
     "includes": ["**", "!**/node_modules", "!**/builds", "!**/dist", "!**/src/gen/**", "!**/*.generated.ts"]
   },
@@ -24,6 +24,11 @@
   "json": {
     "formatter": {
       "trailingCommas": "none"
+    }
+  },
+  "markdown": {
+    "formatter": {
+      "enabled": false
     }
   },
   "assist": {
