@@ -1,6 +1,7 @@
-// Publishes the built CDN bundle to Cloudflare R2 (served at https://cdn.pugs.dev). Run manually on
-// release, after `bun run build`, as `bun run scripts/publish-cdn.mjs` (see RELEASING.md). Uploads
+// Publishes the built CDN bundle to Cloudflare R2 (served at https://cdn.pugs.dev): uploads
 // dist/cdn/pug.min.js{,.map,.LEGAL.txt} to <bucket>/vX.Y.Z/ with an immutable one-year cache header.
+// The release workflow runs it on a version tag; by hand it is `bun run scripts/publish-cdn.mjs` after
+// `bun run build` (see RELEASING.md).
 //
 // Paths are immutable: for each artifact this reads back any object already at the key and compares
 // its SHA-384 hash — identical → skip (so an interrupted publish is finished by uploading only the
@@ -9,52 +10,50 @@
 // mismatch on any artifact aborts before a single upload; its test pins that ordering guarantee. It
 // reprints the SRI, now guaranteed to match the live pug.min.js.
 //
-// Runs under plain node or bun. wrangler is invoked via `bunx wrangler` by default (override with
-// WRANGLER_BIN, e.g. `WRANGLER_BIN=wrangler` or `WRANGLER_BIN="npx wrangler"`); the bucket defaults
-// to `pugs-dev-cdn` (override with PUG_CDN_BUCKET). EVERY wrangler call carries --remote — without it the
-// R2 commands hit local miniflare storage and the publish silently does nothing.
-import { spawnSync } from 'node:child_process'
+// Talks to R2's S3 API as R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY, an R2 token with Object Read &
+// Write on the bucket only. PUG_CDN_BUCKET and CLOUDFLARE_ACCOUNT_ID override the bucket and account.
 import { existsSync, readFileSync } from 'node:fs'
 import {
+  CACHE_CONTROL,
   CDN_ARTIFACTS,
-  getObjectArgs,
-  isObjectMissing,
+  isMissingKey,
   isPublishableVersion,
+  objectUrl,
   planAll,
-  putObjectArgs,
+  signRequest,
   sriHash,
 } from './publish-cdn.lib.mjs'
 
 const DIST_DIR = 'dist/cdn'
 const bucket = process.env.PUG_CDN_BUCKET ?? 'pugs-dev-cdn'
-const [wranglerBin, ...wranglerPrefix] = (process.env.WRANGLER_BIN ?? 'bunx wrangler').split(' ')
+const accountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? '958db99f58728f8f2f12d2b503f8a2a7'
+const { R2_ACCESS_KEY_ID: accessKeyId, R2_SECRET_ACCESS_KEY: secretAccessKey } = process.env
 
 const fail = message => {
   console.error(message)
   process.exit(1)
 }
 
-// Run wrangler with the configured binary. Returns raw stdout (Buffer — object bytes for `get`) and
-// stderr (string). A spawn error (e.g. the binary is not installed) is surfaced as a fatal message.
-const runWrangler = args => {
-  const res = spawnSync(wranglerBin, [...wranglerPrefix, ...args], {
-    maxBuffer: 64 * 1024 * 1024, // the sourcemap is ~600 KB; give plenty of headroom
-    env: { ...process.env, WRANGLER_SEND_METRICS: 'false' },
+const s3 = (method, key, { body, headers } = {}) => {
+  const url = objectUrl(accountId, bucket, key)
+  return fetch(url, {
+    method,
+    body,
+    headers: signRequest({ method, url, headers, body, accessKeyId, secretAccessKey }),
   })
-  if (res.error) fail(`Could not run "${wranglerBin}" — is wrangler installed? (${res.error.message})`)
-  return {
-    status: res.status,
-    stdout: res.stdout ?? Buffer.alloc(0),
-    stderr: (res.stderr ?? Buffer.alloc(0)).toString(),
-  }
 }
 
-// The remote bytes at a key, or null if the object does not exist. Any other read failure is fatal.
-const fetchRemote = key => {
-  const { status, stdout, stderr } = runWrangler(getObjectArgs(bucket, key))
-  if (status === 0) return stdout
-  if (isObjectMissing(stderr)) return null
-  fail(`Could not read ${bucket}/${key} from R2:\n${stderr}`)
+// The remote bytes at a key, or null if the object does not exist. Any other failure throws.
+const fetchRemote = async key => {
+  const res = await s3('GET', key)
+  if (res.ok) return Buffer.from(await res.arrayBuffer())
+  const body = await res.text()
+  if (isMissingKey(res.status, body)) return null
+  throw new Error(`Could not read ${bucket}/${key} from R2 (HTTP ${res.status}):\n${body}`)
+}
+
+if (!accessKeyId || !secretAccessKey) {
+  fail('Set R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY to an R2 token with Object Read & Write on the bucket.')
 }
 
 let version
@@ -73,14 +72,14 @@ if (!existsSync(`${DIST_DIR}/pug.min.js`)) {
   fail(`No build at ${DIST_DIR}/pug.min.js — run \`bun run build\` first.`)
 }
 
-console.log(`Publishing v${version} to R2 bucket "${bucket}" (remote)…`)
+console.log(`Publishing v${version} to R2 bucket "${bucket}"…`)
 
 // Phase 1: read back every artifact and decide upload/skip/abort. planAll throws on an immutable-path
 // content mismatch (or a missing build artifact), so a differing byte on ANY artifact aborts here —
 // before Phase 2 runs a single upload.
 let plans
 try {
-  plans = planAll(CDN_ARTIFACTS, version, {
+  plans = await planAll(CDN_ARTIFACTS, version, {
     readLocal: name => {
       const localPath = `${DIST_DIR}/${name}`
       return existsSync(localPath) ? readFileSync(localPath) : null
@@ -88,7 +87,7 @@ try {
     fetchRemote,
   })
 } catch (err) {
-  fail(err.message)
+  fail(err.cause ? `${err.message} (${err.cause.message})` : err.message)
 }
 
 // Phase 2: upload only the artifacts that are absent.
@@ -98,8 +97,11 @@ for (const { key, name, contentType, size, action } of plans) {
     console.log(`  skip    ${key} (identical bytes already published)`)
     continue
   }
-  const put = runWrangler(putObjectArgs(bucket, key, `${DIST_DIR}/${name}`, contentType))
-  if (put.status !== 0) fail(`Failed to upload ${bucket}/${key}:\n${put.stderr}`)
+  const res = await s3('PUT', key, {
+    body: readFileSync(`${DIST_DIR}/${name}`),
+    headers: { 'content-type': contentType, 'cache-control': CACHE_CONTROL },
+  })
+  if (!res.ok) fail(`Failed to upload ${bucket}/${key} (HTTP ${res.status}):\n${await res.text()}`)
   console.log(`  upload  ${key} (${size} B, ${contentType})`)
   uploaded++
 }
