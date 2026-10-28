@@ -391,6 +391,31 @@ describe('autoInitFromScript', () => {
     expect(logSpies.error).not.toHaveBeenCalled()
   })
 
+  it('ignores any element but a script, whatever its attributes', () => {
+    const initFn = vi.fn()
+
+    for (const tag of ['img', 'form', 'embed', 'object']) {
+      const el = document.createElement(tag)
+      el.setAttribute('data-project-id', 'pid')
+      el.setAttribute('data-api-key', 'k')
+      expect(autoInitFromScript(el, initFn), tag).toBe(false)
+    }
+
+    expect(initFn).not.toHaveBeenCalled()
+    expect(logSpies.error).not.toHaveBeenCalled()
+  })
+
+  it('accepts a script in an XHTML document, where tagName stays lowercase', () => {
+    const initFn = vi.fn()
+    const xhtml = document.implementation.createDocument('http://www.w3.org/1999/xhtml', 'html')
+    const script = xhtml.createElementNS('http://www.w3.org/1999/xhtml', 'script')
+    script.setAttribute('data-project-id', 'pid')
+    script.setAttribute('data-api-key', 'k')
+    expect(script.tagName).toBe('script')
+
+    expect(autoInitFromScript(script, initFn)).toBe(true)
+  })
+
   it('fails closed on malformed data-options instead of initializing with half a config', () => {
     const initFn = vi.fn()
     const base = { 'data-project-id': 'pid', 'data-api-key': 'k' }

@@ -342,6 +342,10 @@ The self-contained IIFE for script-tag installs. Deliberately absent from `index
 map — they exist only inside the CDN bundle. The canonical loader snippet lives in `README.md` and is
 fixture-tested against `examples/cdn/index.html`.
 
+`currentScript` is read from `document`'s prototype, never as `document.currentScript`: `Document` is
+`[LegacyOverrideBuiltIns]`, so an injected `<img name="currentScript">` would supply the whole config,
+endpoint included, on any page without a queued `init` — snippet pages that defer it as well.
+
 ---
 
 ## Protobuf Codegen (`Makefile`, `proto/`, `src/gen/`, `buf.gen.yaml`)

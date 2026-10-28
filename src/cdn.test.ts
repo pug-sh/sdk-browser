@@ -23,6 +23,13 @@ const setPugGlobal = (value: unknown): void => {
 
 const importEntry = async () => import('./cdn.js')
 
+// The entry reads currentScript from the prototype, never off document, so stub it there. The extra link
+// mirrors browsers, where HTMLDocument.prototype sits between document and the getter; jsdom has none.
+const stubCurrentScript = (script: HTMLScriptElement): void => {
+  vi.spyOn(Document.prototype, 'currentScript', 'get').mockReturnValue(script)
+  Object.setPrototypeOf(document, Object.create(Document.prototype))
+}
+
 beforeEach(() => {
   vi.resetModules()
   vi.clearAllMocks()
@@ -33,8 +40,9 @@ beforeEach(() => {
 afterEach(() => {
   pugGlobal()?.destroy?.()
   setPugGlobal(undefined)
-  // Restore the prototype getter if a test overrode document.currentScript.
-  delete (document as { currentScript?: unknown }).currentScript
+  vi.restoreAllMocks()
+  Object.setPrototypeOf(document, Document.prototype)
+  document.body.replaceChildren()
 })
 
 describe('cdn entry', () => {
@@ -138,27 +146,29 @@ describe('cdn entry', () => {
     script.setAttribute('data-project-id', 'demo-project')
     script.setAttribute('data-api-key', 'demo-key')
     script.setAttribute('data-options', '{"dryRun":true}')
-    Object.defineProperty(document, 'currentScript', { value: script, configurable: true })
+    stubCurrentScript(script)
 
     await importEntry()
 
     const pug = pugGlobal()
     if (!pug) throw new Error('window.pug not installed')
-    expect(pug.isTrackingEnabled()).toBe(true) // initialized, default consent granted
+    expect(pug.isTrackingEnabled()).toBe(true) // true only after init(); the 'cookieless' default tracks
   })
 
   it('seeds consent denied from a one-tag data-options trackingConsent', async () => {
     const script = document.createElement('script')
     script.setAttribute('data-project-id', 'demo-project')
     script.setAttribute('data-api-key', 'demo-key')
-    script.setAttribute('data-options', '{"dryRun":true,"trackingConsent":{"default":"denied"}}')
-    Object.defineProperty(document, 'currentScript', { value: script, configurable: true })
+    script.setAttribute('data-options', '{"dryRun":true,"trackingConsent":{"initial":"denied"}}')
+    stubCurrentScript(script)
 
     await importEntry()
 
     const pug = pugGlobal()
     if (!pug) throw new Error('window.pug not installed')
-    expect(pug.isTrackingEnabled()).toBe(false) // one-tag data-options seeded consent denied
+    expect(pug.getTrackingConsent()).toBe('denied') // undefined had auto-init not run
+    // A wrong key fails closed to 'denied' too, so prove this one was honored.
+    expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringMatching(/failing closed/i))
   })
 
   it('fails closed when a one-tag data-options trackingConsent is malformed', async () => {
@@ -168,13 +178,13 @@ describe('cdn entry', () => {
     // A mangled server-side interpolation renders a bare array/primitive where a consent object or
     // string was intended. It must never silently fall back to tracking enabled.
     script.setAttribute('data-options', '{"dryRun":true,"trackingConsent":["denied"]}')
-    Object.defineProperty(document, 'currentScript', { value: script, configurable: true })
+    stubCurrentScript(script)
 
     await importEntry()
 
     const pug = pugGlobal()
     if (!pug) throw new Error('window.pug not installed')
-    expect(pug.isTrackingEnabled()).toBe(false) // out-of-domain consent config → fail closed
+    expect(pug.getTrackingConsent()).toBe('denied') // out-of-domain consent config → fail closed
   })
 
   it('runs auto-init before replaying queued calls, so they land after init', async () => {
@@ -182,12 +192,12 @@ describe('cdn entry', () => {
     script.setAttribute('data-project-id', 'demo-project')
     script.setAttribute('data-api-key', 'demo-key')
     script.setAttribute('data-options', '{"dryRun":true}')
-    Object.defineProperty(document, 'currentScript', { value: script, configurable: true })
+    stubCurrentScript(script)
     setPugGlobal({ _q: [['track', ['queued-before-load']]], _v: 1 })
 
     await importEntry()
 
-    // The queued track executed against an initialized SDK (consent granted → debug log), was not
+    // The queued track executed against an initialized SDK (the 'cookieless' default → debug log), was not
     // dropped as a before-init call, and triggered no aggregate warning.
     expect(logSpies.debug).toHaveBeenCalledWith(expect.stringContaining('track("queued-before-load")'))
     expect(logSpies.warn).not.toHaveBeenCalledWith(expect.stringContaining('track() called before init()'))
@@ -197,8 +207,8 @@ describe('cdn entry', () => {
   it('lets a queued init win over data attributes', async () => {
     const script = document.createElement('script')
     script.setAttribute('data-project-id', 'attr-project')
-    script.setAttribute('data-api-key', 'attr-key') // default consent would be granted
-    Object.defineProperty(document, 'currentScript', { value: script, configurable: true })
+    script.setAttribute('data-api-key', 'attr-key') // alone these would seed 'cookieless'
+    stubCurrentScript(script)
     setPugGlobal({
       _q: [['init', ['queued-project', { apiKey: 'queued-key', dryRun: true, trackingConsent: 'denied' }]]],
       _v: 1,
@@ -207,6 +217,49 @@ describe('cdn entry', () => {
     await importEntry()
 
     // Consent denied proves the queued init ran and the data attributes were ignored.
-    expect(pugGlobal()?.isTrackingEnabled()).toBe(false)
+    expect(pugGlobal()?.getTrackingConsent()).toBe('denied')
+  })
+
+  it('still replays the queue when the currentScript getter throws, as on a sandboxed Proxy document', async () => {
+    vi.spyOn(Document.prototype, 'currentScript', 'get').mockImplementation(() => {
+      throw new TypeError('Illegal invocation')
+    })
+    const readySpy = vi.fn()
+    setPugGlobal({ _q: [['ready', [readySpy]]], _v: 1 })
+
+    await importEntry()
+
+    expect(readySpy).toHaveBeenCalledTimes(1)
+  })
+
+  describe('with markup shadowing document.currentScript', () => {
+    beforeEach(() => {
+      document.body.insertAdjacentHTML(
+        'beforeend',
+        `<img name="currentScript" data-project-id="attacker" data-api-key="attacker-key"
+          data-endpoint="https://attacker.example" data-options='{"dryRun":true,"trackingConsent":"granted"}'>`,
+      )
+      expect(document.currentScript).toBeInstanceOf(HTMLImageElement)
+    })
+
+    it('auto-inits from the real script tag', async () => {
+      const script = document.createElement('script')
+      script.setAttribute('data-project-id', 'demo-project')
+      script.setAttribute('data-api-key', 'demo-key')
+      script.setAttribute('data-options', '{"dryRun":true,"trackingConsent":"denied"}')
+      stubCurrentScript(script)
+
+      await importEntry()
+
+      expect(pugGlobal()?.getTrackingConsent()).toBe('denied')
+    })
+
+    it('never auto-inits from the markup itself', async () => {
+      await importEntry()
+
+      const pug = pugGlobal()
+      if (!pug) throw new Error('window.pug not installed')
+      expect(pug.getTrackingConsent()).toBeUndefined()
+    })
   })
 })

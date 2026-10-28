@@ -165,15 +165,15 @@ type InitFn = (projectId: string, options: { apiKey: string }) => void
 /**
  * One-tag install: initializes from the script tag's data attributes when the page used
  * `<script src=... data-project-id=... data-api-key=... [data-endpoint=...] [data-options='{…}']>`
- * instead of the loader snippet. Returns whether init ran. Silent only when NO auto-init attribute
- * is present (the loader-snippet case); any present-but-empty or partial set is one-tag intent
- * with a broken config (e.g. a failed server-side template interpolation) and must be loud. Fails
- * closed on any malformed input — initializing with half a config could violate an intended
- * consent default (e.g. a mangled `trackingConsent` in data-options must not fall back to consent
- * granted).
+ * instead of the loader snippet. Returns whether init ran. Silent only for a missing or non-`<script>`
+ * element, or one with NO auto-init attribute (the loader-snippet case); any present-but-empty or
+ * partial set is one-tag intent with a broken config (e.g. a failed server-side template interpolation)
+ * and must be loud. Fails closed on any malformed input — initializing with half a config could violate
+ * an intended consent default (e.g. a mangled `trackingConsent` in data-options must not fall back to
+ * the `'cookieless'` default, which still collects).
  */
 export const autoInitFromScript = (script: Element | null | undefined, initFn: InitFn): boolean => {
-  if (!script || typeof script.getAttribute !== 'function') {
+  if (script?.localName !== 'script') {
     return false
   }
   const projectId = script.getAttribute('data-project-id')
