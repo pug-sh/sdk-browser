@@ -59,8 +59,17 @@ to start denied via the `trackingConsent` init option, never a queued pre-init `
 winning.
 
 **Fails closed** on any malformed input — never init with half a privacy config. Runs before replay when
-no queued `init` exists (so queued calls land after init); a queued `init` always wins. Inert under GTM
-or eval, where there is no `document.currentScript`.
+no queued `init` exists (so queued calls land after init); a queued `init` always wins. Inert wherever the
+`currentScript` getter returns null: module scripts, and code run later from a callback or timeout.
+
+**`currentScript` is read from `document`'s prototype, never as `document.currentScript`.** `Document` is
+`[LegacyOverrideBuiltIns]`, so injected markup like `<img name="currentScript" data-endpoint=…>` shadows
+the property, and its data attributes would become the whole config: endpoint, redaction, consent (the
+gadget behind webpack's CVE-2024-43788). Snippet pages are exposed too whenever `init` isn't queued at load,
+e.g. deferred until a consent banner is answered. A throwing read counts as null, so replay still runs: a
+micro-frontend sandbox's Proxy `document` fails the getter's brand check. `autoInitFromScript` also rejects
+any element whose `localName` isn't `script`; a `tagName === 'SCRIPT'` check would miss XHTML, where it
+stays lowercase.
 
 ---
 

@@ -59,13 +59,24 @@ const api = {
   version: SDK_VERSION,
 } satisfies Record<StubMethod, (...args: never[]) => unknown> & { version: string }
 
+// Not document.currentScript: Document is [LegacyOverrideBuiltIns], so <img name="currentScript">
+// shadows it. A lookup that starts at the prototype skips those named properties.
+const readCurrentScript = (): Element | null => {
+  try {
+    return Reflect.get(Object.getPrototypeOf(document), 'currentScript', document)
+  } catch {
+    // A micro-frontend sandbox's Proxy document fails the getter's brand check.
+    return null
+  }
+}
+
 if (typeof window !== 'undefined') {
   const installed = installPug(window as { pug?: PugStub }, api)
   if (installed) {
     const hasQueuedInit = installed.pending.some(call => Array.isArray(call) && call[0] === 'init')
     // Auto-init (one-tag install) runs before replay so queued track/consent calls land after
     // init instead of being dropped; an explicit queued init always beats data attributes.
-    const autoInited = !hasQueuedInit && autoInitFromScript(document.currentScript, init)
+    const autoInited = !hasQueuedInit && autoInitFromScript(readCurrentScript(), init)
     replayQueue(installed.pending, installed.dispatch, autoInited)
   }
 }
