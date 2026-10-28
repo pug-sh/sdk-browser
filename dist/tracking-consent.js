@@ -1,0 +1,285 @@
+import { log } from './logger.js';
+import { resolveStore } from './persistence.js';
+// safeStringify, not JSON.stringify, for every interpolation of an untrusted value below: the
+// values being rejected are exactly the ones (bigint, circular refs, a throwing toJSON) that make
+// JSON.stringify itself throw — out of the one factory init() calls unguarded, and out of set(),
+// which the public setTrackingConsent reaches.
+import { makeStorageKey, safeStringify } from './utils.js';
+/**
+ * The valid consent states, and the single source of `TrackingConsent`. Derived rather than written
+ * alongside: maintained separately, `isConsent` still compiled against the old union while
+ * advertising `value is TrackingConsent`, so a newly added state was un-settable and reported as
+ * invalid input.
+ */
+const CONSENT_STATES = ['granted', 'denied', 'cookieless'];
+/**
+ * What a rejection may resolve to. `'granted'` is excluded deliberately — a CMP mapping its reject
+ * branch onto full consent is the one misconfiguration here that cannot be recovered from.
+ */
+const REJECT_STATES = ['denied', 'cookieless'];
+const isRejectConsent = (value) => REJECT_STATES.includes(value);
+/**
+ * The GPC signal (globalprivacycontrol.org): a standing "do not sell or share my data" set in the
+ * browser. Legally binding under CCPA/CPRA and several US state laws; an Art 21 objection at most
+ * under GDPR.
+ */
+const isGpcEnabled = () => {
+    try {
+        if (typeof navigator === 'undefined') {
+            return false;
+        }
+        // Spec says boolean true; the other spellings cost nothing and err toward opt-out.
+        const signal = navigator.globalPrivacyControl;
+        return signal === true || signal === 1 || signal === '1';
+    }
+    catch (err) {
+        // A throwing getter (privacy extension) must not silently disable an opt-in signal — so warn,
+        // which every install sees, not debug, which no default install does. Only respectGpc
+        // integrators reach this read, once per init(), so it cannot spam.
+        log.warn('Failed to read the Global Privacy Control signal; treating it as absent:', err);
+        return false;
+    }
+};
+/**
+ * A granted gate for a controller that does not exist yet. `init()` must build the cookie layer
+ * before the controller — the controller needs the store, the store needs the layer — so the layer's
+ * gate resolves lazily.
+ *
+ * Until it resolves this reads as **not granted**: no `?? true` here means no fail-open default
+ * anywhere in the gate chain, so the window cannot become a hole if a future edit moves a store
+ * access above the assignment.
+ *
+ * Lives here so the `as GrantedGate` cast stays in the module that owns the brand.
+ * @see docs/design-notes/tracking-consent.md#containment
+ */
+export const deferredGrantedGate = (controller) => (() => controller()?.isGranted() ?? false);
+/**
+ * The recognized `TrackingConsentConfig` keys — needed at runtime because the one-tag install
+ * supplies this as untyped JSON, but *derived* from the type so it cannot drift: `satisfies` makes
+ * both directions a compile error. @see docs/design-notes/tracking-consent.md#derived-unions-so-predicates-cannot-drift
+ */
+const CONSENT_KEY_MAP = {
+    initial: true,
+    onReject: true,
+    persist: true,
+    respectGpc: true,
+};
+const KNOWN_CONSENT_KEYS = new Set(Object.keys(CONSENT_KEY_MAP));
+/** Narrows an untrusted value to a valid consent state. Everything else is out-of-domain. */
+const isConsent = (value) => CONSENT_STATES.includes(value);
+export const createTrackingConsent = (projectId, config, persistentStore) => {
+    // Runtime-untrusted despite its type (the one-tag install feeds it from data-options JSON), so
+    // validate the shape too, not just `initial`. Neither a string nor a plain object fails closed to
+    // 'denied'; undefined/null is the legitimate "no preference" case.
+    const raw = config;
+    let normalized;
+    if (raw == null) {
+        normalized = {};
+    }
+    else if (typeof raw === 'string') {
+        normalized = { initial: raw };
+    }
+    else if (typeof raw === 'object' && !Array.isArray(raw)) {
+        normalized = raw;
+    }
+    else {
+        log.warn(`Invalid trackingConsent config ${safeStringify(raw)}; failing closed to 'denied'.`);
+        normalized = { initial: 'denied' };
+    }
+    // A typo'd or stale key leaves `initial` undefined and the seed falls through to the default, so
+    // fail closed instead. TypeScript catches it for npm consumers, but the one-tag install feeds this
+    // from `data-options` JSON that no compiler sees.
+    const unknownKeys = Object.keys(normalized).filter(key => !KNOWN_CONSENT_KEYS.has(key));
+    if (unknownKeys.length > 0) {
+        log.warn(`Unknown trackingConsent key(s) ${JSON.stringify(unknownKeys)}; expected ${[...KNOWN_CONSENT_KEYS]
+            .map(k => `'${k}'`)
+            .join(' and/or ')}. Failing closed to 'denied' rather than falling back to the default seed.`);
+        normalized = { ...normalized, initial: 'denied' };
+    }
+    // A non-boolean `persist` silently becomes false and then fails quietly in every direction:
+    // consent stays in memory, init()'s purge never fires, and set() still reports success.
+    // `"persist": "true"` is the obvious `data-options` mistake.
+    if (normalized.persist !== undefined && typeof normalized.persist !== 'boolean') {
+        log.warn(`Invalid trackingConsent.persist ${safeStringify(normalized.persist)}; expected a boolean. Treating it as false — the choice will not survive a reload.`);
+    }
+    // Same untyped path as `persist`; failing quiet means not honoring an opt-out the integrator
+    // believes they enabled.
+    if (normalized.respectGpc !== undefined && typeof normalized.respectGpc !== 'boolean') {
+        log.warn(`Invalid trackingConsent.respectGpc ${safeStringify(normalized.respectGpc)}; expected a boolean. Treating it as false — the Global Privacy Control signal will be ignored.`);
+    }
+    // Falls back to 'denied' rather than being ignored — this decides what clicking Reject gets. A
+    // 'granted' is called out separately: it inverts the control rather than mistyping it.
+    let rejectState = 'denied';
+    if (normalized.onReject !== undefined) {
+        if (isRejectConsent(normalized.onReject)) {
+            rejectState = normalized.onReject;
+        }
+        else if (normalized.onReject === 'granted') {
+            log.error("trackingConsent.onReject cannot be 'granted' — a rejection may not grant consent. Using 'denied'.");
+        }
+        else {
+            log.warn(`Invalid trackingConsent.onReject ${safeStringify(normalized.onReject)}; expected ${REJECT_STATES.map(s => `'${s}'`).join(' or ')}. Using 'denied'.`);
+        }
+    }
+    const persist = normalized.persist === true;
+    const respectGpc = normalized.respectGpc === true;
+    const storageKey = makeStorageKey(projectId, 'consent');
+    const store = persist ? resolveStore(persistentStore) : null;
+    if (persist && !store) {
+        log.warn('Storage unavailable; tracking consent will not persist across page loads.');
+    }
+    // First-run seed, then let any valid persisted value override it. A present-but-invalid `initial`
+    // (e.g. a typo'd 'Denied') fails closed to 'denied'; an absent one seeds 'cookieless', which
+    // collects without writing anything to the device.
+    const seed = normalized.initial;
+    let status = 'cookieless';
+    if (isConsent(seed)) {
+        status = seed;
+    }
+    else if (seed !== undefined) {
+        log.warn(`Invalid trackingConsent initial ${safeStringify(seed)}; failing closed to 'denied'.`);
+        status = 'denied';
+    }
+    // Whether `status` came from storage rather than the config seed. Only an explicit set() writes,
+    // so with `persist: true` and nothing stored yet it is still the seed — see isAuthoritative().
+    let restoredFromStorage = false;
+    // Whether the user has actually answered — a restored choice or an explicit set(). Distinct from
+    // isAuthoritative(), which additionally requires durability because it gates destroying identity.
+    let decided = false;
+    // Outranks the config seed — GPC is the user's own standing choice, not the integrator's
+    // placeholder — but not a choice made on this site, which is more specific and restores below.
+    let gpcApplied = false;
+    // What the device currently holds, so write() can tell a genuine change of mind (restart the
+    // retention window) from a re-assert of the same choice (leave it running).
+    let persistedValue = null;
+    if (respectGpc && isGpcEnabled()) {
+        status = rejectState;
+        decided = true;
+        gpcApplied = true;
+        log.debug(`Global Privacy Control is enabled; tracking consent resolved to "${rejectState}".`);
+        // Without persistence GPC re-resolves every load, so isPending() stays false (no banner) and an
+        // opt-in cannot outlive the page — "a choice on this site outranks GPC" needs somewhere to record it.
+        if (!persist) {
+            log.warn('trackingConsent.respectGpc resolved consent from the GPC signal, but persist is not enabled — isConsentPending() will stay false and a later optInTracking() will not survive a reload. Set trackingConsent.persist: true.');
+        }
+    }
+    if (store) {
+        // getItemOrLegacy, the only call site: a pre-envelope build persisted this record as a bare
+        // string, which the envelope migration reads as undecodable and deletes. For identifiers that
+        // is the designed outcome (they self-heal), but this key records a *refusal* — deleted unread,
+        // a user who clicked Reject on the old build came back on the config seed. It hands the bare
+        // value over (still removed from the device either way); isConsent() below decides whether it
+        // was a recorded choice or corruption, and the refresh write re-envelopes an adopted one.
+        const stored = store.getItemOrLegacy(storageKey);
+        if (isConsent(stored)) {
+            status = stored;
+            persistedValue = stored;
+            restoredFromStorage = true;
+            decided = true;
+            // Re-written so a cookie-backed store keeps the record until its deadline; it cannot extend
+            // that deadline, so the choice still ages out on schedule. Checked, not discarded: a write
+            // that keeps failing lets the record vanish early and the next init() falls back to the seed.
+            if (!store.setItem(storageKey, stored)) {
+                log.error(`Failed to refresh the stored tracking consent at "${storageKey}"; it may disappear early and fall back to the configured seed, discarding the user's recorded choice.`);
+            }
+        }
+        else if (stored !== null) {
+            log.warn(`Stored tracking consent at "${storageKey}" is invalid, ignoring.`);
+        }
+    }
+    // Reports whether `value` survives the next page load. Without `persist` there is nothing to fail;
+    // with it and no store, every write is a durability failure — the constructor warned once, but a
+    // caller asking "did the opt-out stick?" needs the per-call answer.
+    const write = (value) => {
+        if (!persist) {
+            return true;
+        }
+        // The new value first, the window restart second: this is the one write that must not fail
+        // open. Removing first meant a remove that landed plus a set that failed left *no* record, and
+        // the next init() fell back to the config seed — a recorded 'denied' becoming a more permissive
+        // placeholder. Written first, the common failure (a dead layer fails every op) keeps the old
+        // record intact.
+        if (!store || !store.setItem(storageKey, value)) {
+            log.error('Failed to persist tracking consent to storage — opt in/out will not survive page reload.');
+            return false;
+        }
+        // A *changed* decision starts a fresh retention window: the store carries a deadline forward
+        // across writes, so opting out on day 1 and back in on day 360 would leave a record lapsing in
+        // five days. Guarded on the value differing, or a CMP re-asserting its state slides the clock —
+        // and on a previous record existing at all, since the first-ever persist just stamped a fresh
+        // window and a remove+rewrite here only re-stamped it, with a spurious "could not clear the
+        // previous record" warning available on a device with no previous record to clear.
+        if (persistedValue !== null && value !== persistedValue) {
+            if (!store.removeItem(storageKey)) {
+                // The value above landed under the old deadline — early lapse, the safe direction — but the
+                // restart was skipped; say so, or the early re-prompt reads as a bug with no trail.
+                log.warn('Could not clear the previous consent record, so the retention window was not restarted; the new choice keeps the old deadline.');
+            }
+            else if (!store.setItem(storageKey, value)) {
+                // The remove landed and the layer died before the rewrite — the one sequence write-first
+                // cannot save. Nothing is on the device now.
+                log.error('Failed to persist tracking consent to storage — opt in/out will not survive page reload.');
+                return false;
+            }
+        }
+        persistedValue = value;
+        return true;
+    };
+    /**
+     * Applies a consent state. Returns false when the state did not fully take effect — either the
+     * value was out-of-domain (state is then forced to 'denied') or it could not be persisted. The
+     * requested state is always applied in memory when valid, so false never means "nothing happened".
+     */
+    const set = (value) => {
+        // Even the fail-closed path counts as decided: reporting 'pending' afterwards would read as
+        // "never asked" while the SDK sits at 'denied'.
+        decided = true;
+        if (!isConsent(value)) {
+            // Fail closed rather than keep the previous state: a caller trying to *change* consent has
+            // lost track of it, and keeping a possibly-'granted' state leaves a user who clicked Reject
+            // fully tracked. Error, not warn — it rejects the value *and* changes state, and the CDN
+            // global feeds this untyped values ('reject', 'cookieLess', null) straight from a CMP.
+            log.error(`Invalid tracking consent state ${safeStringify(value)}; failing closed to 'denied'.`);
+            status = 'denied';
+            write('denied');
+            return false;
+        }
+        status = value;
+        return write(value);
+    };
+    return {
+        getConsent: () => status,
+        /**
+         * Whether the resolved state is a durable record of the user's own choice rather than the
+         * integrator's pre-banner placeholder — the gate on init()'s identity purge.
+         *
+         * Requires BOTH persistence and that the value came back from storage. `persist` alone is a
+         * data-loss bug: nothing is written until an explicit set(), so adding `{ initial: 'denied',
+         * persist: true }` to an existing deployment would purge every returning visitor's identity once,
+         * on deploy day. Without `persist` the value is a per-load placeholder, and purging on that
+         * destroys identity on every page load. A GPC-resolved state qualifies — equally durable, being
+         * re-asserted by the browser each load.
+         */
+        isAuthoritative: () => gpcApplied || (persist && restoredFromStorage),
+        /** True only for full consent — gates identity-storage writes, NOT event flow. */
+        isGranted: (() => status === 'granted'),
+        /**
+         * True when events flow at all (granted or cookieless). Gates auto-capture listener attachment
+         * and answers the public isTrackingEnabled() — but gates neither track() nor identify(), which
+         * check differently: identify() requires isGranted(), and track() branches on getConsent()
+         * directly because it needs all three states.
+         */
+        isTracking: (() => status === 'granted' || status === 'cookieless'),
+        /**
+         * Whether the user has yet to answer, so `status` is still the `initial` seed. Answers "should I
+         * show the banner?", which neither other getter could: a seeded 'granted' and a chosen 'granted'
+         * are the same value.
+         */
+        isPending: () => !decided,
+        /** The state a rejection resolves to — `onReject`, or 'denied'. */
+        getRejectState: () => rejectState,
+        set,
+        optIn: () => set('granted'),
+        optOut: () => set(rejectState),
+    };
+};
