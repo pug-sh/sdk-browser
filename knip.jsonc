@@ -11,10 +11,10 @@
   ],
   "project": ["src/**/*.ts", "scripts/**/*.mjs"],
   "ignore": ["src/gen/**"],
-  // `make check-proto-pin` runs from prepublishOnly; `wait` is a shell builtin in dev/serve.
-  "ignoreBinaries": ["make", "wait"],
+  // `make check-proto-pin` runs from prepublishOnly.
+  "ignoreBinaries": ["make"],
   // knip doesn't resolve binaries invoked through `bun` (`bunx` and bare binaries resolve fine),
-  // and it doesn't read buf.gen.yaml: biome + serve come from package.json scripts, protoc-gen-es
-  // from buf.gen.yaml's `local:` plugin path.
-  "ignoreDependencies": ["@biomejs/biome", "@bufbuild/protoc-gen-es", "serve"]
+  // and it doesn't read buf.gen.yaml: biome comes from package.json scripts, protoc-gen-es from
+  // buf.gen.yaml's `local:` plugin path.
+  "ignoreDependencies": ["@biomejs/biome", "@bufbuild/protoc-gen-es"]
 }
