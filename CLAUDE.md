@@ -42,11 +42,15 @@ bun run test:watch     # Run tests in watch mode
 **Dead-code gate:** `bun run knip` runs in CI and is expected to stay at zero findings. Biome's
 linter is disabled, so knip is the only thing catching an export nothing imports or a file nothing
 reaches. Its config (`knip.jsonc`) carries the entry points tooling cannot infer — `src/cdn.ts` and the
-three hand-run `scripts/*.mjs` — and three `ignoreDependencies` that are real but invisible to it
+two Makefile-run `scripts/*.mjs` — and three `ignoreDependencies` that are real but invisible to it
 (knip does not resolve binaries invoked through `bun`, and does not read `buf.gen.yaml`). The
 scripts are listed one by one on purpose: a glob would mark the library modules under `scripts/`
 as entries and exempt their exports. `--treat-config-hints-as-errors` fails CI on a stale ignore.
 Prefer deleting dead code over widening the ignores.
+
+**Releasing:** pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which uploads the CDN
+bundle to R2 and publishes to npm through trusted publishing. Steps and one-time setup are in
+[`RELEASING.md`](RELEASING.md).
 
 **Use `bun run test`, not `bun test`** — the latter invokes Bun's built-in runner instead of Vitest.
 Verify by **exit code**, not by the printed summary: vitest can print "747 passed" and still exit 1 on

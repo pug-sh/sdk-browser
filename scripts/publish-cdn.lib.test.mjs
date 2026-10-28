@@ -2,18 +2,15 @@ import { describe, expect, it } from 'vitest'
 import {
   CACHE_CONTROL,
   CDN_ARTIFACTS,
-  getObjectArgs,
-  isObjectMissing,
+  isMissingKey,
   isPublishableVersion,
   objectKey,
+  objectUrl,
   planAll,
   planUpload,
-  putObjectArgs,
+  signRequest,
   sriHash,
 } from './publish-cdn.lib.mjs'
-
-// The value after a flag in a flat argv, e.g. flagValue(['--file', 'x'], '--file') === 'x'.
-const flagValue = (args, flag) => args[args.indexOf(flag) + 1]
 
 describe('objectKey', () => {
   it('version-pins the path with a leading v', () => {
@@ -62,11 +59,11 @@ describe('planAll', () => {
   // object key. Absent from the map → null, matching the real readLocal/fetchRemote contract.
   const deps = (local, remote) => ({
     readLocal: name => (name in local ? Buffer.from(local[name]) : null),
-    fetchRemote: key => (key in remote ? Buffer.from(remote[key]) : null),
+    fetchRemote: async key => (key in remote ? Buffer.from(remote[key]) : null),
   })
 
-  it('plans an upload for every artifact when nothing is published yet (fresh release)', () => {
-    const plans = planAll(
+  it('plans an upload for every artifact when nothing is published yet (fresh release)', async () => {
+    const plans = await planAll(
       artifacts,
       '0.0.3',
       deps({ 'pug.min.js': 'js', 'pug.min.js.map': 'map', 'pug.min.js.LEGAL.txt': 'legal' }, {}),
@@ -77,8 +74,8 @@ describe('planAll', () => {
     expect(plans[0]).toMatchObject({ name: 'pug.min.js', contentType: 'text/javascript', size: 2 })
   })
 
-  it('skips already-published identical bytes and uploads the rest (interrupted publish resumes)', () => {
-    const plans = planAll(
+  it('skips already-published identical bytes and uploads the rest (interrupted publish resumes)', async () => {
+    const plans = await planAll(
       artifacts,
       '0.0.3',
       deps(
@@ -89,54 +86,48 @@ describe('planAll', () => {
     expect(plans.map(p => p.action)).toEqual(['skip', 'upload', 'upload'])
   })
 
-  it('aborts the WHOLE release — throwing before any plan is returned — when an immutable path differs', () => {
+  it('aborts the WHOLE release — rejecting before any plan is returned — when an immutable path differs', async () => {
     // The load-bearing ordering guarantee behind Phase 1 / Phase 2 in publish-cdn.mjs: planAll plans
     // every artifact and throws on a mismatch, so it never hands Phase 2 a partial plans array to act
     // on. A mismatch on the SECOND artifact must still abort the whole run — no upload can precede it.
     let plans
-    expect(() => {
-      plans = planAll(
-        artifacts,
-        '0.0.3',
-        deps(
-          { 'pug.min.js': 'js', 'pug.min.js.map': 'map-NEW', 'pug.min.js.LEGAL.txt': 'legal' },
-          { 'v0.0.3/pug.min.js.map': 'map-OLD' }, // 2nd artifact already published with different bytes
-        ),
-      )
-    }).toThrow(/immutable/i)
+    await expect(
+      (async () => {
+        plans = await planAll(
+          artifacts,
+          '0.0.3',
+          deps(
+            { 'pug.min.js': 'js', 'pug.min.js.map': 'map-NEW', 'pug.min.js.LEGAL.txt': 'legal' },
+            { 'v0.0.3/pug.min.js.map': 'map-OLD' }, // 2nd artifact already published with different bytes
+          ),
+        )
+      })(),
+    ).rejects.toThrow(/immutable/i)
     expect(plans).toBeUndefined() // nothing handed to Phase 2 → no artifact can have been uploaded
   })
 
-  it('throws when a build artifact is missing locally (so a half-built dist never half-publishes)', () => {
-    expect(() =>
+  it('rejects when a build artifact is missing locally (so a half-built dist never half-publishes)', async () => {
+    await expect(
       planAll(
         artifacts,
         '0.0.3',
         deps({ 'pug.min.js': 'js' }, {}), // .map and .LEGAL.txt were not built
       ),
-    ).toThrow(/missing build artifact/i)
+    ).rejects.toThrow(/missing build artifact/i)
   })
 })
 
-describe('isObjectMissing', () => {
-  // These strings mirror wrangler's real `r2 object get` failure output — they are the contract with an
-  // external tool. If a wrangler upgrade changes the absent-object wording, re-capture the vector here,
-  // or every fresh publish (all objects absent) would wrongly abort in Phase 1. The bare "404: Not
-  // Found" is load-bearing, not a loose catch-all: it is what wrangler prints for a genuinely-missing
-  // object, so isObjectMissing must match it (see the rationale on the function).
-  it('treats R2 "key does not exist" / 404 as an absent object', () => {
-    expect(isObjectMissing('The specified key does not exist. [code: 10007]')).toBe(true)
-    expect(isObjectMissing('✘ [ERROR] ... - 404: Not Found')).toBe(true)
-    expect(isObjectMissing('NoSuchKey')).toBe(true)
+describe('isMissingKey', () => {
+  it('treats only a 404 carrying NoSuchKey as an absent object', () => {
+    const noSuchKey =
+      '<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>'
+    expect(isMissingKey(404, noSuchKey)).toBe(true)
   })
 
-  it('fails closed: auth/other errors and empty output are NOT treated as absent', () => {
-    expect(isObjectMissing('Authentication error [code: 10000]')).toBe(false)
-    expect(isObjectMissing('You must be logged in to use wrangler')).toBe(false)
-    expect(isObjectMissing('')).toBe(false)
-    // A wrong/absent BUCKET is a config error, not an absent key — it must stay fatal, so a
-    // misconfigured publish never looks like "nothing published yet → safe to upload".
-    expect(isObjectMissing('The specified bucket does not exist. [code: 10006]')).toBe(false)
+  it('fails closed: a wrong bucket, an auth error or a bare 404 is not an absent object', () => {
+    expect(isMissingKey(404, '<Error><Code>NoSuchBucket</Code></Error>')).toBe(false)
+    expect(isMissingKey(403, '<Error><Code>AccessDenied</Code></Error>')).toBe(false)
+    expect(isMissingKey(404, '')).toBe(false)
   })
 })
 
@@ -156,28 +147,66 @@ describe('isPublishableVersion', () => {
   })
 })
 
-describe('wrangler argv', () => {
-  // The load-bearing regression: without --remote, wrangler's r2 commands hit local miniflare storage
-  // and the publish is a silent no-op. Both get and put MUST target the real bucket.
-  it('always passes --remote', () => {
-    expect(getObjectArgs('pugs-dev-cdn', 'v0.0.3/pug.min.js')).toContain('--remote')
-    expect(putObjectArgs('pugs-dev-cdn', 'v0.0.3/pug.min.js', 'dist/cdn/pug.min.js', 'text/javascript')).toContain(
-      '--remote',
+describe('objectUrl', () => {
+  it('addresses the bucket path-style on the account R2 endpoint', () => {
+    expect(objectUrl('acct', 'pugs-dev-cdn', 'v0.0.3/pug.min.js')).toBe(
+      'https://acct.r2.cloudflarestorage.com/pugs-dev-cdn/v0.0.3/pug.min.js',
     )
   })
 
-  it('getObjectArgs reads the object to stdout', () => {
-    const args = getObjectArgs('pugs-dev-cdn', 'v0.0.3/pug.min.js')
-    expect(args.slice(0, 4)).toEqual(['r2', 'object', 'get', 'pugs-dev-cdn/v0.0.3/pug.min.js'])
-    expect(args).toContain('--pipe')
+  it('encodes each segment as SigV4 canonicalizes it, keeping the separators', () => {
+    expect(objectUrl('acct', 'b', "a b/c$d!'()*")).toBe(
+      'https://acct.r2.cloudflarestorage.com/b/a%20b/c%24d%21%27%28%29%2A',
+    )
+  })
+})
+
+describe('signRequest', () => {
+  // The worked examples in AWS's "Signature Calculations for the Authorization Header" for S3.
+  const example = {
+    accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+    secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    region: 'us-east-1',
+    now: new Date('2013-05-24T00:00:00Z'),
+  }
+
+  it('signs the GET Object example', () => {
+    const headers = signRequest({
+      ...example,
+      method: 'GET',
+      url: 'https://examplebucket.s3.amazonaws.com/test.txt',
+      headers: { Range: 'bytes=0-9' },
+    })
+    expect(headers.authorization).toBe(
+      'AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, ' +
+        'SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, ' +
+        'Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41',
+    )
+    expect(headers['x-amz-date']).toBe('20130524T000000Z')
+    expect(headers['x-amz-content-sha256']).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
   })
 
-  it('putObjectArgs sets the file, content type, and immutable cache header', () => {
-    const args = putObjectArgs('pugs-dev-cdn', 'v0.0.3/pug.min.js', 'dist/cdn/pug.min.js', 'text/javascript')
-    expect(args.slice(0, 4)).toEqual(['r2', 'object', 'put', 'pugs-dev-cdn/v0.0.3/pug.min.js'])
-    expect(flagValue(args, '--file')).toBe('dist/cdn/pug.min.js')
-    expect(flagValue(args, '--content-type')).toBe('text/javascript')
-    expect(flagValue(args, '--cache-control')).toBe(CACHE_CONTROL)
+  it('signs the PUT Object example, payload hash and encoded key included', () => {
+    const headers = signRequest({
+      ...example,
+      method: 'PUT',
+      url: 'https://examplebucket.s3.amazonaws.com/test%24file.text',
+      headers: { Date: 'Fri, 24 May 2013 00:00:00 GMT', 'x-amz-storage-class': 'REDUCED_REDUNDANCY' },
+      body: Buffer.from('Welcome to Amazon S3.'),
+    })
+    expect(headers['x-amz-content-sha256']).toBe('44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072')
+    expect(headers.authorization).toMatch(/Signature=98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd$/)
+  })
+
+  it('leaves host to fetch and defaults to the R2 region', () => {
+    const headers = signRequest({
+      accessKeyId: 'k',
+      secretAccessKey: 's',
+      method: 'GET',
+      url: objectUrl('acct', 'pugs-dev-cdn', 'v0.0.3/pug.min.js'),
+    })
+    expect(Object.keys(headers).map(name => name.toLowerCase())).not.toContain('host')
+    expect(headers.authorization).toMatch(/\/auto\/s3\/aws4_request, SignedHeaders=host;/)
   })
 })
 
