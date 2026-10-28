@@ -2,7 +2,7 @@
 # published package carries generated code (src/gen), so consumers just `npm install`
 # with no Buf Schema Registry entry in their .npmrc.
 
-.PHONY: sync-protos protos typed-events check-codegen check-proto-pin proto-latest build lint knip test check ci
+.PHONY: sync-protos protos typed-events check-codegen check-proto-pin proto-latest build lint knip typecheck test check ci
 
 # BSR module + pinned commit that proto/ is vendored from. The pin makes `make sync-protos`
 # reproducible and makes taking newer upstream protos a deliberate, reviewable change —
@@ -97,9 +97,11 @@ lint:
 	bun run lint
 knip:
 	bun run knip
+typecheck:
+	bun run typecheck
 test:
 	bun run test
 
-check: lint knip test build
+check: lint knip typecheck test build
 # Strict CI target: regenerate protobufs from scratch, then run every check.
 ci: protos check-codegen check
