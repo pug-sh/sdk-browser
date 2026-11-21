@@ -1,6 +1,6 @@
 # Pug Web SDK
 
-Open-source product analytics SDK for the browser, from [Pug](https://pug.sh). It auto-captures page views, clicks, scrolls, form interactions, and frustration signals, and it starts cookieless: until the visitor makes a consent choice, it writes nothing to the device. It works in any website or web app, with setup guides for [Next.js](https://pug.sh/integrations/nextjs), [React](https://pug.sh/integrations/react), and [Vue](https://pug.sh/integrations/vue).
+Open-source product analytics SDK for the browser, from [Pug](https://pug.sh). It auto-captures page views, clicks, scrolls, form interactions, and frustration signals, and it starts cookieless: until the visitor makes a consent choice, it stores no identifier on the device. It works in any website or web app, with setup guides for [Next.js](https://pug.sh/integrations/nextjs), [React](https://pug.sh/integrations/react), and [Vue](https://pug.sh/integrations/vue).
 
 ## Installation
 
