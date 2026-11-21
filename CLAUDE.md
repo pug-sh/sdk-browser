@@ -42,8 +42,8 @@ bun run test:watch     # Run tests in watch mode
 **Dead-code gate:** `bun run knip` runs in CI and is expected to stay at zero findings. Biome's
 linter is disabled, so knip is the only thing catching an export nothing imports or a file nothing
 reaches. Its config (`knip.jsonc`) carries the entry points tooling cannot infer — `src/cdn.ts` and the
-two Makefile-run `scripts/*.mjs` — and two `ignoreDependencies` that are real but invisible to it
-(knip does not resolve binaries invoked through `bun`, and does not read `buf.gen.yaml`). The
+two Makefile-run `scripts/*.mjs` — and an `ignoreDependencies` entry for `@biomejs/biome`, which is
+real but invisible to it (knip does not resolve binaries invoked through `bun`). The
 scripts are listed one by one on purpose: a glob would mark the library modules under `scripts/`
 as entries and exempt their exports. `--treat-config-hints-as-errors` fails CI on a stale ignore.
 Prefer deleting dead code over widening the ignores.
