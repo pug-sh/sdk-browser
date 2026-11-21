@@ -1,7 +1,7 @@
 {
   "name": "@pug-sh/browser",
   "version": "0.1.6",
-  "description": "Pug browser SDK for event tracking and product analytics",
+  "description": "Open-source product analytics SDK for the browser: autocaptures page views, clicks, scrolls and forms, cookieless by default.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -20,7 +20,7 @@
     "WELL_KNOWN_EVENTS.md",
     "LICENSE"
   ],
-  "homepage": "https://pug.sh",
+  "homepage": "https://pug.sh/integrations",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/pug-sh/sdk-browser.git"
@@ -53,12 +53,26 @@
     "uuidv7": "^1.1.0"
   },
   "keywords": [
+    "product-analytics",
     "analytics",
+    "web-analytics",
+    "autocapture",
+    "event-tracking",
     "tracking",
     "events",
-    "sdk",
+    "cookieless",
+    "privacy",
+    "consent",
+    "sessions",
     "browser",
-    "web"
+    "web",
+    "sdk",
+    "nextjs",
+    "react",
+    "vue",
+    "open-source",
+    "self-hosted",
+    "pug"
   ],
   "author": "pug.sh",
   "license": "MIT",
