@@ -10,6 +10,7 @@
  * Keep each `@ts-expect-error` call on a single line — the directive only applies to the line that
  * follows it, so a formatter-wrapped call would silently stop being checked.
  */
+import { durationFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
 import {
   type AutoCaptureSelection,
   type TrackEventProps,
@@ -35,6 +36,18 @@ track('purchase', { amount: 49, currency: 'USD', ourOwnField: 'allowed' })
 // `jsValueToPropertyValue` accepts at runtime (bigint -> intValue, Date -> timestampValue).
 track('file_uploaded', { fileId: 'f1', sizeBytes: 1024n })
 track('my_custom_event', { when: new Date(), big: 7n })
+
+// ── Duration properties must be writable ─────────────────────────────────────────────────────────
+// `seconds` is a bigint, which no `JsonValue` holds, so these compile only through `PropValue`'s
+// Duration arm.
+track('video_pause', { videoId: 'v1', position: { seconds: 90n, nanos: 500_000_000 } })
+track('video_seeked', { videoId: 'v1', fromPosition: durationFromMs(1_000), toPosition: { nanos: 5 } })
+track('my_custom_event', { wait: { seconds: 5n } })
+
+// @ts-expect-error — seconds is a bigint, as protobuf-es types it
+track('video_pause', { videoId: 'v1', position: { seconds: 90 } })
+// @ts-expect-error — a Timestamp has a Duration's two fields, but a Date is how to send one
+track('my_custom_event', { at: timestampNow() })
 
 // ── Custom events: any other string, with loose props ────────────────────────────────────────────
 track('upgrade_clicked', { source: 'settings' })

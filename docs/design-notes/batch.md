@@ -67,6 +67,11 @@ Passing `kind` and `min` per call let them be mismatched. Both of these compiled
 and it closes the asymmetry the mapped type leaves: `BatchOptions` makes a fourth knob *settable*, but
 nothing made it *validated*.
 
+`maxSize` also has a `max`, 1000, the most events `BatchCreate` accepts: the server fails a larger batch
+whole ([rules it fails a batch on](track.md#batch-rules)). A larger finite value is clamped to 1000,
+the nearest valid batch, rather than replaced by the default of 10. `maxWaitMs` is capped at
+2147483647 the same way: `setTimeout` runs a longer delay at once, which is one request per event.
+
 ### Why the results are destructured off a `satisfies` literal
 
 `BATCH_RULES` guarantees a rule **exists**, not that it is **applied**. With a fourth member added and
@@ -220,9 +225,18 @@ script's keepalive requests or a dropped connection, reaches the caller through 
 
 - the page-hide flush puts the events back on their queues, syncs, and schedules a normal flush, since
   the page is evidently still alive;
-- unless a `purgeQueue()` ran since the beacon (`purgeCount`): after a consent withdrawal or a logout
-  the events must not return to the device, so they are reported lost instead;
+- unless `destroy()` or a `purgeQueue()` ran since the beacon (`purgeCount`): after a consent
+  withdrawal or a logout the events must not return to the device, so they are reported lost instead;
 - `destroy()` and `reset()` only report, as their events are leaving the device by design.
+
+An `immediate` send that fails transiently holds the same guard: its event never entered a queue, so
+a purge cannot reach it, and it is reported lost rather than queued again.
+
+A non-2xx answer takes the same path, and each message names the status (`HTTP 401`), or
+`request failed` for a failure. The fulfilled fetch was read as delivered, so a batch the server refused on page hide was
+lost without a log. A page that received the answer is alive, so the batch goes back on the queue, and
+the regular flush retries a transient error and logs and drops a permanent one, at the cost of one more
+request per `maxSize` chunk for the permanent case.
 
 Holding the batch until the fetch settled was rejected. On an ordinary page close the page is gone
 before it settles, so every consented page-hide batch would stay on disk and be sent again on the next

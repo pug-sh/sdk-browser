@@ -13,12 +13,20 @@ export type WellKnownEventName = keyof WellKnownSchemaMap
 export type WellKnownEventPropsMap = { [K in WellKnownEventName]: MessageInitShape<WellKnownSchemaMap[K]> }
 
 /**
- * A property value the SDK can send: `JsonValue` plus `bigint` (→ `intValue`) and `Date` (→
- * `timestampValue`), mirroring what `jsValueToPropertyValue` accepts at runtime. The extras are
- * load-bearing — protobuf-es maps proto `int64` to `bigint`, so under a bare `JsonValue` bag the
- * int64 fields on five well-known events are unwritable in every spelling.
+ * A property value the SDK can send: `JsonValue` plus `bigint` (→ `intValue`), `Date` (→
+ * `timestampValue`) and a protobuf `Duration` (→ `"90.5s"`), close to what `jsValueToPropertyValue`
+ * accepts at runtime. The extras are load-bearing — protobuf-es maps proto `int64` to `bigint`, so
+ * under a bare `JsonValue` bag the int64 fields, and the `seconds` of every `Duration` field, are
+ * unwritable in every spelling.
  */
-export type PropValue = JsonValue | bigint | Date
+export type PropValue = JsonValue | bigint | Date | DurationValue
+
+// `$typeName` keeps out a protobuf `Timestamp`, which has the same two fields; send a `Date` instead.
+type DurationValue = {
+  readonly $typeName?: 'google.protobuf.Duration'
+  readonly seconds?: bigint
+  readonly nanos?: number
+}
 
 /**
  * Properties accepted for an event: a well-known event's typed shape plus arbitrary extras, or a

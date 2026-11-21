@@ -44,7 +44,8 @@ affordance only; `toEvent` consults no schema, so well-known and custom events p
 | finite `number` | `intValue` if `Number.isSafeInteger`, else `doubleValue` |
 | `bigint` | `intValue` |
 | `Date` | `timestampValue`; `Date(NaN)` dropped |
-| array / object | `JSON.stringify` then string policy |
+| `Duration`: a plain object of a numeric `seconds` and/or `nanos`, no other key but `$typeName` | `stringValue`, `"90.5s"`, to the nanosecond |
+| array / object | `JSON.stringify`, a nested `bigint` as a string, then string policy |
 | `null` / `undefined` | dropped **silently** — common and unactionable |
 
 Byte-truncation is strictly more conservative than the server's `string.max_len = 1024`, which is
@@ -52,6 +53,25 @@ enforced as a code-point count.
 
 Every other drop is logged at the call site with the property key for grep-ability, since `track()`
 never throws and undiagnosed drops would mask real user bugs.
+
+### `Duration` goes out as `"90.5s"`
+
+That is the form options.proto specifies for every SDK. `JSON.stringify` threw on the `bigint`
+`seconds` that `create(DurationSchema)` and `durationFromMs()` produce, so every Duration protobuf-es
+built was dropped. `PropValue` carries the shape as well: its `JsonValue` arm rejected the nested
+`bigint`, so no Duration with `seconds` compiled. The shape's optional `$typeName` keeps out a
+`Timestamp`, which has the same two fields.
+
+The object test is by shape, since there is no schema at runtime; one with any other key, or a
+`seconds` or `nanos` that is neither a `bigint` nor a finite number, is JSON as before. A number may
+carry a fraction, rounded to the nanosecond. Plain JavaScript passes `{ seconds: video.currentTime }`,
+and `durationFromMs()` leaves float error in `nanos` for most fractional milliseconds:
+`durationFromMs(12.3456 * 1000)` yields `345599999.99999857`.
+
+The Duration shape also lets a `bigint` into an object the type cannot close: `{ seconds: 5n, label: 'x' }`
+compiles, because `JsonObject`'s index signature makes every key known to the union. `JSON.stringify`
+threw on it and the property was dropped, so the fallback writes a `bigint` as a string, as protobuf's
+JSON mapping does for `int64`: `{"seconds":"5","label":"x"}`.
 
 ### The int-vs-double consequence
 
@@ -62,6 +82,22 @@ Safe because the backend stores custom properties in a ClickHouse
 `Map(String, Variant(String, Int64, Float64, Bool, DateTime64(3)))` and every numeric read coalesces
 the `Int64` and `Float64` slots to `Float64`. Safe integers are exact in both, so aggregations and
 filters are unaffected.
+
+---
+
+## <a id="batch-rules"></a>Rules the server fails a whole batch on
+
+`BatchCreate` validates the request as one message, so a single bad event fails it with
+`invalid_argument`, which the batch layer treats as permanent, and every event sent alongside is lost.
+`toEvent` checks the three per-event rules a caller can break, as sdk-android does:
+
+- a `kind` outside `^[a-zA-Z0-9_.-]+$` (`Order Completed`, `signup:started`) drops the event;
+- a custom key starting with `$`, or an auto-property key that doesn't, drops that key and keeps the
+  event.
+
+Each logs a warning. The key checks run after `beforeSend`, which can add keys to either bag; the SDK's
+own auto-properties all start with `$`. The request's own rule, at most 1000 events, is why
+`batch.maxSize` is capped at 1000.
 
 ---
 
@@ -173,8 +209,8 @@ either half.
 
 ### Why props resolve to `PropValue`, not `JsonValue`
 
-`Record<string, PropValue>` (`JsonValue | bigint | Date`) mirrors what `jsValueToPropertyValue` accepts
-at runtime. protobuf-es maps proto `int64` to `bigint`, so under a bare `JsonValue` bag the int64
+`Record<string, PropValue>` (`JsonValue | bigint | Date` and a `Duration`'s shape) mirrors what
+`jsValueToPropertyValue` accepts at runtime. protobuf-es maps proto `int64` to `bigint`, so under a bare `JsonValue` bag the int64
 fields on five well-known events (`file_uploaded`, `file_downloaded`, `export_completed`,
 `chat_attachment_uploaded`, `chat_attachment_downloaded`) were **unwritable in every spelling** —
 `number` failed the message shape and `bigint` failed the index signature.

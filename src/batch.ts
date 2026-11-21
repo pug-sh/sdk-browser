@@ -1,4 +1,4 @@
-import type { Event } from './gen/sdk/events/v1/events_pb.js'
+import type { BatchCreateResponse, Event } from './gen/sdk/events/v1/events_pb.js'
 import { log } from './logger.js'
 import { createDefaultQueueStorage, createMemoryQueueStorage } from './queue-storage.js'
 import { GrpcCode, RpcError } from './rpc.js'
@@ -42,12 +42,14 @@ const DEFAULT_BATCH_CONFIG: BatchConfig = {
  * floor exists to reject — both compiled clean.
  */
 const BATCH_RULES = {
-  // Whole because lock() reserves a count of events; floored at 1 so a flush always draws one.
-  maxSize: { kind: 'whole', min: 1 },
-  // Finite, not whole: a setTimeout duration is fine fractional. 0 means "flush on the next tick".
-  maxWaitMs: { kind: 'finite', min: 0 },
-  maxQueueSize: { kind: 'whole', min: 1 },
-} satisfies Record<keyof BatchConfig, { readonly kind: 'whole' | 'finite'; readonly min: number }>
+  // Whole because lock() reserves a count of events; floored at 1 so a flush always draws one, and
+  // capped at the 1000 events BatchCreate accepts, since the server fails a larger batch whole.
+  maxSize: { kind: 'whole', min: 1, max: 1000 },
+  // Finite, not whole: a setTimeout duration is fine fractional. 0 means "flush on the next tick", and
+  // so does anything over setTimeout's 32-bit limit, which is why it is capped there.
+  maxWaitMs: { kind: 'finite', min: 0, max: 2_147_483_647 },
+  maxQueueSize: { kind: 'whole', min: 1, max: Number.POSITIVE_INFINITY },
+} satisfies Record<keyof BatchConfig, { readonly kind: 'whole' | 'finite'; readonly min: number; readonly max: number }>
 
 /** Derived from the rules, so a knob cannot be validated but unrecognized, or the reverse. */
 const KNOWN_BATCH_KEYS: ReadonlySet<string> = new Set(Object.keys(BATCH_RULES))
@@ -85,15 +87,14 @@ const PERMANENT_GRPC_CODES = new Set<GrpcCode>([
   GrpcCode.Unauthenticated,
 ])
 
-// The server accepts events per-event and reports the count (BatchCreateResponse.accepted). A
-// shortfall means it silently rejected some — surface it, since committing the batch erases those
-// events without a trace. The SDK leaves validation to the server (no client-side field checks),
-// so this warn is the only signal an operator gets that otherwise-valid track() calls are dropping.
-const warnIfPartiallyAccepted = (accepted: number, sent: number) => {
+// A 200 can still drop events, and committing the batch erases them, so this warn is the only trace.
+const warnIfPartiallyAccepted = ({ accepted, droppedByReason }: BatchCreateResponse, sent: number) => {
   if (accepted < sent) {
+    const reasons = Object.entries(droppedByReason)
+      .map(([reason, count]) => `${reason}: ${count}`)
+      .join(', ')
     log.warn(
-      `Server accepted ${accepted}/${sent} events; ${sent - accepted} were rejected and dropped. ` +
-        "Check event validity (kind must match ^[a-zA-Z0-9_.-]+$; custom-property keys must not start with '$').",
+      `Server accepted ${accepted}/${sent} events; ${sent - accepted} were dropped${reasons ? ` (${reasons})` : ''}.`,
     )
   }
 }
@@ -149,7 +150,7 @@ export const createBatchedTransport = (
   // (from `1e999`) passed, disabling the queue bound and size-triggered flushing outright; `null`
   // passed too (`null >= 0`), turning maxWaitMs into `setTimeout(fn, 0)` — one request per event.
   const resolve = (name: keyof BatchConfig): number => {
-    const { kind, min } = BATCH_RULES[name]
+    const { kind, min, max } = BATCH_RULES[name]
     const fallback = DEFAULT_BATCH_CONFIG[name]
     const value: unknown = partialConfig?.[name]
     if (value === undefined) {
@@ -158,6 +159,10 @@ export const createBatchedTransport = (
     if (typeof value !== 'number' || !Number.isFinite(value) || value < min) {
       log.warn(`batch.${name} ${safeStringify(value)} must be a finite number >= ${min}; using ${fallback}.`)
       return fallback
+    }
+    if (value > max) {
+      log.warn(`batch.${name} ${safeStringify(value)} must be at most ${max}; using ${max}.`)
+      return max
     }
     // Rounded down, not replaced by the default: defaulting would answer a too-tight maxQueueSize
     // (1.5 → 1) by widening it 1000x. See lock() for what a fractional count would do.
@@ -211,6 +216,7 @@ export const createBatchedTransport = (
   // Bumped by every purgeQueue(), so a late beacon failure can tell whether the queues were emptied
   // on purpose (consent withdrawn, logout) since its events left them.
   let purgeCount = 0
+  const clearedSince = (purgeCountAtSend: number) => state === 'destroyed' || purgeCount !== purgeCountAtSend
 
   /**
    * Reports a failed `sendBeacon` at the level each queue's outcome warrants — `beacon()` returns
@@ -250,29 +256,35 @@ export const createBatchedTransport = (
   }
 
   /** A beacon the browser accepted and then failed, after its events were committed. */
-  const reportRejectedBeacon = (count: number, phase: string): void => {
+  const reportRejectedBeacon = (count: number, phase: string, reason: string): void => {
     if (count > 0) {
-      log.error(`A beacon failed ${phase} after the browser accepted it; ${count} events were not delivered.`)
+      log.error(
+        `A beacon failed ${phase} after the browser accepted it (${reason}); ${count} events were not delivered.`,
+      )
     }
   }
 
   /**
    * The page-hide beacon was accepted, its events committed, and then it failed — another script spent
-   * the shared keepalive budget, or the network dropped it. The page is still alive, so the events go
-   * back on the queue to retry, unless the queues were purged since: after a consent withdrawal or a
-   * logout they must not return to the device.
+   * the shared keepalive budget, the network dropped it, or the server refused it. The page is still
+   * alive, so the events go back on the queue to retry, unless the transport was destroyed or the
+   * queues purged since: after a consent withdrawal or a logout they must not return to the device.
+   * A refusal then takes the regular flush's path, which retries a transient error and logs and drops
+   * a permanent one.
    * @see docs/design-notes/batch.md#a-beacon-that-fails-after-it-was-accepted
    */
-  const requeueRejectedBeacon = (events: Event[], purgeCountAtSend: number): void => {
-    if (state === 'destroyed' || purgeCount !== purgeCountAtSend) {
-      reportRejectedBeacon(events.length, 'on page hide')
+  const requeueRejectedBeacon = (events: Event[], purgeCountAtSend: number, reason: string): void => {
+    if (clearedSince(purgeCountAtSend)) {
+      reportRejectedBeacon(events.length, 'on page hide', reason)
       return
     }
     for (const event of events) {
       storageFor(event).push(event)
     }
     storage.sync()
-    log.warn(`A page-hide beacon failed after the browser accepted it; ${events.length} events were queued again.`)
+    log.warn(
+      `A page-hide beacon failed after the browser accepted it (${reason}); ${events.length} events were queued again.`,
+    )
     scheduleFlush()
   }
 
@@ -347,7 +359,7 @@ export const createBatchedTransport = (
     inner
       .sendBatch(batch)
       .then(res => {
-        warnIfPartiallyAccepted(res.accepted, batch.length)
+        warnIfPartiallyAccepted(res, batch.length)
         settle('commit')
       })
       .catch(err => {
@@ -414,7 +426,7 @@ export const createBatchedTransport = (
     // destroy()'s comment explains why acting on a lock you do not own is a real hazard — leaving
     // one call site unguarded invites a reader to conclude it is safe everywhere.
     const purgeCountAtSend = purgeCount
-    if (inner.beacon?.(batch, () => requeueRejectedBeacon(batch, purgeCountAtSend))) {
+    if (inner.beacon?.(batch, reason => requeueRejectedBeacon(batch, purgeCountAtSend, reason))) {
       if (a.length > 0) {
         storage.commit()
       }
@@ -450,12 +462,21 @@ export const createBatchedTransport = (
         return
       }
       if (options?.immediate) {
+        const purgeCountAtSend = purgeCount
         try {
           const res = await inner.send(event)
-          warnIfPartiallyAccepted(res.accepted, 1)
+          warnIfPartiallyAccepted(res, 1)
         } catch (err) {
           if (isPermanentError(err)) {
             log.error('Permanent error sending event, dropping:', err)
+            return
+          }
+          // After a consent withdrawal, a logout or destroy(), the event must not return to the device.
+          if (clearedSince(purgeCountAtSend)) {
+            log.warn(
+              'Transient error sending event; the queue was cleared while it was in flight, so it was dropped:',
+              err,
+            )
             return
           }
           storageFor(event).push(event)
@@ -504,7 +525,7 @@ export const createBatchedTransport = (
         // sendBeacon destroyed everything collected under valid consent, returned true, and said
         // nothing. Both other sites (beaconFlush, destroy) already report through reportBeaconLoss.
         // A late failure is reported, never requeued: these events are leaving the device by design.
-        const onRejected = () => reportRejectedBeacon(pending.length, 'during reset')
+        const onRejected = (reason: string) => reportRejectedBeacon(pending.length, 'during reset', reason)
         if (pending.length > 0 && !inner.beacon?.(pending, onRejected)) {
           beaconLoss = { consented: consentedTail.length, cookieless: cookielessTail.length }
         }
@@ -559,7 +580,8 @@ export const createBatchedTransport = (
       if (payload.length > 0) {
         // On a late failure, the peeked consented tail is still on disk and retries on the next
         // init(); everything else here is gone, so that is what is reported.
-        const onRejected = () => reportRejectedBeacon(a.length + b.length + cookielessTail.length, 'during destroy()')
+        const onRejected = (reason: string) =>
+          reportRejectedBeacon(a.length + b.length + cookielessTail.length, 'during destroy()', reason)
         if (inner.beacon?.(payload, onRejected)) {
           if (a.length > 0) {
             storage.commit()

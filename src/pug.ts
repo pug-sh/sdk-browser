@@ -873,7 +873,7 @@ export const track: TrackFn = (kind: string, props?: Record<string, unknown>, op
     const immediate = opts?.immediate ?? false
     const event = toEvent(state.config.projectId, kind, identity, props, opts)
     if (!event) {
-      // toEvent logged the reason (error, or debug for a beforeSend drop)
+      // toEvent reports its own drops
       return
     }
     if (state.dryRun) {
@@ -882,6 +882,6 @@ export const track: TrackFn = (kind: string, props?: Record<string, unknown>, op
     }
     state.transport.send(event, { immediate }).catch((err: Error) => log.error(`Failed to send event "${kind}":`, err))
   } catch (err) {
-    log.error(`Unexpected error in track("${kind}"):`, err)
+    log.error(`Unexpected error in track(${safeStringify(kind)}):`, err)
   }
 }

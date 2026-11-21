@@ -216,7 +216,8 @@ is not granted.
   the queues alternate.
 - Config members are treated as **untrusted** and validated through `BATCH_RULES`; the three results
   are destructured off a `satisfies Record<keyof BatchConfig, Validated>` literal so a new knob cannot
-  ship unvalidated.
+  ship unvalidated. `maxSize` is capped at 1000, the most events `BatchCreate` accepts, and `maxWaitMs`
+  at 2147483647, past which `setTimeout` fires at once.
 - 3-state lifecycle: `idle` → `flushing` → `idle`, or any → `destroyed`.
 - `purgeQueue`'s `destroyed` count is **approximate in both directions, never an audit.**
 
@@ -236,6 +237,10 @@ Queue storages share a two-phase lock/commit/rollback protocol. `lock(n)` reserv
 - `$pageTitle` is sent on `page_view` only.
 - `sessionId`/`distinctId` are top-level `Event` fields, not properties, and are not exposed to the
   hook.
+- The server fails a whole batch on a `kind` outside `^[a-zA-Z0-9_.-]+$`, a custom key starting with
+  `$` or an auto-property key that doesn't, so `toEvent` drops the event or the key with a warning.
+  The key checks run **after** the hook, which can add keys to either bag.
+- A protobuf `Duration`, a plain object of a numeric `seconds` and/or `nanos`, is sent as `"90.5s"`.
 
 ### `src/auto-capture.ts` → [design note](docs/design-notes/auto-capture.md)
 
@@ -309,8 +314,9 @@ API key rides a `?api_key=` query param. Why not `sendBeacon` everywhere →
 [design note](docs/design-notes/batch.md#why-the-farewell-send-is-a-keepalive-fetch).
 
 `beacon` returns false when a batch would push the transport's own in-flight keepalive bytes over
-64 KiB, so the caller rolls back. A failure after acceptance reaches the caller through `onRejected`;
-the page-hide flush requeues on it unless a purge ran since →
+64 KiB, so the caller rolls back. A failure after acceptance, or a non-2xx answer, reaches the caller
+through `onRejected` with a reason (`HTTP 401`, `request failed`); the page-hide flush requeues on it
+unless `destroy()` or a purge ran since →
 [design note](docs/design-notes/batch.md#a-beacon-that-fails-after-it-was-accepted).
 
 ### `src/parsers.ts`

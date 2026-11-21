@@ -10,11 +10,16 @@ import { makeStorageKey } from './utils.js'
 // Only the wire is mocked — everything between track() and the transport
 // (consent, session, profile, persistence, batching) is real, so this suite
 // catches ANY code path that writes to the device in cookieless mode.
-const { sendBatch, send, beacon } = vi.hoisted(() => ({
-  sendBatch: vi.fn(() => Promise.resolve({ accepted: 1 })),
-  send: vi.fn(() => Promise.resolve({ accepted: 1 })),
-  beacon: vi.fn(() => true),
-}))
+const { sendBatch, send, beacon, acceptAll } = vi.hoisted(() => {
+  const acceptAll = (events: readonly unknown[]) =>
+    Promise.resolve({ accepted: events.length, dropped: 0, droppedByReason: {} })
+  return {
+    sendBatch: vi.fn(acceptAll),
+    send: vi.fn((event: unknown) => acceptAll([event])),
+    beacon: vi.fn(() => true),
+    acceptAll,
+  }
+})
 vi.mock('./transport.js', () => ({ createTransport: () => ({ send, sendBatch, beacon }) }))
 
 const { init, track, destroy, setTrackingConsent, optOutTracking, optInTracking, reset, getTrackingConsent } =
@@ -99,7 +104,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   // clearAllMocks() resets recorded calls but NOT implementations, so a mockRejectedValue set by one
   // test would silently follow every later one. Put the wire back to its default explicitly.
-  sendBatch.mockResolvedValue({ accepted: 1 })
+  sendBatch.mockImplementation(acceptAll)
   beacon.mockReturnValue(true)
   localStorage.clear()
   for (const c of document.cookie.split(';')) {
@@ -491,7 +496,7 @@ describe('cookieless storage silence', () => {
     beacon.mockClear()
 
     // Sends succeed now, so the queue drains in batches — each commit leaving a remainder.
-    sendBatch.mockResolvedValue({ accepted: 1 })
+    sendBatch.mockImplementation(acceptAll)
     const { writes } = recordDeviceWrites()
     init(p, { apiKey: 'k', trackingConsent: 'cookieless', autoCapture: false, batch: { maxSize: 2, maxWaitMs: 50 } })
     track('page_view')

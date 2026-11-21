@@ -9,7 +9,7 @@ const KEEPALIVE_BODY_LIMIT = 64 * 1024
 const supportsKeepalive = () => typeof Request !== 'undefined' && 'keepalive' in Request.prototype
 
 export const createTransport = (endpoint: string, apiKey: string) => {
-  const batchCreateUrl = `${endpoint.replace(/\/$/, '')}/sdk.events.v1.EventsService/BatchCreate`
+  const batchCreateUrl = `${endpoint.replace(/\/+$/, '')}/sdk.events.v1.EventsService/BatchCreate`
   // Our own pending keepalive bodies. The browser's budget is shared and rejects asynchronously, after
   // the caller has already committed its queue, so a batch our own requests would push over the limit
   // is refused here instead, while the caller can still roll it back. Other scripts' requests share
@@ -28,10 +28,10 @@ export const createTransport = (endpoint: string, apiKey: string) => {
       unaryCall(endpoint, apiKey, EventsService.method.batchCreate, create(BatchCreateRequestSchema, { events })),
     /**
      * Hands the batch to the browser so it survives the page closing. Returns whether the browser
-     * accepted it, not whether it was delivered. `onRejected` runs if an accepted keepalive request
-     * then fails without reaching the server, while the page is still alive to run it.
+     * accepted it, not whether it was delivered. `onRejected` gets the reason if an accepted keepalive
+     * request then fails or the server refuses it, while the page is still alive to run it.
      */
-    beacon: (events: Event[], onRejected?: () => void) => {
+    beacon: (events: Event[], onRejected?: (reason: string) => void) => {
       try {
         const bytes = toBinary(BatchCreateRequestSchema, create(BatchCreateRequestSchema, { events }))
         if (supportsKeepalive()) {
@@ -49,10 +49,14 @@ export const createTransport = (endpoint: string, apiKey: string) => {
             body: bytes,
           })
             .then(
-              () => undefined,
+              res => {
+                if (!res.ok) {
+                  onRejected?.(`HTTP ${res.status}`)
+                }
+              },
               (err: unknown) => {
                 log.debug('keepalive flush failed:', err)
-                onRejected?.()
+                onRejected?.('request failed')
               },
             )
             .finally(() => {

@@ -5,7 +5,7 @@ import { type PropertyValue, PropertyValueSchema } from './gen/common/v1/propert
 import { type Event, EventSchema } from './gen/sdk/events/v1/events_pb.js'
 import { log } from './logger.js'
 import { parseUserAgentData, parseUtmParams } from './parsers.js'
-import { scrubUrl } from './utils.js'
+import { safeStringify, scrubUrl } from './utils.js'
 import { SDK_VERSION } from './version.js'
 import type { PropValue, TrackOptions, WellKnownEventName } from './well-known-events.js'
 
@@ -146,6 +146,51 @@ const makeStringValue = (raw: string): PropertyValue => {
   return create(PropertyValueSchema, { value: { case: 'stringValue', value } })
 }
 
+const NANOS_PER_SECOND = 1_000_000_000n
+
+// Rounded to the nanosecond: plain JavaScript passes `{ seconds: video.currentTime }`, and
+// durationFromMs() leaves float error in nanos, such as 345600000.00000036 for 12345.6 ms.
+const toNanos = (v: unknown, nanosPerUnit: bigint): bigint | null => {
+  if (typeof v === 'bigint') {
+    return v * nanosPerUnit
+  }
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
+    return null
+  }
+  const whole = Math.trunc(v)
+  return BigInt(whole) * nanosPerUnit + BigInt(Math.round((v - whole) * Number(nanosPerUnit)))
+}
+
+// JSON.stringify throws on a bigint. A string keeps every digit, as protobuf's JSON mapping writes int64.
+const bigintAsString = (_key: string, value: unknown): unknown => (typeof value === 'bigint' ? String(value) : value)
+
+// options.proto's wire form for a Duration is "90.5s". Summing first copes with nanos out of range or
+// signed against seconds.
+const durationText = (v: object): string | null => {
+  if (!isPlainBag(v)) {
+    return null
+  }
+  const { seconds, nanos, $typeName, ...rest } = v as Record<string, unknown>
+  if (Object.keys(rest).length > 0 || ($typeName !== undefined && $typeName !== 'google.protobuf.Duration')) {
+    return null
+  }
+  if (seconds === undefined && nanos === undefined) {
+    return null
+  }
+  const whole = seconds === undefined ? 0n : toNanos(seconds, NANOS_PER_SECOND)
+  const fractional = nanos === undefined ? 0n : toNanos(nanos, 1n)
+  if (whole === null || fractional === null) {
+    return null
+  }
+  const total = whole + fractional
+  const sign = total < 0n ? '-' : ''
+  const abs = total < 0n ? -total : total
+  const fraction = String(abs % NANOS_PER_SECOND)
+    .padStart(9, '0')
+    .replace(/0+$/, '')
+  return `${sign}${abs / NANOS_PER_SECOND}${fraction ? `.${fraction}` : ''}s`
+}
+
 /**
  * Maps an untyped JS value to a PropertyValue oneof. Every property on every event flows through
  * here — there is no runtime schema, so well-known names get no special serialization. Returns null
@@ -158,8 +203,10 @@ const makeStringValue = (raw: string): PropertyValue => {
  *                      NaN/±Infinity dropped (non-finite doubles aren't representable)
  *   - bigint         → intValue
  *   - Date           → timestampValue (Date(NaN) dropped)
- *   - object/array   → JSON.stringify → stringValue (subject to truncation);
- *                      circular structures and toJSON returning undefined dropped
+ *   - Duration       → stringValue "90.5s", to the nanosecond: a plain object of a numeric `seconds`
+ *                      and/or `nanos`, no other key but `$typeName`, as `durationFromMs()` builds
+ *   - object/array   → JSON.stringify → stringValue (subject to truncation), a nested bigint as a
+ *                      string; circular structures and toJSON returning undefined dropped
  *   - null/undefined → dropped (no oneof case fits)
  */
 const jsValueToPropertyValue = (v: unknown): PropertyValue | null => {
@@ -192,34 +239,52 @@ const jsValueToPropertyValue = (v: unknown): PropertyValue | null => {
     return create(PropertyValueSchema, { value: { case: 'timestampValue', value: timestampFromMs(ms) } })
   }
   if (typeof v === 'object') {
-    let json: string
+    let text: string
     try {
-      json = JSON.stringify(v)
+      text = durationText(v) ?? JSON.stringify(v, bigintAsString)
     } catch {
       return null
     }
-    if (json === undefined) {
+    if (text === undefined) {
       return null
     }
-    return makeStringValue(json)
+    return makeStringValue(text)
   }
   return null
 }
 
+// After beforeSend, which can add keys to either bag: the server fails the whole batch on a custom
+// key starting with `$` or an auto-property key that doesn't.
 const mapPropsViaHeuristic = (
   source: Record<string, unknown>,
-  customProperties: Record<string, PropertyValue>,
   kind: string,
-): void => {
+  auto: boolean,
+): Record<string, PropertyValue> => {
+  const mapped: Record<string, PropertyValue> = {}
   for (const [k, v] of Object.entries(source)) {
+    if (v === null || v === undefined) {
+      continue
+    }
+    if (k.startsWith('$') !== auto) {
+      log.warn(
+        auto
+          ? `Auto-property "${k}" on event "${kind}" skipped: auto-property keys must start with '$'`
+          : `Property "${k}" on event "${kind}" skipped: keys starting with '$' are reserved for auto-properties`,
+      )
+      continue
+    }
     const pv = jsValueToPropertyValue(v)
     if (pv) {
-      customProperties[k] = pv
-    } else if (v !== null && v !== undefined) {
+      mapped[k] = pv
+    } else {
       log.warn(`Property "${k}" on event "${kind}" not representable (${typeof v}), skipping`)
     }
   }
+  return mapped
 }
+
+// The server's Event.kind pattern. A kind outside it fails the whole batch, not just its own event.
+const KIND_PATTERN = /^[a-zA-Z0-9_.-]+$/
 
 // Lives here, not in events/page_view.ts: `toEvent` gates $pageTitle on it, and core importing a
 // tracker module breaks every test that vi.mocks it.
@@ -245,6 +310,15 @@ export const toEvent = (
   props?: Record<string, unknown>,
   opts?: TrackOptions,
 ): Event | null => {
+  if (typeof kind !== 'string') {
+    log.warn(`Event ${safeStringify(kind)} dropped: a kind must be a string, got ${typeof kind}`)
+    return null
+  }
+  if (!KIND_PATTERN.test(kind)) {
+    log.warn(`Event ${safeStringify(kind)} dropped: a kind must be one or more ASCII letters, digits, '_', '.' or '-'`)
+    return null
+  }
+
   // Built plain, hooked, then converted — so beforeSend sees values, not PropertyValue oneofs.
   const rawAutoProperties: Record<string, string> = {
     $projectId: projectId,
@@ -272,10 +346,8 @@ export const toEvent = (
     return null
   }
 
-  const autoProperties: Record<string, PropertyValue> = {}
-  mapPropsViaHeuristic(shaped.autoProperties, autoProperties, kind)
-  const customProperties: Record<string, PropertyValue> = {}
-  mapPropsViaHeuristic(shaped.customProperties, customProperties, kind)
+  const autoProperties = mapPropsViaHeuristic(shaped.autoProperties, kind, true)
+  const customProperties = mapPropsViaHeuristic(shaped.customProperties, kind, false)
 
   let event: Event
   try {

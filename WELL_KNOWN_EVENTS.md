@@ -7,7 +7,7 @@ properties: pass one of these strings to `track()` and your editor completes and
 payload. Any other string is accepted as a **custom** event.
 
 Typing is **compile-time only**. At runtime every event — well-known or custom — takes the same
-path; the SDK does not validate properties client-side. The constraints below are enforced
+path; the SDK checks no property against its schema. The constraints below are enforced
 **server-side** and shown here for reference. Extra properties beyond the ones listed are always
 allowed and sent as custom properties.
 

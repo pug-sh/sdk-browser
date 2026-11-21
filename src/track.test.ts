@@ -1,9 +1,12 @@
+import { create } from '@bufbuild/protobuf'
+import { DurationSchema, durationFromMs, timestampFromMs } from '@bufbuild/protobuf/wkt'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { configureBeforeSend, toEvent } from './track.js'
 
 const PROJECT_ID = 'test-project'
 const SESSION_ID = '01234567-0123-7123-8123-012345678901'
 const DISTINCT_ID = 'anon-01234567-0123-7123-8123-012345678901'
+const ID = { sessionId: SESSION_ID, distinctId: DISTINCT_ID }
 
 let warnSpy: ReturnType<typeof vi.spyOn>
 let errorSpy: ReturnType<typeof vi.spyOn>
@@ -244,19 +247,10 @@ describe('JS heuristic (custom events)', () => {
     )
   })
 
-  it('drops object containing bigint (JSON.stringify throws), keeps event', () => {
-    // JSON.stringify({ id: 1n }) throws TypeError; jsValueToPropertyValue's catch returns null,
-    // and the per-key warn fires at the call site.
-    const ev = toEvent(
-      PROJECT_ID,
-      'my_event',
-      { sessionId: SESSION_ID, distinctId: DISTINCT_ID },
-      { meta: { id: 1n }, ok: 'kept' },
-    )
-    expect(ev).not.toBeNull()
-    expect(ev!.customProperties.meta).toBeUndefined()
-    expect(ev!.customProperties.ok).toBeDefined()
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"meta" on event "my_event" not representable'))
+  it('writes a bigint inside an object as a string, every digit kept', () => {
+    const ev = toEvent(PROJECT_ID, 'my_event', ID, { meta: { id: 9007199254740993n } })
+    expect(ev!.customProperties.meta?.value).toEqual({ case: 'stringValue', value: '{"id":"9007199254740993"}' })
+    expect(warnSpy).not.toHaveBeenCalled()
   })
 })
 
@@ -452,7 +446,6 @@ describe('toEvent cookieless identity', () => {
 })
 
 describe('beforeSend', () => {
-  const ID = { sessionId: SESSION_ID, distinctId: DISTINCT_ID }
   const str = (pv: { value: { value: unknown } } | undefined) => pv?.value.value
 
   afterEach(() => {
@@ -642,5 +635,117 @@ describe('beforeSend', () => {
     expect(toEvent(PROJECT_ID, 'my_event', ID)).toBeNull()
     configureBeforeSend(undefined)
     expect(toEvent(PROJECT_ID, 'my_event', ID)).not.toBeNull()
+  })
+})
+
+// The server fails a whole BatchCreate request on any of these, losing every event sent alongside.
+describe('rules the server fails a whole batch on', () => {
+  afterEach(() => {
+    configureBeforeSend(undefined)
+  })
+
+  it.each(['Order Completed', 'signup:started', 'checkout/step', 'café', ''])(
+    'drops an event whose kind is %j',
+    kind => {
+      expect(toEvent(PROJECT_ID, kind, ID)).toBeNull()
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(`Event ${JSON.stringify(kind)} dropped`))
+    },
+  )
+
+  it('keeps a kind made of letters, digits, _, . and -', () => {
+    expect(toEvent(PROJECT_ID, 'Checkout.step-2_done', ID)).not.toBeNull()
+    expect(warnSpy).not.toHaveBeenCalled()
+  })
+
+  it('drops an event whose kind is not a string, as plain JavaScript can pass', () => {
+    expect(toEvent(PROJECT_ID, 42 as unknown as string, ID)).toBeNull()
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Event 42 dropped: a kind must be a string, got number'),
+    )
+  })
+
+  it('drops a custom key starting with $ and keeps the event', () => {
+    const ev = toEvent(PROJECT_ID, 'signup', ID, { $plan: 'pro', ok: 'kept' })
+    expect(ev!.customProperties.$plan).toBeUndefined()
+    expect(ev!.customProperties.ok).toBeDefined()
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Property "$plan" on event "signup" skipped'))
+  })
+
+  it('drops keys a beforeSend hook adds against either $ rule and keeps the event', () => {
+    configureBeforeSend(e => {
+      e.autoProperties.plan = 'pro'
+      e.autoProperties.$locale = 'xx'
+      e.customProperties.$tier = 'gold'
+      e.customProperties.tier = 'gold'
+    })
+    const ev = toEvent(PROJECT_ID, 'signup', ID)
+    expect(ev!.autoProperties.plan).toBeUndefined()
+    expect(ev!.autoProperties.$locale?.value).toEqual({ case: 'stringValue', value: 'xx' })
+    expect(ev!.customProperties.$tier).toBeUndefined()
+    expect(ev!.customProperties.tier).toBeDefined()
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Auto-property "plan" on event "signup" skipped'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Property "$tier" on event "signup" skipped'))
+  })
+
+  it('skips a null or undefined $ key silently, as it would any other', () => {
+    toEvent(PROJECT_ID, 'signup', ID, { $plan: null, $gone: undefined })
+    expect(warnSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('Duration properties', () => {
+  const sent = (position: unknown) =>
+    toEvent(PROJECT_ID, 'video_pause', ID, { videoId: 'v1', position })?.customProperties.position?.value
+
+  it.each([
+    ['a { seconds, nanos } literal', { seconds: 90n, nanos: 500_000_000 }, '90.5s'],
+    ['durationFromMs()', durationFromMs(90_500), '90.5s'],
+    ['durationFromMs() of a fractional millisecond', durationFromMs(12.345678 * 1000), '12.345678s'],
+    ['create(DurationSchema)', create(DurationSchema, { seconds: 3600n }), '3600s'],
+    ['nanos alone', { nanos: 5 }, '0.000000005s'],
+    ['zero', { seconds: 0n }, '0s'],
+    ['number seconds, as plain JavaScript passes them', { seconds: 90, nanos: 500_000_000 }, '90.5s'],
+    ['fractional seconds, such as a currentTime', { seconds: 90.534 }, '90.534s'],
+    ['a negative duration', durationFromMs(-1_500), '-1.5s'],
+    ['a negative fraction of a second', { nanos: -500_000_000 }, '-0.5s'],
+    ['nanos past a whole second', { seconds: 1n, nanos: 1_500_000_000 }, '2.5s'],
+  ])('sends %s as a seconds string', (_label, position, expected) => {
+    expect(sent(position)).toEqual({ case: 'stringValue', value: expected })
+    expect(warnSpy).not.toHaveBeenCalled()
+  })
+
+  class Elapsed {
+    get seconds() {
+      return 30
+    }
+  }
+
+  it.each([
+    ['another key', { seconds: 30, label: 'timer' }, '{"seconds":30,"label":"timer"}'],
+    ['a bigint seconds and another key, which type-checks', { seconds: 5n, label: 'x' }, '{"seconds":"5","label":"x"}'],
+    ['a string seconds', { seconds: '30' }, '{"seconds":"30"}'],
+    ['no fields', {}, '{}'],
+    ['a class instance with a seconds getter', new Elapsed(), '{}'],
+    [
+      'the $typeName of a Timestamp',
+      timestampFromMs(5_000),
+      '{"$typeName":"google.protobuf.Timestamp","seconds":"5","nanos":0}',
+    ],
+  ])('sends an object with %s as JSON, not as a Duration', (_label, value, expected) => {
+    expect(sent(value)).toEqual({ case: 'stringValue', value: expected })
+    expect(warnSpy).not.toHaveBeenCalled()
+  })
+
+  it('drops only an object property whose getter throws', () => {
+    const ev = toEvent(PROJECT_ID, 'my_event', ID, {
+      ok: 'kept',
+      bag: {
+        get detail() {
+          throw new Error('boom')
+        },
+      },
+    })
+    expect(ev!.customProperties.ok).toBeDefined()
+    expect(ev!.customProperties.bag).toBeUndefined()
   })
 })

@@ -433,6 +433,7 @@ init('your-project-id', {
 - `autoProperties` values are always strings. `customProperties` values are whatever you passed to `track()`, so narrow with `typeof` before using one as a string.
 - `$projectId`, `$platform` and `$sdkVersion` are re-asserted after your hook — the backend keys on `$projectId` and cannot re-derive the other two, so removing them has no effect.
 - `sessionId` and `distinctId` are not exposed. They're top-level fields on the event, already gated by [tracking consent](#tracking-consent-api); use `cookieless` mode or `optOutTracking()` to suppress them.
+- A key you add must keep the `$` rule: `autoProperties` keys start with `$`, and `customProperties` keys don't. The SDK drops one that breaks it, with a warning, since the server would reject the whole batch.
 - Runs synchronously on every event — keep it cheap and side-effect-free.
 - **Fails closed:** if it throws or returns something malformed, the whole event is dropped rather than sent unredacted, and the SDK warns once per failure kind. When it throws, only the error's type is logged, never its message, so a hook that interpolates the value it was redacting can't re-surface it in the console.
 - Not available on the one-tag install: `data-options` is JSON, which can't carry a function. Passing a non-function `beforeSend` there drops **every** event. Use the [loader snippet](#script-tag-cdn) with a queued `init` call, or the npm package. One-tag pages still get the default param redaction above, which *is* JSON-configurable via `redactUrlParams`.
@@ -511,6 +512,8 @@ Sends a manual event. Custom event names are allowed:
 track('upgrade_clicked', { source: 'settings' })
 ```
 
+A name may hold only ASCII letters, digits, `_`, `.` and `-` (not `Order Completed` or `signup:started`), and a property key may not start with `$`, which is reserved for auto-properties. The server rejects a whole batch that breaks either rule, so the SDK drops such an event, or such a key, with a console warning before it is queued.
+
 Well-known event names get typed, autocompleted properties:
 
 ```ts
@@ -548,11 +551,13 @@ Every line the SDK logs is prefixed with `[Pug SDK]`, so filtering the console o
 
 The SDK ships a large set of **well-known event names** with typed, autocompleted properties — pass one to `track()` and your editor completes and type-checks the payload. Any other string is accepted as a custom event.
 
-Typing is **compile-time only**: at runtime every event takes the same path and the SDK does not validate properties client-side. Extra properties beyond the typed ones are always allowed and sent as custom properties.
+Typing is **compile-time only**: at runtime every event takes the same path and the SDK checks no property against its schema. Extra properties beyond the typed ones are always allowed and sent as custom properties.
 
 What the types do catch is a wrong type on a known field — `track('purchase', { amount: '49' })` is a compile error, since `amount` is a number. What they don't catch is anything only the server knows: field constraints (`amount > 0`, `currency` matching `^[A-Z]{3}$`), and required fields. Those are enforced server-side and surface as a rejected request, so the editor is your first line of defense and not your only one.
 
 A few fields are 64-bit integers and take a `bigint` rather than a `number` — `sizeBytes` on the file, export and chat-attachment events. Write them with the `n` suffix: `track('file_uploaded', { fileId: 'f1', sizeBytes: 1024n })`. `WELL_KNOWN_EVENTS.md` marks each one `bigint`. Property values may also be `Date`, which is sent as a timestamp.
+
+Media positions and chat durations — `position`, `fromPosition`, `toPosition`, `duration` and `muteDuration` — are protobuf `Duration`s: `{ seconds, nanos }` with a `bigint` `seconds`, such as `track('video_pause', { videoId: 'v1', position: { seconds: 90n, nanos: 500_000_000 } })`. `durationFromMs(video.currentTime * 1000)` from `@bufbuild/protobuf/wkt` builds one from milliseconds (list `@bufbuild/protobuf` in your own dependencies to import it), and without TypeScript `{ seconds: video.currentTime }` works too. The SDK sends it as the string `"90.5s"`, the form the Pug protos specify.
 
 See **[WELL_KNOWN_EVENTS.md](./WELL_KNOWN_EVENTS.md)** for the full list — each event's properties, types, and server-side constraints — grouped into these domains:
 

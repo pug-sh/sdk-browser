@@ -61,7 +61,7 @@ describe('beacon with keepalive fetch', () => {
   })
 
   it('posts the batch with keepalive, without credentials, and the key as a header', () => {
-    const ok = createTransport(`${ENDPOINT}/`, KEY).beacon([evt()])
+    const ok = createTransport(`${ENDPOINT}//`, KEY).beacon([evt()])
 
     expect(ok).toBe(true)
     const [url, init] = fetchMock.mock.calls[0]
@@ -104,7 +104,26 @@ describe('beacon with keepalive fetch', () => {
     expect(createTransport(ENDPOINT, KEY).beacon([evt()], onRejected)).toBe(true)
     await new Promise(resolve => setTimeout(resolve, 0))
 
-    expect(onRejected).toHaveBeenCalledTimes(1)
+    expect(onRejected).toHaveBeenCalledExactlyOnceWith('request failed')
+  })
+
+  it.each([400, 503])('tells the caller when the server answers %i', async status => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status }))
+    const onRejected = vi.fn()
+
+    expect(createTransport(ENDPOINT, KEY).beacon([evt()], onRejected)).toBe(true)
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(onRejected).toHaveBeenCalledExactlyOnceWith(`HTTP ${status}`)
+  })
+
+  it('does not report a keepalive request the server answered with 2xx', async () => {
+    const onRejected = vi.fn()
+
+    expect(createTransport(ENDPOINT, KEY).beacon([evt()], onRejected)).toBe(true)
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(onRejected).not.toHaveBeenCalled()
   })
 
   it('swallows a failed keepalive fetch, since the page may already be gone', async () => {
@@ -125,11 +144,11 @@ describe('beacon without keepalive support falls back to sendBeacon', () => {
     expect(createTransport(ENDPOINT, KEY).beacon([evt()])).toBe(false)
   })
 
-  it('appends the api key as an encoded ?api_key= param, strips one trailing slash, sends proto', () => {
+  it('appends the api key as an encoded ?api_key= param, strips trailing slashes, sends proto', () => {
     const sendBeacon = vi.fn(() => true)
     vi.stubGlobal('navigator', { sendBeacon })
 
-    const ok = createTransport(`${ENDPOINT}/`, KEY).beacon([evt()])
+    const ok = createTransport(`${ENDPOINT}//`, KEY).beacon([evt()])
 
     expect(ok).toBe(true)
     const [url, blob] = sendBeacon.mock.calls[0]

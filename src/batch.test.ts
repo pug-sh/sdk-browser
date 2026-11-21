@@ -121,7 +121,41 @@ describe('createBatchedTransport partial-acceptance reporting (C1)', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     expect(sendBatch).toHaveBeenCalledTimes(1)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1/2'))
+    expect(warnSpy).toHaveBeenCalledWith('Server accepted 1/2 events; 1 were dropped.')
+    warnSpy.mockRestore()
+  })
+
+  it('names the reasons the server gives', async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    sendBatch.mockResolvedValue(
+      create(BatchCreateResponseSchema, {
+        accepted: 0,
+        dropped: 2,
+        droppedByReason: { day_out_of_range: 1, salt_unavailable: 1 },
+      }),
+    )
+
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 2, maxWaitMs: 50 })
+    await t.send(evt('a'))
+    await t.send(evt('b'))
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Server accepted 0/2 events; 2 were dropped (day_out_of_range: 1, salt_unavailable: 1).',
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('names the reasons for an immediate send too', async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    send.mockResolvedValue(
+      create(BatchCreateResponseSchema, { accepted: 0, dropped: 1, droppedByReason: { day_out_of_range: 1 } }),
+    )
+
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 2, maxWaitMs: 50 })
+    await t.send(evt('a'), { immediate: true })
+
+    expect(warnSpy).toHaveBeenCalledWith('Server accepted 0/1 events; 1 were dropped (day_out_of_range: 1).')
     warnSpy.mockRestore()
   })
 
@@ -624,9 +658,10 @@ describe('cookieless loss reporting and flush fairness', () => {
 describe('a beacon that fails after the browser accepted it', () => {
   const consentedEvt = (id: string): Event =>
     create(EventSchema, { eventId: id, kind: 'k', sessionId: 's', distinctId: 'd' })
+  const cookielessEvt = (id: string): Event => create(EventSchema, { eventId: id, kind: 'k', cookieless: true })
   const sentIds = () => sendBatch.mock.calls.flatMap(([events]: [Event[]]) => events.map(e => e.eventId))
   const pageHideBeacon = (id: string) =>
-    (beacon.mock.calls as Array<[Event[], (() => void) | undefined]>).find(([events]) =>
+    (beacon.mock.calls as Array<[Event[], ((reason: string) => void) | undefined]>).find(([events]) =>
       events.some(e => e.eventId === id),
     )
 
@@ -637,11 +672,11 @@ describe('a beacon that fails after the browser accepted it', () => {
     await t.send(consentedEvt('a'))
     firePagehide()
 
-    pageHideBeacon('a')?.[1]?.()
+    pageHideBeacon('a')?.[1]?.('request failed')
     await vi.advanceTimersByTimeAsync(50)
 
     expect(sentIds()).toEqual(['a'])
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 events were queued again'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('(request failed); 1 events were queued again'))
     warnSpy.mockRestore()
   })
 
@@ -654,11 +689,85 @@ describe('a beacon that fails after the browser accepted it', () => {
 
     // A consent withdrawal between the beacon and its failure: the events must not return.
     t.purgeQueue({ send: false })
-    pageHideBeacon('a')?.[1]?.()
+    pageHideBeacon('a')?.[1]?.('request failed')
     await vi.advanceTimersByTimeAsync(50)
 
     expect(sentIds()).toEqual([])
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('1 events were not delivered'))
+    errSpy.mockRestore()
+  })
+
+  it('does not write the page-hide batch back to the device after destroy()', async () => {
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    const project = freshProject()
+    const t = createBatchedTransport(ENDPOINT, KEY, project, { maxSize: 10, maxWaitMs: 50 })
+    await t.send(consentedEvt('a'))
+    firePagehide()
+    t.destroy()
+
+    pageHideBeacon('a')?.[1]?.('HTTP 503')
+    await vi.advanceTimersByTimeAsync(1500)
+
+    expect(localStorage.getItem(makeStorageKey(project, 'queue'))).toBeNull()
+    expect(sentIds()).toEqual([])
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('on page hide after the browser accepted it (HTTP 503); 1 events were not delivered'),
+    )
+    errSpy.mockRestore()
+  })
+
+  it('queues a cookieless event again in memory, never on the device', async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    sendBatch.mockResolvedValue(okResponse(1))
+    const project = freshProject()
+    const t = createBatchedTransport(ENDPOINT, KEY, project, { maxSize: 10, maxWaitMs: 50 })
+    await t.send(cookielessEvt('c'))
+    firePagehide()
+
+    pageHideBeacon('c')?.[1]?.('HTTP 503')
+
+    expect(localStorage.getItem(makeStorageKey(project, 'queue'))).toBeNull()
+    await vi.advanceTimersByTimeAsync(50)
+    expect(sentIds()).toEqual(['c'])
+    warnSpy.mockRestore()
+  })
+
+  // The transport reports a refusal (a non-2xx answer) the same way as a failure.
+  it('sends a refused page-hide batch once more, and the regular flush drops a permanent refusal', async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    sendBatch.mockRejectedValue(new RpcError('validation error', GrpcCode.InvalidArgument))
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 10, maxWaitMs: 50 })
+    await t.send(consentedEvt('a'))
+    firePagehide()
+
+    pageHideBeacon('a')?.[1]?.('HTTP 400')
+    await vi.advanceTimersByTimeAsync(500)
+
+    expect(sentIds()).toEqual(['a'])
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('(HTTP 400); 1 events were queued again'))
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Permanent error, 1 events dropped'),
+      expect.any(RpcError),
+    )
+    warnSpy.mockRestore()
+    errSpy.mockRestore()
+  })
+
+  it('reports a reset() beacon that fails after acceptance, without queueing it again', async () => {
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {})
+    sendBatch.mockResolvedValue(okResponse(1))
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 10, maxWaitMs: 50 })
+    await t.send(consentedEvt('a'))
+    t.purgeQueue({ send: true })
+
+    pageHideBeacon('a')?.[1]?.('HTTP 401')
+    await vi.advanceTimersByTimeAsync(50)
+
+    expect(sentIds()).toEqual([])
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('during reset after the browser accepted it (HTTP 401); 1 events were not delivered'),
+    )
     errSpy.mockRestore()
   })
 
@@ -668,9 +777,11 @@ describe('a beacon that fails after the browser accepted it', () => {
     await t.send(consentedEvt('a'))
     t.destroy()
 
-    pageHideBeacon('a')?.[1]?.()
+    pageHideBeacon('a')?.[1]?.('HTTP 401')
 
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('during destroy() after the browser accepted it'))
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('during destroy() after the browser accepted it (HTTP 401)'),
+    )
     errSpy.mockRestore()
   })
 })
@@ -698,6 +809,35 @@ describe('rollback messaging after a concurrent purge', () => {
     await vi.advanceTimersByTimeAsync(10)
 
     expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('will retry'), expect.anything())
+    warnSpy.mockRestore()
+  })
+
+  // An immediate send holds its event outside the queues, so the purge cannot reach it.
+  it('does not queue a failed immediate send again once the queues were purged', async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    let rejectSend: (err: unknown) => void = () => {}
+    send.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSend = reject
+        }),
+    )
+    sendBatch.mockResolvedValue(okResponse(1))
+    const project = freshProject()
+    const t = createBatchedTransport(ENDPOINT, KEY, project, { maxSize: 10, maxWaitMs: 50 })
+
+    const sending = t.send(evt('a'), { immediate: true })
+    t.purgeQueue({ send: false })
+    rejectSend(new RpcError('down', GrpcCode.Unavailable))
+    await sending
+    await vi.advanceTimersByTimeAsync(1500)
+
+    expect(localStorage.getItem(makeStorageKey(project, 'queue'))).toBeNull()
+    expect(sendBatch).not.toHaveBeenCalled()
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('cleared while it was in flight'),
+      expect.any(RpcError),
+    )
     warnSpy.mockRestore()
   })
 })
@@ -791,6 +931,27 @@ describe('batch config validation against untrusted input', () => {
     expect(warnFor({ maxQueueSize: 1.5 }).join()).toContain('maxQueueSize')
     // maxWaitMs is a duration handed to setTimeout, which is happy with a fraction.
     expect(warnFor({ maxWaitMs: 1.5 })).toEqual([])
+  })
+
+  // BatchCreate takes at most 1000 events, and the server fails a larger batch whole. Fractional, so
+  // the cap is shown to run before the rounding.
+  it('caps maxSize at 1000, and maxWaitMs at the longest delay setTimeout takes', () => {
+    expect(warnFor({ maxSize: 5000.5 }).join()).toContain('using 1000.')
+    expect(warnFor({ maxWaitMs: 2 ** 31 }).join()).toContain('using 2147483647.')
+    expect(warnFor({ maxSize: 1000, maxQueueSize: 5000, maxWaitMs: 2_147_483_647 })).toEqual([])
+  })
+
+  it('sends 1000 events in one batch when maxSize asks for more', async () => {
+    sendBatch.mockResolvedValue(okResponse(1000))
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 5000, maxWaitMs: 60_000 })
+    for (let i = 0; i < 1000; i++) {
+      await t.send(evt(`e${i}`))
+    }
+
+    expect(sendBatch).toHaveBeenCalledTimes(1)
+    expect(sendBatch.mock.calls[0][0]).toHaveLength(1000)
+    warn.mockRestore()
   })
 
   it('treats an explicit undefined member as absent, silently', () => {

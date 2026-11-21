@@ -953,6 +953,18 @@ describe('beforeSend wiring', () => {
   })
 })
 
+describe('track() never throws', () => {
+  // Plain JavaScript can pass any kind, and a Symbol throws in every template string that names it.
+  it('drops a Symbol kind without throwing', async () => {
+    const { init, track } = await importPug()
+
+    init('project-id', { apiKey: 'api-key', autoCapture: false })
+
+    expect(() => track(Symbol('signup') as never)).not.toThrow()
+    expect(transportSpies.send).not.toHaveBeenCalled()
+  })
+})
+
 describe('crossSubdomainTracking wiring', () => {
   const CONSENT_KEY = makeStorageKey('project-id', 'consent')
 
