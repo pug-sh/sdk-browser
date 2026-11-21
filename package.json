@@ -80,7 +80,7 @@
     "@biomejs/biome": "2.6.5",
     "@bufbuild/protoc-gen-es": "^2.12.1",
     "esbuild": "0.28.2",
-    "jsdom": "^30.0.1",
+    "jsdom": "^31.0.0",
     "knip": "^6.32.2",
     "pkg-pr-new": "^0.0.92",
     "typescript": "^7.0.2",
