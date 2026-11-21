@@ -1,0 +1,62 @@
+{
+  "name": "@pug-sh/browser",
+  "version": "0.1.7",
+  "description": "Open-source product analytics SDK for the browser: autocaptures page views, clicks, scrolls and forms, cookieless by default.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "jsdelivr": "./dist/cdn/pug.min.js",
+  "unpkg": "./dist/cdn/pug.min.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "WELL_KNOWN_EVENTS.md",
+    "LICENSE"
+  ],
+  "homepage": "https://pug.sh/integrations",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pug-sh/sdk-browser.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pug-sh/sdk-browser/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.12.0",
+    "uuidv7": "^1.1.0"
+  },
+  "keywords": [
+    "product-analytics",
+    "analytics",
+    "web-analytics",
+    "autocapture",
+    "event-tracking",
+    "tracking",
+    "events",
+    "cookieless",
+    "privacy",
+    "consent",
+    "sessions",
+    "browser",
+    "web",
+    "sdk",
+    "nextjs",
+    "react",
+    "vue",
+    "open-source",
+    "self-hosted",
+    "pug"
+  ],
+  "author": "pug.sh",
+  "license": "MIT"
+}
