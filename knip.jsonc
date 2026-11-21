@@ -13,7 +13,6 @@
   // `make check-proto-pin` runs from prepublishOnly.
   "ignoreBinaries": ["make"],
   // knip doesn't resolve binaries invoked through `bun` (`bunx` and bare binaries resolve fine),
-  // and it doesn't read buf.gen.yaml: biome comes from package.json scripts, protoc-gen-es from
-  // buf.gen.yaml's `local:` plugin path.
-  "ignoreDependencies": ["@biomejs/biome", "@bufbuild/protoc-gen-es"]
+  // so it misses the `bun --bun biome` in package.json's scripts.
+  "ignoreDependencies": ["@biomejs/biome"]
 }
