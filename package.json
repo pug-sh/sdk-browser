@@ -1,6 +1,6 @@
 {
   "name": "@pug-sh/browser",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Open-source product analytics SDK for the browser: autocaptures page views, clicks, scrolls and forms, cookieless by default.",
   "type": "module",
   "main": "./dist/index.js",
