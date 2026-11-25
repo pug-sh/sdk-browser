@@ -44,6 +44,7 @@ affordance only; `toEvent` consults no schema, so well-known and custom events p
 | finite `number` | `intValue` if `Number.isSafeInteger`, else `doubleValue` |
 | `bigint` | `intValue` |
 | `Date` | `timestampValue`; `Date(NaN)` dropped |
+| protobuf `Duration`, or a plain object of only a `bigint` or `number` `seconds` and/or a `number` `nanos` | `durationValue`, rounded to the nanosecond and normalized; dropped past Duration's ±10,000 years |
 | array / object | `JSON.stringify` then string policy |
 | `null` / `undefined` | dropped **silently** — common and unactionable |
 
@@ -52,6 +53,24 @@ enforced as a code-point count.
 
 Every other drop is logged at the call site with the property key for grep-ability, since `track()`
 never throws and undiagnosed drops would mask real user bugs.
+
+### Why a Duration is checked here, not left to the server
+
+`create()` copies a Duration's fields unchecked, and both serializers throw on what it lets through.
+`toBinary` throws on fractional `nanos` in the batch layer, which treats that as permanent and drops
+every event batched with it. `toJson`, which persists the consented queue, also throws past Duration's
+±10,000 years and on `nanos` past a second or signed against `seconds`, failing every queue write
+while the event is queued. So `nanos` is rounded, since `durationFromMs()` of a fractional ms leaves
+float noise in it, then folded into `seconds` and re-split, and anything past ±10,000 years is dropped.
+
+The init form is recognized by shape, since there is no schema to say a key is a Duration. Requiring
+every key to be `seconds` or `nanos` keeps most JSON objects from being read as one. A number `seconds`
+(`{ seconds: 12.5 }`) and a lone `nanos` are the exceptions, sent as a duration rather than as their
+JSON text, because that is what a plain-JS caller writing one on a Duration field means. `{}` stays
+text: nothing tells it apart from an empty object.
+
+Sending a Duration needs a server and events worker at pug v0.0.65 or later: an older server drops the
+event (or, before v0.0.55, its whole batch), and an older worker sends the batch to the DLQ.
 
 ### The int-vs-double consequence
 
@@ -140,7 +159,7 @@ the title is still joinable.
 It **was** overloads — a narrow well-known one, then an `(event: string, props?: Record<string,
 JsonValue>)` fallback. That meant a wrong type on a known field never errored: TypeScript abandoned the
 failed first overload, matched the permissive fallback (a string is a fine `JsonValue`), and the bad
-payload compiled and shipped to be rejected server-side. **The fallback silently absorbed exactly the
+payload compiled and shipped, with nothing downstream to catch it. **The fallback silently absorbed exactly the
 mistakes the typing existed to catch.**
 
 One signature leaves nothing to fall through to, so the error lands on the offending property.
@@ -173,10 +192,18 @@ either half.
 
 ### Why props resolve to `PropValue`, not `JsonValue`
 
-`Record<string, PropValue>` (`JsonValue | bigint | Date`) mirrors what `jsValueToPropertyValue` accepts
-at runtime. protobuf-es maps proto `int64` to `bigint`, so under a bare `JsonValue` bag the int64
-fields on five well-known events (`file_uploaded`, `file_downloaded`, `export_completed`,
-`chat_attachment_uploaded`, `chat_attachment_downloaded`) were **unwritable in every spelling** —
-`number` failed the message shape and `bigint` failed the index signature.
+`Record<string, PropValue>` (`JsonValue | bigint | Date | MessageInitShape<typeof DurationSchema>`)
+follows what `jsValueToPropertyValue` accepts at runtime. protobuf-es maps proto `int64` to `bigint`,
+so under a bare `JsonValue` bag the int64 fields on five well-known events (`file_uploaded`,
+`file_downloaded`, `export_completed`, `chat_attachment_uploaded`, `chat_attachment_downloaded`) were
+**unwritable in every spelling** — `number` failed the message shape and `bigint` failed the index
+signature. The Duration fields on the media events, `chat_call_left` and `chat_member_muted` could
+take only a lone `nanos`: neither `{ seconds: 12n }` nor `durationFromMs()`'s message (a `bigint`
+`seconds`, `Uint8Array`s in `$unknown`) is a `JsonValue`.
+
+It is looser than the runtime in one case. On a custom key the union admits a Duration init with an
+extra key, `{ seconds: 5n, unit: 'ms' }` or the typo `nano`, which the runtime drops: a union's
+excess-property check passes any key some member allows, and `JsonObject`'s index signature allows
+every key. No type can close that without giving up the init form.
 
 The old permissive overload had absorbed that silently; removing it turned it into a hard error.

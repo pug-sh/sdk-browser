@@ -137,6 +137,68 @@ describe('createBatchedTransport partial-acceptance reporting (C1)', () => {
     expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('accepted'))
     warnSpy.mockRestore()
   })
+
+  it("names the server's drop reasons and each invalid event's violations", async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    sendBatch.mockResolvedValue(
+      create(BatchCreateResponseSchema, {
+        accepted: 1,
+        dropped: 1,
+        droppedByReason: { invalid_event: 1 },
+        invalidEvents: [{ index: 1, violations: ['custom_properties["position"]: value is required'] }],
+      }),
+    )
+
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 2, maxWaitMs: 50 })
+    await t.send(evt('a'))
+    await t.send(evt('video_play'))
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Server accepted 1/2 events, dropping 1 invalid_event. Invalid events: "video_play": custom_properties["position"]: value is required',
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('lists only the first few invalid events', async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    const kinds = ['a', 'b', 'c', 'd', 'e']
+    sendBatch.mockResolvedValue(
+      create(BatchCreateResponseSchema, {
+        dropped: 5,
+        droppedByReason: { invalid_event: 5 },
+        invalidEvents: kinds.map((_, index) => ({ index, violations: ['bad'] })),
+      }),
+    )
+
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject(), { maxSize: 5, maxWaitMs: 50 })
+    for (const kind of kinds) {
+      await t.send(evt(kind))
+    }
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"c": bad | and 2 more'))
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('"d"'))
+    warnSpy.mockRestore()
+  })
+
+  it('reports an immediate send the server dropped', async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    send.mockResolvedValue(
+      create(BatchCreateResponseSchema, {
+        dropped: 1,
+        droppedByReason: { invalid_event: 1 },
+        invalidEvents: [{ index: 0, violations: ['bad'] }],
+      }),
+    )
+
+    const t = createBatchedTransport(ENDPOINT, KEY, freshProject())
+    await t.send(evt('signup'), { immediate: true })
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('0/1 events, dropping 1 invalid_event'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"signup": bad'))
+    warnSpy.mockRestore()
+  })
 })
 
 describe('cookieless queue routing', () => {

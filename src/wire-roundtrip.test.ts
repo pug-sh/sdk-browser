@@ -1,6 +1,6 @@
 import { create, equals, fromBinary, toBinary } from '@bufbuild/protobuf'
 import { reflect } from '@bufbuild/protobuf/reflect'
-import { timestampFromMs } from '@bufbuild/protobuf/wkt'
+import { durationFromMs, timestampFromMs } from '@bufbuild/protobuf/wkt'
 import { describe, expect, it } from 'vitest'
 import { PropertyValueSchema } from './gen/common/v1/property_value_pb.js'
 import { SubscribeRequestSchema } from './gen/sdk/devices/v1/devices_pb.js'
@@ -42,6 +42,7 @@ describe('wire round-trip (validate deps stripped)', () => {
       { value: { case: 'doubleValue', value: 3.14159 } },
       { value: { case: 'boolValue', value: true } },
       { value: { case: 'timestampValue', value: timestampFromMs(1_700_000_000_000) } },
+      { value: { case: 'durationValue', value: durationFromMs(-1_500) } },
     ] as const
     for (const init of cases) {
       const { back } = roundTrips(PropertyValueSchema, init)
@@ -78,8 +79,7 @@ describe('wire round-trip (validate deps stripped)', () => {
 
   // This proto is `edition = "2023"`, so presence is EXPLICIT: setting sessionId to '' emits the
   // field (length-delimited, zero length) while omitting it emits nothing at all. protovalidate
-  // then applies `string.uuid` to the *set* empty string and rejects it — and because the batch
-  // rule is a message-level CEL with .all(), one such event fails a batch of up to 1000.
+  // then applies `string.uuid` to the *set* empty string, and the server drops the event.
   //
   // The previous guard for this was `expect(bytes.length).toBeLessThan(40)`, which passed for the
   // good encoding (9 B) AND the bad one (13 B), and would have failed outright against a real

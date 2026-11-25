@@ -9,10 +9,11 @@ operations).
 ## `configureProfile` and the reserved-prefix rejection
 
 Restores any persisted `externalId` from a previous `identify()` — **rejecting and removing** one that
-starts with `RESERVED_DISTINCT_ID_PREFIX` (`cookieless-`, shared with `identify()`'s input check).
+starts with a reserved prefix (`cookieless-` or `crawler-`, matched by `reservedPrefixOf`, shared with
+`identify()`'s input check).
 
 A device poisoned by an older SDK would otherwise replay it as `distinctId` forever and have **every
-batch rejected wholesale**. Mirrors `getAnonymousId()`'s `anon-` validation.
+event dropped** by the server. Mirrors `getAnonymousId()`'s `anon-` validation.
 
 The re-write that refreshes a cookie-backed store's expiry happens **only when `isGranted()`** — called
 bare, with no fail-open coalesce, since the head guard has already rejected a non-function gate. The
@@ -30,14 +31,12 @@ if (isTrackingEnabled()) await identify(id)
 takes the branch and identifies nobody. A debug-gated message is invisible to exactly the integrator
 debugging that.
 
-## The reserved prefix on input
+## The reserved prefixes on input
 
-`identify()` rejects an `externalId` starting with `cookieless-`, which the server uses for derived
-cookieless identities and enforces with a message-level CEL rule over the whole `BatchCreateRequest`.
-
-Accepting one would persist it as the `externalId`, making it the `distinctId` on every later event and
-rejecting **every batch containing that user** (`InvalidArgument`, classified permanent, so batches are
-committed and dropped) with nothing pointing back at the `identify()` that caused it.
+`identify()` rejects an `externalId` starting with `cookieless-` or `crawler-`, the prefixes of the ids
+the server derives for cookieless and `crawler_request` events. The server's Identify refuses them too
+(`external_id.reserved_prefix`, `external_id.reserved_crawler_prefix`) before `markIdentified()` stores
+anything, so this check only fails fast, with a message naming the prefix.
 
 ## `clearProfile()` vs `destroyProfile()`
 

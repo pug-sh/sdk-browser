@@ -1072,15 +1072,16 @@ describe('cookieless mode', () => {
     expect(logSpies.debug).toHaveBeenCalledWith(expect.stringContaining('denied'))
   })
 
-  // The server reserves this prefix for cookieless identities and rejects the ENTIRE batch
-  // containing an offending distinct_id, so one bad identify() poisons every later batch for
-  // that user with no signal pointing back at the cause.
-  it('identify() rejects an externalId using the reserved cookieless- prefix', async () => {
+  // The server's Identify refuses these prefixes too; the client check fails fast, without a request.
+  it.each([
+    ['cookieless-', 'cookieless-42'],
+    ['crawler-', 'crawler-42'],
+  ])('identify() rejects an externalId using the reserved %s prefix', async (prefix, externalId) => {
     const { init, identify } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })
-    await identify('cookieless-42')
+    await identify(externalId)
     expect(unaryCallSpy).not.toHaveBeenCalled()
-    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining('reserved'))
+    expect(logSpies.error).toHaveBeenCalledWith(expect.stringContaining(`reserved "${prefix}"`))
   })
 
   it('setTrackingConsent granted->cookieless purges identity; ->granted mints nothing eagerly', async () => {

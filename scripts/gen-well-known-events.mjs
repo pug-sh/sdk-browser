@@ -9,7 +9,7 @@ import { getExtension } from '@bufbuild/protobuf'
 //   1. src/well-known-events.generated.ts — a TYPE-ONLY registry mapping every web
 //      well-known event name to its protobuf *PropertiesSchema *type*.
 //   2. WELL_KNOWN_EVENTS.md — the human reference (linked from README), listing every
-//      web event with its property names, JS types, and server-side constraints.
+//      web event with its property names, JS types, and documented constraints.
 //
 // It introspects the schemas from a throwaway compile of src/gen produced by
 // `make typed-events` (tsc -p tsconfig.gen.json -> .codegen-tmp). We import that
@@ -231,13 +231,14 @@ properties: pass one of these strings to \`track()\` and your editor completes a
 payload. Any other string is accepted as a **custom** event.
 
 Typing is **compile-time only**. At runtime every event — well-known or custom — takes the same
-path; the SDK does not validate properties client-side. The constraints below are enforced
-**server-side** and shown here for reference. Extra properties beyond the ones listed are always
-allowed and sent as custom properties.
+path. The constraints below are documentation: neither the SDK nor the server enforces them, so an
+event that breaks one is stored as sent. Extra properties beyond the ones listed are always allowed
+and sent as custom properties.
 
-**Legend:** \`name\`\\* = required (server-side) · the type is the JS value you pass to \`track()\` ·
+**Legend:** \`name\`\\* = required · the type is the JS value you pass to \`track()\` ·
 \`>0\` / \`≥0\` / \`0–10\` = numeric range · \`ISO-4217\` = 3-letter uppercase currency code · \`≥0s\` =
-non-negative duration.
+non-negative duration · \`Duration\` = \`{ seconds, nanos }\` with a \`bigint\` \`seconds\`, e.g.
+\`{ seconds: 12n, nanos: 500_000_000 }\`.
 
 ${docSections}
 `

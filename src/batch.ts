@@ -1,4 +1,4 @@
-import type { Event } from './gen/sdk/events/v1/events_pb.js'
+import type { BatchCreateResponse, Event } from './gen/sdk/events/v1/events_pb.js'
 import { log } from './logger.js'
 import { createDefaultQueueStorage, createMemoryQueueStorage } from './queue-storage.js'
 import { GrpcCode, RpcError } from './rpc.js'
@@ -85,17 +85,25 @@ const PERMANENT_GRPC_CODES = new Set<GrpcCode>([
   GrpcCode.Unauthenticated,
 ])
 
-// The server accepts events per-event and reports the count (BatchCreateResponse.accepted). A
-// shortfall means it silently rejected some — surface it, since committing the batch erases those
-// events without a trace. The SDK leaves validation to the server (no client-side field checks),
-// so this warn is the only signal an operator gets that otherwise-valid track() calls are dropping.
-const warnIfPartiallyAccepted = (accepted: number, sent: number) => {
-  if (accepted < sent) {
-    log.warn(
-      `Server accepted ${accepted}/${sent} events; ${sent - accepted} were rejected and dropped. ` +
-        "Check event validity (kind must match ^[a-zA-Z0-9_.-]+$; custom-property keys must not start with '$').",
-    )
+const MAX_INVALID_REPORTED = 3
+
+// A 200 can still drop events: the server validates each one alone and keeps the rest. Committing
+// the batch erases the dropped ones, so this warn, carrying the server's reasons, is their only trace.
+const reportDropped = (res: BatchCreateResponse, batch: readonly Event[]) => {
+  if (res.accepted >= batch.length) {
+    return
   }
+  const reasons = Object.entries(res.droppedByReason).map(([reason, n]) => `${n} ${reason}`)
+  const invalid = res.invalidEvents
+    .slice(0, MAX_INVALID_REPORTED)
+    .map(({ index, violations }) => `"${batch[index]?.kind}": ${violations.join('; ')}`)
+  if (res.invalidEvents.length > MAX_INVALID_REPORTED) {
+    invalid.push(`and ${res.invalidEvents.length - MAX_INVALID_REPORTED} more`)
+  }
+  log.warn(
+    `Server accepted ${res.accepted}/${batch.length} events, dropping ${reasons.join(', ') || 'the rest'}.` +
+      (invalid.length > 0 ? ` Invalid events: ${invalid.join(' | ')}` : ''),
+  )
 }
 
 const isPermanentError = (err: unknown) => {
@@ -347,7 +355,7 @@ export const createBatchedTransport = (
     inner
       .sendBatch(batch)
       .then(res => {
-        warnIfPartiallyAccepted(res.accepted, batch.length)
+        reportDropped(res, batch)
         settle('commit')
       })
       .catch(err => {
@@ -452,7 +460,7 @@ export const createBatchedTransport = (
       if (options?.immediate) {
         try {
           const res = await inner.send(event)
-          warnIfPartiallyAccepted(res.accepted, 1)
+          reportDropped(res, [event])
         } catch (err) {
           if (isPermanentError(err)) {
             log.error('Permanent error sending event, dropping:', err)

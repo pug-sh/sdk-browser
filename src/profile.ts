@@ -2,7 +2,7 @@ import { uuidv7 } from 'uuidv7'
 import { log } from './logger.js'
 import { type PersistentStore, resolveStore } from './persistence.js'
 import type { GrantedGate } from './tracking-consent.js'
-import { makeStorageKey, RESERVED_DISTINCT_ID_PREFIX } from './utils.js'
+import { makeStorageKey, reservedPrefixOf } from './utils.js'
 
 let storageKey = ''
 let externalIdKey = ''
@@ -40,22 +40,21 @@ export const configureProfile = (
   // called bare, no fail-open coalesce: the head guard has already rejected a non-function gate.
   const stored = store?.getItem(externalIdKey)
   if (stored) {
-    // The reserved prefix belongs to the server's derived cookieless identities. identify() rejects
-    // it as input, but that check cannot help a device already carrying one — written by an SDK
+    // The reserved prefixes belong to ids the server derives itself. identify() rejects them as
+    // input, but that check cannot help a device already carrying one — written by an SDK
     // version predating it, or by a sibling subdomain still running one via the shared cookie.
-    // Restoring it makes it the distinctId on every later event, and the server's message-level CEL
-    // rule then rejects the ENTIRE batch as InvalidArgument, which the batch layer classifies
-    // permanent — so every batch containing this user is committed and dropped, silently.
+    // Restoring it makes it the distinctId on every later event, and the server drops each one.
     // Removed rather than ignored, so the device is healed instead of merely tolerated.
-    if (stored.startsWith(RESERVED_DISTINCT_ID_PREFIX)) {
+    const reserved = reservedPrefixOf(stored)
+    if (reserved) {
       log.warn(
-        `Stored external ID uses the reserved "${RESERVED_DISTINCT_ID_PREFIX}" prefix, discarding it. The user will be treated as anonymous until identify() is called again.`,
+        `Stored external ID uses the reserved "${reserved}" prefix, discarding it. The user will be treated as anonymous until identify() is called again.`,
       )
       // Checked, not discarded: the message above claims the device was healed, and a failed
       // removal means the poisoned value is re-read on every later init() while it says otherwise.
       if (store && !store.removeItem(externalIdKey)) {
         log.error(
-          `Failed to remove the reserved "${RESERVED_DISTINCT_ID_PREFIX}" external ID from storage; it will be re-read on the next page load.`,
+          `Failed to remove the reserved "${reserved}" external ID from storage; it will be re-read on the next page load.`,
         )
       }
     } else {

@@ -1,4 +1,5 @@
 import type { JsonValue, MessageInitShape } from '@bufbuild/protobuf'
+import type { DurationSchema } from '@bufbuild/protobuf/wkt'
 import type { WellKnownSchemaMap } from './well-known-events.generated.js'
 
 /** Options passed to `track()`. `immediate` bypasses batching; `timestamp` overrides the current time (epoch ms). */
@@ -13,12 +14,13 @@ export type WellKnownEventName = keyof WellKnownSchemaMap
 export type WellKnownEventPropsMap = { [K in WellKnownEventName]: MessageInitShape<WellKnownSchemaMap[K]> }
 
 /**
- * A property value the SDK can send: `JsonValue` plus `bigint` (→ `intValue`) and `Date` (→
- * `timestampValue`), mirroring what `jsValueToPropertyValue` accepts at runtime. The extras are
- * load-bearing — protobuf-es maps proto `int64` to `bigint`, so under a bare `JsonValue` bag the
- * int64 fields on five well-known events are unwritable in every spelling.
+ * A property value the SDK can send: `JsonValue` plus `bigint` (→ `intValue`), `Date` (→
+ * `timestampValue`) and a protobuf `Duration` or its `{ seconds, nanos }` init (→ `durationValue`).
+ * Without the extras, well-known int64 fields could not be written at all, nor a Duration's `seconds`.
+ * Looser than the runtime in one case: on a custom key, a Duration init with an extra key compiles but
+ * is dropped.
  */
-export type PropValue = JsonValue | bigint | Date
+export type PropValue = JsonValue | bigint | Date | MessageInitShape<typeof DurationSchema>
 
 /**
  * Properties accepted for an event: a well-known event's typed shape plus arbitrary extras, or a

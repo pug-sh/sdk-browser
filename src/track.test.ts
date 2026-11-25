@@ -1,4 +1,7 @@
+import { create, equals, fromJson, toBinary, toJson } from '@bufbuild/protobuf'
+import { DurationSchema, durationFromMs, timestampFromMs } from '@bufbuild/protobuf/wkt'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { EventSchema } from './gen/sdk/events/v1/events_pb.js'
 import { configureBeforeSend, toEvent } from './track.js'
 
 const PROJECT_ID = 'test-project'
@@ -96,6 +99,23 @@ describe('well-known event names (runtime heuristic, no schema)', () => {
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
+  it('serializes a well-known Duration field as durationValue', () => {
+    const ev = toEvent(
+      PROJECT_ID,
+      'video_seeked',
+      { sessionId: SESSION_ID, distinctId: DISTINCT_ID },
+      { videoId: 'v1', fromPosition: { seconds: 12n, nanos: 500_000_000 }, toPosition: durationFromMs(90_000) },
+    )
+    expect(ev!.customProperties.fromPosition?.value).toEqual({
+      case: 'durationValue',
+      value: create(DurationSchema, { seconds: 12n, nanos: 500_000_000 }),
+    })
+    expect(ev!.customProperties.toPosition?.value).toEqual({
+      case: 'durationValue',
+      value: create(DurationSchema, { seconds: 90n }),
+    })
+  })
+
   it('serializes every provided prop — a well-known name gets no special-casing', () => {
     const ev = toEvent(
       PROJECT_ID,
@@ -147,6 +167,87 @@ describe('JS heuristic (custom events)', () => {
     const d = new Date('2026-01-15T10:30:00.000Z')
     const ev = toEvent(PROJECT_ID, 'my_event', { sessionId: SESSION_ID, distinctId: DISTINCT_ID }, { ts: d })
     expect(ev!.customProperties.ts?.value.case).toBe('timestampValue')
+  })
+
+  describe('Duration', () => {
+    const eventWith = (value: unknown) =>
+      toEvent(PROJECT_ID, 'my_event', { sessionId: SESSION_ID, distinctId: DISTINCT_ID }, { d: value as never })!
+    const durationOf = (value: unknown) => eventWith(value).customProperties.d?.value
+
+    it.each([
+      ['a protobuf Duration', durationFromMs(1_500), 1n, 500_000_000],
+      ['a { seconds, nanos } init', { seconds: 1n, nanos: 500_000_000 }, 1n, 500_000_000],
+      ['seconds alone', { seconds: 3n }, 3n, 0],
+      ['a number seconds', { seconds: 5 }, 5n, 0],
+      ['a fractional number seconds', { seconds: 1.1, nanos: 5 }, 1n, 100_000_005],
+      ['a negative fractional number seconds', { seconds: -12.5 }, -12n, -500_000_000],
+      ['nanos alone', { nanos: 250 }, 0n, 250],
+      ['a negative Duration', durationFromMs(-1_500), -1n, -500_000_000],
+      ['a negative sub-second Duration', { nanos: -500_000_000 }, 0n, -500_000_000],
+      ['nanos past one second', { seconds: 1n, nanos: 2_500_000_000 }, 3n, 500_000_000],
+      ['nanos signed against seconds', { seconds: 2n, nanos: -500_000_000 }, 1n, 500_000_000],
+      ['an unnormalized message', create(DurationSchema, { seconds: 1n, nanos: 2_500_000_000 }), 3n, 500_000_000],
+      ['a fractional-ms durationFromMs, rounded', durationFromMs(2_500.1), 2n, 500_100_000],
+      ['nanos rounding up into the next second', durationFromMs(999.9999999999999), 1n, 0],
+      ['negative nanos rounding into the next second', durationFromMs(-999.9999999999999), -1n, 0],
+      ['the +10,000-year edge', { seconds: 315_576_000_000n, nanos: 999_999_999 }, 315_576_000_000n, 999_999_999],
+      ['the -10,000-year edge', { seconds: -315_576_000_000n, nanos: -999_999_999 }, -315_576_000_000n, -999_999_999],
+    ])('maps %s to a normalized durationValue', (_, value, seconds, nanos) => {
+      const ev = eventWith(value)
+      expect(ev.customProperties.d?.value).toEqual({
+        case: 'durationValue',
+        value: create(DurationSchema, { seconds, nanos }),
+      })
+      // The persisted queue stores events with toJson, which rejects Durations toBinary accepts.
+      expect(equals(EventSchema, fromJson(EventSchema, toJson(EventSchema, ev)), ev)).toBe(true)
+    })
+
+    it.each([
+      ['infinite nanos', { seconds: 1n, nanos: Infinity }],
+      ['NaN nanos', { nanos: NaN }],
+      ['seconds past +10,000 years', { seconds: 315_576_000_001n }],
+      ['seconds past -10,000 years', { seconds: -315_576_000_001n }],
+      ['seconds past int64', { seconds: -(2n ** 63n) - 1n }],
+      ['NaN seconds', { seconds: NaN }],
+      ['a message past ±10,000 years', create(DurationSchema, { seconds: 315_576_000_001n })],
+      ['a Duration message with string seconds', { ...durationFromMs(0), seconds: '5' }],
+      [
+        'a seconds getter that throws',
+        {
+          get seconds(): bigint {
+            throw new Error('boom')
+          },
+        },
+      ],
+    ])('drops a Duration with %s, keeps the event, warns', (_, value) => {
+      const ev = toEvent(
+        PROJECT_ID,
+        'my_event',
+        { sessionId: SESSION_ID, distinctId: DISTINCT_ID },
+        { d: value as never, ok: 'kept' },
+      )
+      expect(ev!.customProperties.d).toBeUndefined()
+      expect(ev!.customProperties.ok).toBeDefined()
+      expect(() => toBinary(EventSchema, ev!)).not.toThrow()
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"d" on event "my_event" not representable'))
+    })
+
+    it('leaves an empty object to the JSON path', () => {
+      expect(durationOf({})).toEqual({ case: 'stringValue', value: '{}' })
+    })
+
+    it('leaves a Temporal.Duration-like object to the JSON path', () => {
+      const temporalLike = Object.create({ minutes: 1, seconds: 30, toJSON: () => 'PT1M30S' })
+      expect(durationOf(temporalLike)).toEqual({ case: 'stringValue', value: '"PT1M30S"' })
+    })
+
+    it('does not read a Timestamp message as a Duration', () => {
+      expect(durationOf(timestampFromMs(0))).toBeUndefined()
+    })
+
+    it('leaves a bigint seconds beside other keys to the JSON path, which drops it', () => {
+      expect(durationOf({ seconds: 5n, unit: 'ms' })).toBeUndefined()
+    })
   })
 
   it.each([NaN, Infinity, -Infinity])('drops non-finite number %p, keeps event, warns', n => {

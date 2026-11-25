@@ -10,6 +10,7 @@
  * Keep each `@ts-expect-error` call on a single line — the directive only applies to the line that
  * follows it, so a formatter-wrapped call would silently stop being checked.
  */
+import { durationFromMs } from '@bufbuild/protobuf/wkt'
 import {
   type AutoCaptureSelection,
   type TrackEventProps,
@@ -26,15 +27,21 @@ track('purchase', {})
 // Extra properties beyond the typed ones are always allowed, and sent as custom properties.
 track('purchase', { amount: 49, currency: 'USD', ourOwnField: 'allowed' })
 
-// ── int64 and Date properties must be writable ───────────────────────────────────────────────────
+// ── int64, Date and Duration properties must be writable ─────────────────────────────────────────
 // protobuf-es maps proto `int64` to `bigint`, so five well-known events (file_uploaded,
 // file_downloaded, export_completed, chat_attachment_uploaded, chat_attachment_downloaded) carry
 // `bigint` fields. The old permissive overload absorbed these silently; when it was removed they
 // became unwritable in *every* spelling — `number` fails the message shape, and `bigint` failed the
-// `Record<string, JsonValue>` half. `PropValue` is what makes both halves agree, and it matches what
-// `jsValueToPropertyValue` accepts at runtime (bigint -> intValue, Date -> timestampValue).
+// `Record<string, JsonValue>` half. `PropValue` is what makes both halves agree, following the runtime
+// mapping (bigint -> intValue, Date -> timestampValue, Duration -> durationValue).
 track('file_uploaded', { fileId: 'f1', sizeBytes: 1024n })
 track('my_custom_event', { when: new Date(), big: 7n })
+track('video_play', { videoId: 'v1', position: { seconds: 12n, nanos: 500_000_000 } })
+track('video_seeked', { videoId: 'v1', fromPosition: durationFromMs(12_500), toPosition: { seconds: 30n } })
+track('my_custom_event', { elapsed: { seconds: 3n } })
+
+// @ts-expect-error — a Duration field takes a Duration, not a number of seconds
+track('video_play', { videoId: 'v1', position: 12.5 })
 
 // ── Custom events: any other string, with loose props ────────────────────────────────────────────
 track('upgrade_clicked', { source: 'settings' })

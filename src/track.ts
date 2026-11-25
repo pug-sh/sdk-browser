@@ -1,5 +1,5 @@
-import { create } from '@bufbuild/protobuf'
-import { timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
+import { create, isMessage } from '@bufbuild/protobuf'
+import { DurationSchema, timestampFromMs, timestampNow } from '@bufbuild/protobuf/wkt'
 import { uuidv7 } from 'uuidv7'
 import { type PropertyValue, PropertyValueSchema } from './gen/common/v1/property_value_pb.js'
 import { type Event, EventSchema } from './gen/sdk/events/v1/events_pb.js'
@@ -146,6 +146,56 @@ const makeStringValue = (raw: string): PropertyValue => {
   return create(PropertyValueSchema, { value: { case: 'stringValue', value } })
 }
 
+const NANOS_PER_SECOND = 1_000_000_000n
+// Duration's ±10,000-year range. Past it toJson throws, failing every write of the persisted queue
+// while the event sits there, though toBinary would take anything inside int64.
+const MAX_DURATION_NANOS = 315_576_000_000n * NANOS_PER_SECOND + 999_999_999n
+
+type DurationFields = { seconds?: unknown; nanos?: unknown }
+
+const isDuration = (v: object): v is DurationFields => {
+  if (isMessage(v, DurationSchema)) {
+    return true
+  }
+  if (!isPlainBag(v)) {
+    return false
+  }
+  const { seconds, nanos } = v as DurationFields
+  return (
+    Object.keys(v).every(k => k === 'seconds' || k === 'nanos') &&
+    (seconds !== undefined || nanos !== undefined) &&
+    (seconds === undefined || typeof seconds === 'bigint' || typeof seconds === 'number') &&
+    (nanos === undefined || typeof nanos === 'number')
+  )
+}
+
+// A number is how plain JS writes `seconds`, fraction and all; split so the fraction keeps its precision.
+const secondsToNanos = (seconds: unknown): bigint | null => {
+  if (typeof seconds === 'bigint') {
+    return seconds * NANOS_PER_SECOND
+  }
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
+    return null
+  }
+  const whole = Math.trunc(seconds)
+  return BigInt(whole) * NANOS_PER_SECOND + BigInt(Math.round((seconds - whole) * 1e9))
+}
+
+// Rounded because durationFromMs() leaves float noise in nanos, which toBinary rejects. Summed and
+// re-split because toJson rejects nanos past ±1s or signed against seconds.
+const makeDurationValue = ({ seconds = 0n, nanos = 0 }: DurationFields): PropertyValue | null => {
+  const secondsAsNanos = secondsToNanos(seconds)
+  if (secondsAsNanos === null || typeof nanos !== 'number' || !Number.isFinite(nanos)) {
+    return null
+  }
+  const total = secondsAsNanos + BigInt(Math.round(nanos))
+  if (total > MAX_DURATION_NANOS || total < -MAX_DURATION_NANOS) {
+    return null
+  }
+  const value = create(DurationSchema, { seconds: total / NANOS_PER_SECOND, nanos: Number(total % NANOS_PER_SECOND) })
+  return create(PropertyValueSchema, { value: { case: 'durationValue', value } })
+}
+
 /**
  * Maps an untyped JS value to a PropertyValue oneof. Every property on every event flows through
  * here — there is no runtime schema, so well-known names get no special serialization. Returns null
@@ -158,6 +208,9 @@ const makeStringValue = (raw: string): PropertyValue => {
  *                      NaN/±Infinity dropped (non-finite doubles aren't representable)
  *   - bigint         → intValue
  *   - Date           → timestampValue (Date(NaN) dropped)
+ *   - Duration       → durationValue, rounded to the nanosecond: a protobuf Duration, or a plain
+ *                      object of only a bigint or number `seconds` and/or a number `nanos`;
+ *                      dropped past ±10,000 years
  *   - object/array   → JSON.stringify → stringValue (subject to truncation);
  *                      circular structures and toJSON returning undefined dropped
  *   - null/undefined → dropped (no oneof case fits)
@@ -193,7 +246,11 @@ const jsValueToPropertyValue = (v: unknown): PropertyValue | null => {
   }
   if (typeof v === 'object') {
     let json: string
+    // isDuration inside the try: a getter or proxy that throws must cost only this property.
     try {
+      if (isDuration(v)) {
+        return makeDurationValue(v)
+      }
       json = JSON.stringify(v)
     } catch {
       return null

@@ -257,11 +257,10 @@ describe('cross-subdomain identity', () => {
   })
 })
 
-// identify() rejects a `cookieless-` externalId, but the restore path had no such check — so a
+// identify() rejects a reserved-prefix externalId, but the restore path had no such check — so a
 // device poisoned by a pre-check SDK version (or by a sibling subdomain still running one, via the
-// shared cookie) kept sending it as distinctId forever. The server's message-level CEL rule then
-// rejects the WHOLE batch as InvalidArgument, which the batch layer classifies permanent, so every
-// batch containing that user is committed and dropped. Upgrading did not heal the device.
+// shared cookie) kept sending it as distinctId forever, and the server drops every event carrying
+// it. Upgrading did not heal the device.
 //
 // getAnonymousId() twenty lines away already validates its own `anon-` prefix and regenerates on
 // mismatch; this is the same posture for the other restored identifier.
@@ -271,8 +270,11 @@ describe('poisoned externalId restore', () => {
     vi.clearAllMocks()
   })
 
-  it('discards a restored externalId carrying the reserved cookieless- prefix', async () => {
-    localStorage.setItem(EXTERNAL_ID_KEY, persisted('cookieless-20260721-abc'))
+  it.each([
+    ['cookieless-', 'cookieless-20260721-abc'],
+    ['crawler-', 'crawler-customer-42'],
+  ])('discards a restored externalId carrying the reserved %s prefix', async (prefix, stored) => {
+    localStorage.setItem(EXTERNAL_ID_KEY, persisted(stored))
     vi.resetModules()
     const profile = await import('./profile.js')
     profile.configureProfile(PROJECT_ID, undefined, GRANTED)
@@ -282,7 +284,7 @@ describe('poisoned externalId restore', () => {
     // Removed, not merely ignored: leaving it means the next SDK version that drops the check
     // resurrects it, and the device stays poisoned across upgrades.
     expect(localStorage.getItem(EXTERNAL_ID_KEY)).toBeNull()
-    expect(logSpies.warn).toHaveBeenCalled()
+    expect(logSpies.warn).toHaveBeenCalledWith(expect.stringContaining(`"${prefix}"`))
   })
 
   it('still restores a legitimate externalId', async () => {

@@ -63,9 +63,8 @@ export const configureSession = (
   isGranted: GrantedGate,
 ): void => {
   // Assigned *before* the head guard: resolveSessionId() falls back to this id, so a throw first
-  // would leave it '' and stamp an empty sessionId on every event — which the proto's `string.uuid`
-  // rule rejects as InvalidArgument, classified permanent, so whole batches are dropped. Nothing
-  // below depends on the guard having run first.
+  // would leave it '' and stamp an empty sessionId on every event, each of which the server drops
+  // for failing the proto's `string.uuid` rule. Nothing below depends on the guard having run first.
   fallbackSessionId = uuidv7()
   // Fail loud at the head, uniformly with configureProfile and createCookieLayer.
   // @see docs/design-notes/tracking-consent.md#the-head-guards
