@@ -10,7 +10,7 @@
 # `make proto-latest` for the newest commit, set PROTO_COMMIT below, then
 # `make sync-protos && make protos` and review + commit the diff.
 PROTO_MODULE  := buf.build/pugsh/pug
-PROTO_COMMIT  := 1707192ba6e5470cbdf5e2ab382d08f5
+PROTO_COMMIT  := 432c927edc274179ad23f1498a6ad20d
 
 # Re-vendor proto/ from the pinned BSR commit. `buf export` is a read-only download; --path is
 # an allowlist and buf pulls in transitive imports (buf/validate, google WKTs) automatically,

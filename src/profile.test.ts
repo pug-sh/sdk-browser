@@ -259,9 +259,8 @@ describe('cross-subdomain identity', () => {
 
 // identify() rejects a `cookieless-` externalId, but the restore path had no such check — so a
 // device poisoned by a pre-check SDK version (or by a sibling subdomain still running one, via the
-// shared cookie) kept sending it as distinctId forever. The server's message-level CEL rule then
-// rejects the WHOLE batch as InvalidArgument, which the batch layer classifies permanent, so every
-// batch containing that user is committed and dropped. Upgrading did not heal the device.
+// shared cookie) kept sending it as distinctId forever, and the server drops every event carrying
+// it. Upgrading did not heal the device.
 //
 // getAnonymousId() twenty lines away already validates its own `anon-` prefix and regenerates on
 // mismatch; this is the same posture for the other restored identifier.

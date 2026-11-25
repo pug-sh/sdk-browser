@@ -770,10 +770,8 @@ export const identify = async (externalId: string, traits?: Record<string, JsonV
       log.error('identify() requires a non-empty externalId string.')
       return
     }
-    // The server reserves this prefix for cookieless-derived ids and enforces it with a CEL rule over
-    // the whole BatchCreateRequest. Accepting one would persist it as the externalId — the distinctId
-    // on every later event — so every batch containing this user would be rejected wholesale, with
-    // nothing pointing back at the identify() that caused it.
+    // Mirrors the server's own Identify rule (`external_id.reserved_prefix`), to fail fast with a
+    // message naming the prefix.
     if (externalId.startsWith(RESERVED_DISTINCT_ID_PREFIX)) {
       log.error(
         `identify() rejected: externalId must not start with the reserved "${RESERVED_DISTINCT_ID_PREFIX}" prefix, which the server uses for cookieless identities.`,

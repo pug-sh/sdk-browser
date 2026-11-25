@@ -480,11 +480,11 @@ await identify('user_123', {
 })
 ```
 
-- `externalId` must be a non-empty string, such as your database user ID or email.
+- `externalId` must be a non-empty string that stays the same for the user: your database user ID, not an email, which can change.
 - `traits` is an optional object of profile properties. Values should be JSON-compatible.
 - On the first identify call, the SDK includes the anonymous ID so anonymous events can be merged into the identified profile.
 - `identify()` returns a promise and never throws — invalid input, denied consent, cookieless mode, dry-run, and RPC failures are logged and the call resolves without sending.
-- `externalId` must not start with `cookieless-`; the server reserves that prefix for the identities it derives in cookieless mode, and rejects any batch carrying one.
+- `externalId` must not start with `cookieless-` or `crawler-`: the server reserves those prefixes for ids it derives itself, refuses them in `identify()`, and drops any event carrying one.
 - To branch on consent, check `getTrackingConsent() === 'granted'` — **not** `isTrackingEnabled()`, which is also `true` in cookieless mode, where `identify()` is disabled and resolves without doing anything.
 
 Use `reset()` when a user signs out or switches accounts:
@@ -550,11 +550,13 @@ The SDK ships a large set of **well-known event names** with typed, autocomplete
 
 Typing is **compile-time only**: at runtime every event takes the same path and the SDK does not validate properties client-side. Extra properties beyond the typed ones are always allowed and sent as custom properties.
 
-What the types do catch is a wrong type on a known field — `track('purchase', { amount: '49' })` is a compile error, since `amount` is a number. What they don't catch is anything only the server knows: field constraints (`amount > 0`, `currency` matching `^[A-Z]{3}$`), and required fields. Those are enforced server-side and surface as a rejected request, so the editor is your first line of defense and not your only one.
+What the types do catch is a wrong type on a known field — `track('purchase', { amount: '49' })` is a compile error, since `amount` is a number. What they don't catch is a broken field constraint (`amount > 0`, `currency` matching `^[A-Z]{3}$`) or a missing required field, and nothing else does: those constraints are documentation, not validation, so an event that breaks one is stored as sent. The server checks only the rules every event shares, such as `kind` matching `^[a-zA-Z0-9_.-]+$`. It drops an event that breaks one, keeps the rest of its batch, and the SDK logs a warning naming the rule.
 
 A few fields are 64-bit integers and take a `bigint` rather than a `number` — `sizeBytes` on the file, export and chat-attachment events. Write them with the `n` suffix: `track('file_uploaded', { fileId: 'f1', sizeBytes: 1024n })`. `WELL_KNOWN_EVENTS.md` marks each one `bigint`. Property values may also be `Date`, which is sent as a timestamp.
 
-See **[WELL_KNOWN_EVENTS.md](./WELL_KNOWN_EVENTS.md)** for the full list — each event's properties, types, and server-side constraints — grouped into these domains:
+Fields marked `Duration` — media positions, a call's length, a mute's length — take `{ seconds, nanos }` with a `bigint` `seconds`: `track('video_play', { videoId: 'v1', position: { seconds: 12n, nanos: 500_000_000 } })`, or `durationFromMs(12_500)` from `@bufbuild/protobuf/wkt` (add `@bufbuild/protobuf` to your own dependencies to import it). From plain JavaScript a number `seconds` works too, fraction included: `{ seconds: 12.5 }`. They are stored as a number of seconds, so they can be summed and averaged. Any property can carry one, and a self-hosted server and events worker must be at v0.0.65 or later to accept it.
+
+See **[WELL_KNOWN_EVENTS.md](./WELL_KNOWN_EVENTS.md)** for the full list — each event's properties, types, and documented constraints — grouped into these domains:
 
 [API](./WELL_KNOWN_EVENTS.md#api) · [App](./WELL_KNOWN_EVENTS.md#app) · [Auth](./WELL_KNOWN_EVENTS.md#auth) · [Billing](./WELL_KNOWN_EVENTS.md#billing) · [Chat](./WELL_KNOWN_EVENTS.md#chat) · [Commerce](./WELL_KNOWN_EVENTS.md#commerce) · [Discovery](./WELL_KNOWN_EVENTS.md#discovery) · [Error](./WELL_KNOWN_EVENTS.md#error) · [File](./WELL_KNOWN_EVENTS.md#file) · [Form](./WELL_KNOWN_EVENTS.md#form) · [Integration](./WELL_KNOWN_EVENTS.md#integration) · [Invitation](./WELL_KNOWN_EVENTS.md#invitation) · [Media](./WELL_KNOWN_EVENTS.md#media) · [Navigation](./WELL_KNOWN_EVENTS.md#navigation) · [Notification](./WELL_KNOWN_EVENTS.md#notification) · [Social](./WELL_KNOWN_EVENTS.md#social) · [Support](./WELL_KNOWN_EVENTS.md#support) · [Workspace](./WELL_KNOWN_EVENTS.md#workspace)
 

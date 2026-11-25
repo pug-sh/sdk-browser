@@ -1072,9 +1072,7 @@ describe('cookieless mode', () => {
     expect(logSpies.debug).toHaveBeenCalledWith(expect.stringContaining('denied'))
   })
 
-  // The server reserves this prefix for cookieless identities and rejects the ENTIRE batch
-  // containing an offending distinct_id, so one bad identify() poisons every later batch for
-  // that user with no signal pointing back at the cause.
+  // The server's Identify refuses this prefix too; the client check fails fast, without a request.
   it('identify() rejects an externalId using the reserved cookieless- prefix', async () => {
     const { init, identify } = await importPug()
     init('proj', { apiKey: 'k', trackingConsent: 'granted' })

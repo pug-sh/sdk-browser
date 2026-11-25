@@ -12,7 +12,7 @@ Restores any persisted `externalId` from a previous `identify()` — **rejecting
 starts with `RESERVED_DISTINCT_ID_PREFIX` (`cookieless-`, shared with `identify()`'s input check).
 
 A device poisoned by an older SDK would otherwise replay it as `distinctId` forever and have **every
-batch rejected wholesale**. Mirrors `getAnonymousId()`'s `anon-` validation.
+event dropped** by the server. Mirrors `getAnonymousId()`'s `anon-` validation.
 
 The re-write that refreshes a cookie-backed store's expiry happens **only when `isGranted()`** — called
 bare, with no fail-open coalesce, since the head guard has already rejected a non-function gate. The
@@ -33,11 +33,8 @@ debugging that.
 ## The reserved prefix on input
 
 `identify()` rejects an `externalId` starting with `cookieless-`, which the server uses for derived
-cookieless identities and enforces with a message-level CEL rule over the whole `BatchCreateRequest`.
-
-Accepting one would persist it as the `externalId`, making it the `distinctId` on every later event and
-rejecting **every batch containing that user** (`InvalidArgument`, classified permanent, so batches are
-committed and dropped) with nothing pointing back at the `identify()` that caused it.
+cookieless identities. The server's Identify refuses it too (`external_id.reserved_prefix`) before
+`markIdentified()` stores anything, so this check only fails fast, with a message naming the prefix.
 
 ## `clearProfile()` vs `destroyProfile()`
 

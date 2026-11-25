@@ -638,9 +638,8 @@ describe('consent gate', () => {
     // the pin above cannot see it: asserting the throw says nothing about what the module is left
     // holding. init() catches this TypeError, routes it through reportInitFailure and keeps running,
     // so resolveSessionId() is reached either way — and with the assignment moved below the guard it
-    // returns '', which the proto's `string.uuid` rule rejects as InvalidArgument. That code is
-    // classified permanent, so every batch carrying those events is committed and dropped rather
-    // than retried: total, silent event loss from one mis-wired argument.
+    // returns '', which fails the proto's `string.uuid` rule, so the server drops every event: total
+    // event loss from one mis-wired argument.
     destroySession()
     expect(() => (configureSession as (p: string, c?: unknown, s?: unknown, g?: unknown) => void)(PROJECT_ID)).toThrow(
       TypeError,

@@ -67,8 +67,7 @@ Each gated factory throws a `TypeError` at the head on a non-function gate. At t
   expired**, destroying its value;
 - `configureSession` assigns `fallbackSessionId` *before* its guard for the same class of reason —
   thrown first, `resolveSessionId()` returned `''` and every event carried an empty `sessionId`,
-  which the proto's `string.uuid` rule rejects as `InvalidArgument`, classified permanent, so whole
-  batches are committed and dropped.
+  which fails the proto's `string.uuid` rule, so the server drops every event.
 
 `init()` catches all three and routes them through `reportInitFailure`, which reports a `TypeError`
 at `log.error` naming it a **wiring error** rather than at `log.warn` alongside genuine environment

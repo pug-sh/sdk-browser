@@ -7,13 +7,14 @@ properties: pass one of these strings to `track()` and your editor completes and
 payload. Any other string is accepted as a **custom** event.
 
 Typing is **compile-time only**. At runtime every event — well-known or custom — takes the same
-path; the SDK does not validate properties client-side. The constraints below are enforced
-**server-side** and shown here for reference. Extra properties beyond the ones listed are always
-allowed and sent as custom properties.
+path. The constraints below are documentation: neither the SDK nor the server enforces them, so an
+event that breaks one is stored as sent. Extra properties beyond the ones listed are always allowed
+and sent as custom properties.
 
-**Legend:** `name`\* = required (server-side) · the type is the JS value you pass to `track()` ·
+**Legend:** `name`\* = required · the type is the JS value you pass to `track()` ·
 `>0` / `≥0` / `0–10` = numeric range · `ISO-4217` = 3-letter uppercase currency code · `≥0s` =
-non-negative duration.
+non-negative duration · `Duration` = `{ seconds, nanos }` with a `bigint` `seconds`, e.g.
+`{ seconds: 12n, nanos: 500_000_000 }`.
 
 ## API
 

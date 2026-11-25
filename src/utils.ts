@@ -1,8 +1,8 @@
 export const DEVICE_ID_KEY = 'pug_device_id'
 
 /**
- * Reserved by the server for the daily-rotating ids it derives for cookieless events, enforced by
- * the `batch.distinct_id_reserved_prefix` CEL rule over the whole BatchCreateRequest.
+ * Reserved by the server for the daily-rotating ids it derives for cookieless events: the
+ * `incoming_event.distinct_id_reserved_prefix` rule drops any event whose distinct_id carries it.
  *
  * Shared by `identify()` (which rejects it as input) and `configureProfile()` (which rejects it on
  * restore): a device poisoned before the input check existed would otherwise keep replaying it.

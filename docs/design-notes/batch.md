@@ -192,6 +192,10 @@ teardown.
 fallback, whenever `sendBeacon` is absent or blocked, not only on payload rejection. `true` means the
 browser accepted the request, not that it was delivered.
 
+A 200 can still drop events, since the server validates each event alone and keeps the rest. The warn
+names `droppedByReason` and the first three `invalidEvents` with their `kind` and violations, the only
+trace of them once the batch commits.
+
 ### Why the farewell send is a keepalive fetch
 
 `sendBeacon` always sends credentials, and its `application/proto` body is not CORS-safelisted, so a

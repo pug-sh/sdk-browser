@@ -200,7 +200,7 @@ is not granted.
 `markIdentified`, `clearProfile` (boolean), `destroyProfile`.
 
 `identify()` requires `isGranted()` and rejects an `externalId` starting with the reserved
-`cookieless-` prefix — accepting one rejects every batch containing that user.
+`cookieless-` prefix, failing fast on what the server's Identify would refuse anyway.
 
 ### `src/batch.ts` + `src/queue-storage.ts` → [design note](docs/design-notes/batch.md)
 

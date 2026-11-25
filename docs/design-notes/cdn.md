@@ -2,7 +2,7 @@
 
 `scripts/build-cdn.mjs` (plain node — `npm publish` runs `prepublishOnly` under node, not bun) bundles
 `src/cdn.ts` with esbuild into `dist/cdn/pug.min.js`, prints gzip size + SRI hash, and **fails the build
-over `GZIP_BUDGET_KB`** (45; ~42.9 KB today). Raising it is a deliberate, reviewable change.
+over `GZIP_BUDGET_KB`** (52; ~50.7 KB today). Raising it is a deliberate, reviewable change.
 
 ---
 
