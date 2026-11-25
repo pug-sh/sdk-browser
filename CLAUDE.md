@@ -199,8 +199,9 @@ is not granted.
 `configureProfile`, `getAnonymousId` (`"anon-<uuidv7>"`), `resolveDistinctId`, `isIdentified` /
 `markIdentified`, `clearProfile` (boolean), `destroyProfile`.
 
-`identify()` requires `isGranted()` and rejects an `externalId` starting with the reserved
-`cookieless-` prefix, failing fast on what the server's Identify would refuse anyway.
+`identify()` requires `isGranted()` and rejects an `externalId` starting with a reserved prefix
+(`cookieless-`, `crawler-`), failing fast on what the server's Identify would refuse anyway.
+`configureProfile` discards a restored one, which an older SDK may have stored.
 
 ### `src/batch.ts` + `src/queue-storage.ts` → [design note](docs/design-notes/batch.md)
 

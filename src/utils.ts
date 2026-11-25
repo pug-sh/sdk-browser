@@ -1,13 +1,10 @@
 export const DEVICE_ID_KEY = 'pug_device_id'
 
-/**
- * Reserved by the server for the daily-rotating ids it derives for cookieless events: the
- * `incoming_event.distinct_id_reserved_prefix` rule drops any event whose distinct_id carries it.
- *
- * Shared by `identify()` (which rejects it as input) and `configureProfile()` (which rejects it on
- * restore): a device poisoned before the input check existed would otherwise keep replaying it.
- */
-export const RESERVED_DISTINCT_ID_PREFIX = 'cookieless-'
+/** Prefixes of the ids the server derives itself: Identify refuses them, ingest drops events carrying one. */
+const RESERVED_DISTINCT_ID_PREFIXES = ['cookieless-', 'crawler-'] as const
+
+export const reservedPrefixOf = (id: string): string | undefined =>
+  RESERVED_DISTINCT_ID_PREFIXES.find(prefix => id.startsWith(prefix))
 
 /** Default backend base URL used when `init()` is called without an explicit `endpoint`. */
 export const DEFAULT_ENDPOINT = 'https://api.pugs.dev'

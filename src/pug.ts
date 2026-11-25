@@ -54,7 +54,7 @@ import {
   DEVICE_ID_KEY,
   isAutomatedBrowser,
   isAutomationSuppressed,
-  RESERVED_DISTINCT_ID_PREFIX,
+  reservedPrefixOf,
   safeStringify,
   setAutomationSuppressed,
 } from './utils.js'
@@ -770,11 +770,12 @@ export const identify = async (externalId: string, traits?: Record<string, JsonV
       log.error('identify() requires a non-empty externalId string.')
       return
     }
-    // Mirrors the server's own Identify rule (`external_id.reserved_prefix`), to fail fast with a
-    // message naming the prefix.
-    if (externalId.startsWith(RESERVED_DISTINCT_ID_PREFIX)) {
+    // Mirrors the server's own Identify rules (`external_id.reserved_prefix`,
+    // `external_id.reserved_crawler_prefix`), to fail fast with a message naming the prefix.
+    const reserved = reservedPrefixOf(externalId)
+    if (reserved) {
       log.error(
-        `identify() rejected: externalId must not start with the reserved "${RESERVED_DISTINCT_ID_PREFIX}" prefix, which the server uses for cookieless identities.`,
+        `identify() rejected: externalId must not start with the reserved "${reserved}" prefix, which the server uses for ids it derives itself.`,
       )
       return
     }
