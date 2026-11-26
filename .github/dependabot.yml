@@ -5,10 +5,18 @@ updates:
   - package-ecosystem: "bun"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      bun-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # ci.yml pins actions by commit sha; without this they would never move again.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
