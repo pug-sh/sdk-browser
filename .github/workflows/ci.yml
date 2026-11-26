@@ -29,8 +29,9 @@ jobs:
       # github_token authenticates the buf-binary download from GitHub releases so the
       # release-asset lookup isn't rate-limited on shared runner IPs (unauthenticated GitHub
       # API allows only 60 req/hr/IP). The default GITHUB_TOKEN suffices — no BSR access needed.
-      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+      - uses: bufbuild/buf-action@37ac33d8960807670a6e9719080e885197b09cc6 # v1.7.0
         with:
+          setup_only: true
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - run: bun install --frozen-lockfile
